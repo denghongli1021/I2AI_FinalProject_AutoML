@@ -1,0 +1,11 @@
+﻿dataset,type,task,n_train,n_test,n_features_raw,elapsed_sec,accuracy,f1_macro
+1049_pc4,tabular,classification,1166,292,37,41.4,0.910958904109589,0.7511472400681789
+1050_pc3,tabular,classification,1250,313,37,32.6,0.8881789137380192,0.5214694448084567
+1053_jm1,tabular,classification,8708,2177,21,125.2,0.8130454754248967,0.5934349517672641
+1063_kc2,tabular,classification,417,105,21,17.2,0.8,0.6224961479198767
+1067_kc1,tabular,classification,1687,422,21,31.3,0.8601895734597157,0.6140742462993103
+CLS_ACSF1,timeseries,classification,160,40,1460,36.0,0.85,0.8423015873015872
+CLS_Adiac,timeseries,classification,624,157,176,202.3,0.7707006369426752,0.7666413166413166
+CLS_AllGestureWiimoteX,timeseries,classification,800,200,500,91.1,0.7,0.7027593892140848
+CLS_AllGestureWiimoteY,timeseries,classification,800,200,500,103.6,0.735,0.7322579864525411
+CLS_AllGestureWiimoteZ,timeseries,classification,800,200,500,108.2,0.63,0.6215739191069296

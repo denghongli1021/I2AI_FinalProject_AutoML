@@ -1,0 +1,37 @@
+# 資料集（大型，使用者自行下載）
+openml_cc18_data/
+ucr_ts_80*/
+
+# 模型快取
+autogluon_models/
+
+# 本地測試與內部文件
+test/
+doc/
+
+# Claude Code 工作區
+.claude/
+
+# Python 編譯產物
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# 虛擬環境
+.venv/
+venv/
+env/
+
+# 套件安裝紀錄
+*.log
+0.64.0
+
+# 機敏資訊
+.env
+*.key
+
+# IDE
+.vscode/
+.idea/
