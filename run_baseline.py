@@ -140,7 +140,8 @@ def main():
         time_limit=args.time_budget,
         presets=args.presets,
         dynamic_stacking=False,
-        excluded_model_types=["FASTAI"],
+        excluded_model_types=["FASTAI", "NeuralNetTorch"],
+        ag_args_ensemble={"fold_fitting_strategy": "sequential_local"},
     )
     ag_elapsed = time.time() - t0
 
