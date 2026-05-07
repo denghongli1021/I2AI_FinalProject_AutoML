@@ -1,0 +1,18 @@
+# Render.com Blueprint
+# 把這個檔案 push 到 GitHub 後,在 Render 後台選 "New > Blueprint" 並指向你的 repo,
+# Render 會自動讀這個檔案完成所有設定。
+#
+# 文件: https://render.com/docs/blueprint-spec
+
+services:
+  - type: web
+    name: i2ai-automl-api
+    runtime: python
+    plan: free                         # 750 小時/月免費,15 分鐘無請求會睡眠
+    region: singapore                  # 距離台灣最近的免費區
+    buildCommand: pip install -r api/requirements.txt
+    startCommand: uvicorn api.main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.11.9"
+    healthCheckPath: /api/health
