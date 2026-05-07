@@ -1,0 +1,7 @@
+# 後端
+python -m pip install -r api/requirements.txt
+python -m uvicorn api.main:app --reload --port 8000
+
+
+#前端
+python -m http.server 5500

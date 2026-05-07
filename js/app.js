@@ -231,24 +231,41 @@ function handleFile(file) {
     </div>
   `;
 
+  const showInfoBar = (dataset) => {
+    document.getElementById('upload-card').classList.add('hidden');
+    const infoBar = document.getElementById('file-info-bar');
+    infoBar.classList.remove('hidden');
+    document.getElementById('file-info-name').textContent = file.name;
+    const sizeMB = (file.size / 1024 / 1024).toFixed(2);
+    const sizeKB = (file.size / 1024).toFixed(1);
+    const sizeStr = file.size > 1048576 ? `${sizeMB} MB` : `${sizeKB} KB`;
+    document.getElementById('file-info-meta').textContent = `${dataset.rowCount.toLocaleString()} 筆資料 | ${dataset.colCount} 個欄位 | ${sizeStr}`;
+    renderDatasetPage();
+  };
+
+  // ---- Python API path ----
+  if (typeof ApiClient !== 'undefined' && ApiClient.enabled) {
+    ApiClient.preprocess(file)
+      .then(apiDs => showInfoBar(adoptApiDataset(apiDs)))
+      .catch(err => {
+        zone.innerHTML = `
+          <div class="flex items-center justify-center gap-3 py-4">
+            <svg class="w-6 h-6 text-danger-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+            <span class="text-sm text-danger-400">後端 API 失敗: ${escapeHtml(err.message)}</span>
+          </div>
+          <button onclick="resetUploadZone()" class="mt-3 px-4 py-1.5 bg-dark-700 hover:bg-dark-600 rounded-lg text-xs">重試</button>
+        `;
+      });
+    return;
+  }
+
+  // ---- Local JS path (current behavior) ----
   const reader = new FileReader();
   reader.onload = (e) => {
     try {
       const text = e.target.result;
       const dataset = DataEngine.loadCSV(text, file.name);
-
-      // Show file info bar
-      document.getElementById('upload-card').classList.add('hidden');
-      const infoBar = document.getElementById('file-info-bar');
-      infoBar.classList.remove('hidden');
-      document.getElementById('file-info-name').textContent = file.name;
-      const sizeMB = (file.size / 1024 / 1024).toFixed(2);
-      const sizeKB = (file.size / 1024).toFixed(1);
-      const sizeStr = file.size > 1048576 ? `${sizeMB} MB` : `${sizeKB} KB`;
-      document.getElementById('file-info-meta').textContent = `${dataset.rowCount.toLocaleString()} 筆資料 | ${dataset.colCount} 個欄位 | ${sizeStr}`;
-
-      // Render analysis
-      renderDatasetPage();
+      showInfoBar(dataset);
 
     } catch (err) {
       zone.innerHTML = `
@@ -1713,7 +1730,30 @@ async function startRealTraining(ds, targetCol, options = {}) {
   try {
     addLog('開始準備訓練資料...', 'info');
     if (options.timeSeries) addLog('時間序列模式：依時間順序切分訓練/測試集', 'info');
-    const { models, data } = await MLEngine.runExperiment(ds, targetCol, options, onProgress);
+
+    let models, data;
+    if (typeof ApiClient !== 'undefined' && ApiClient.enabled) {
+      addLog('使用 Python 後端 API 進行訓練 (SSE 即時推送)...', 'info');
+      models = await ApiClient.trainStream({
+        datasetId: ds.id,
+        target: targetCol,
+        features: options.features,
+        algorithms: options.algorithms,
+        options: { taskType: options.taskType, timeSeries: options.timeSeries },
+      }, (ev) => {
+        if (ev.type === 'log') {
+          addLog(ev.msg, ev.level || 'info');
+        } else if (ev.type === 'progress') {
+          onProgress({ type: 'progress', pct: ev.pct, step: ev.step });
+        }
+      });
+      MLEngine.trainedModels = models;
+      data = { taskType: models[0]?.taskType || 'regression', target: targetCol };
+    } else {
+      const result = await MLEngine.runExperiment(ds, targetCol, options, onProgress);
+      models = result.models;
+      data = result.data;
+    }
 
     if (models.length === 0) {
       addLog('所有演算法均訓練失敗，請檢查資料或調整設定', 'error');
@@ -2098,7 +2138,11 @@ function renderRealWhatIf(models) {
   if (!section) return;
 
   // Filter to models that have prediction infrastructure
-  const usable = models.filter(m => m.predict && m.featureStats && m.means && m.stds);
+  // - JS 模式: 需要 m.predict (callable function)
+  // - API 模式: 需要 m.id (用來呼叫 /api/predict)
+  const usable = models.filter(m =>
+    m.featureStats && m.means && m.stds && (typeof m.predict === 'function' || m.id)
+  );
   if (usable.length === 0) {
     section.classList.add('hidden');
     return;
@@ -2173,19 +2217,41 @@ function buildRealWhatIfSliders() {
   });
 }
 
-function updateRealWhatIfPrediction() {
+// 用 token 防止 slider 拖動時的舊請求蓋過新請求
+let _whatIfReqToken = 0;
+
+async function updateRealWhatIfPrediction() {
   const m = RealWhatIfState.currentModel;
   if (!m) return;
 
-  const xNorm = RealWhatIfState.values.map((v, i) => (v - m.means[i]) / (m.stds[i] || 1));
-  let pred;
-  try { pred = m.predict(xNorm); } catch (e) { pred = NaN; }
-
-  const baselineNorm = new Array(m.featureNames.length).fill(0);
-  let baseline;
-  try { baseline = m.predict(baselineNorm); } catch (e) { baseline = NaN; }
-
+  const isApi = (typeof ApiClient !== 'undefined' && ApiClient.enabled && m.id);
   const isReg = m.taskType === 'regression';
+
+  let pred = NaN, baseline = NaN;
+
+  if (isApi) {
+    // API 模式: 把 raw 值 + baseline (means) 各打一次 /api/predict
+    const myToken = ++_whatIfReqToken;
+    try {
+      const [predResp, baseResp] = await Promise.all([
+        ApiClient.predict({ modelId: m.id, features: RealWhatIfState.values }),
+        ApiClient.predict({ modelId: m.id, features: m.means }),  // means = 標準化後的 baseline (0 in xNorm)
+      ]);
+      // 過時的 response 直接丟掉
+      if (myToken !== _whatIfReqToken) return;
+      pred = predResp.prediction;
+      baseline = baseResp.prediction;
+    } catch (err) {
+      if (myToken !== _whatIfReqToken) return;
+      console.warn('What-If predict 失敗:', err);
+    }
+  } else {
+    // 本地 JS 模式 (沿用原邏輯)
+    const xNorm = RealWhatIfState.values.map((v, i) => (v - m.means[i]) / (m.stds[i] || 1));
+    try { pred = m.predict(xNorm); } catch (e) { pred = NaN; }
+    const baselineNorm = new Array(m.featureNames.length).fill(0);
+    try { baseline = m.predict(baselineNorm); } catch (e) { baseline = NaN; }
+  }
 
   document.getElementById('real-whatif-prediction').textContent = isReg ? formatRwifVal(pred) : `Class ${pred}`;
   document.getElementById('real-whatif-target-label').textContent = m.targetName || '目標變數';
@@ -2365,6 +2431,24 @@ function initSettings() {
   const algoContainer = document.getElementById('setting-algos-container');
   const saveBtn = document.getElementById('btn-save-settings');
   const toast = document.getElementById('settings-save-toast');
+
+  // ---- API Toggle ----
+  const apiToggle = document.getElementById('setting-use-api');
+  const apiUrlInput = document.getElementById('setting-api-url');
+  const apiPingBtn = document.getElementById('btn-api-ping');
+  const apiStatusEl = document.getElementById('setting-api-status');
+  if (apiToggle && typeof ApiClient !== 'undefined') {
+    apiToggle.checked = ApiClient.enabled;
+    apiUrlInput.value = ApiClient.baseUrl;
+    apiToggle.addEventListener('change', () => ApiClient.setEnabled(apiToggle.checked));
+    apiUrlInput.addEventListener('change', () => ApiClient.setBaseUrl(apiUrlInput.value.trim()));
+    apiPingBtn.addEventListener('click', async () => {
+      apiStatusEl.textContent = '測試中...';
+      const ok = await ApiClient.health();
+      apiStatusEl.textContent = ok ? `✓ 已連線 (${ApiClient.baseUrl})` : `✗ 無法連線到 ${ApiClient.baseUrl}`;
+      apiStatusEl.className = ok ? 'text-xs text-success-400' : 'text-xs text-danger-400';
+    });
+  }
 
   let activeAlgos = ['XGBoost', 'LightGBM', 'CatBoost'];
 
