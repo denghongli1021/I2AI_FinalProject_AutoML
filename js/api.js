@@ -3,7 +3,7 @@
 // 也可在 console 執行: ApiClient.setEnabled(true) 或修改 localStorage.useApi。
 
 const ApiClient = {
-  baseUrl: localStorage.getItem('apiBaseUrl') || 'http://localhost:8000',
+  baseUrl: localStorage.getItem('apiBaseUrl') || 'https://i2ai-automl-api.onrender.com',
   enabled: localStorage.getItem('useApi') === 'true',
 
   setEnabled(v) {
