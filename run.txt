@@ -1,7 +1,15 @@
 # 後端
 python -m pip install -r api/requirements.txt
 python -m uvicorn api.main:app --reload --port 8000
-
+http://127.0.0.1:8000/
+https://i2ai-automl-api.onrender.com
 
 #前端
 python -m http.server 5500
+
+
+python -m pip install openml pandas tqdm
+python data_collect.py
+
+python -m pip install aeon pandas tqdm
+python data_collect_time.py

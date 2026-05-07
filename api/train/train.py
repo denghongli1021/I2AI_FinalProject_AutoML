@@ -302,35 +302,17 @@ def _failed_bundle(key: str, task_type: str, target: str, feature_names: list[st
 def _build_features(
     df: pd.DataFrame, target: str, requested: list[str] | None,
 ) -> tuple[pd.DataFrame, list[str]]:
-    # Detect datetime columns
-    date_cols: list[str] = []
-    for c in df.columns:
-        if c == target:
-            continue
-        if pd.api.types.is_datetime64_any_dtype(df[c]):
-            date_cols.append(c)
-            continue
-        # Object dtype — sniff datetime-likeness
-        if df[c].dtype == object:
-            sample = df[c].dropna().head(50)
-            if len(sample) > 0:
-                parsed = pd.to_datetime(sample, errors="coerce")
-                if parsed.notna().sum() / len(sample) > 0.7:
-                    date_cols.append(c)
-
-    # All possible date-derived feature names
-    derived_map: dict[str, tuple[str, str]] = {}
-    for dc in date_cols:
-        for suf in _DATE_SUFFIXES:
-            derived_map[dc + suf] = (dc, suf)
-
+    # Auto 模式才需要主動偵測 datetime 欄位、自動產生衍生 feature 名單。
+    # Manual 模式 (前端有送 requested) 直接相信前端送什麼就解什麼,
+    # 避免後端 datetime 偵測比 preprocess 嚴格時把合法的衍生 feature 拒掉。
     if requested is None:
-        # Auto: numeric columns + all date-derived
+        date_cols = _detect_date_columns(df, target)
         feature_names = [
             c for c in df.columns
             if c != target and pd.api.types.is_numeric_dtype(df[c])
         ]
-        feature_names.extend(derived_map.keys())
+        for dc in date_cols:
+            feature_names.extend(dc + suf for suf in _DATE_SUFFIXES)
     else:
         feature_names = list(requested)
 
@@ -339,16 +321,46 @@ def _build_features(
 
     cols: dict[str, pd.Series] = {}
     for fn in feature_names:
+        # 1. 直接是欄位名 → 當數值欄位處理
         if fn in df.columns and fn != target:
             cols[fn] = pd.to_numeric(df[fn], errors="coerce")
-        elif fn in derived_map:
-            dc, suf = derived_map[fn]
-            parsed = pd.to_datetime(df[dc], errors="coerce")
-            cols[fn] = _date_feature_value(parsed, suf).astype(float)
-        else:
-            raise ValueError(f"未知特徵: {fn}")
+            continue
+
+        # 2. 否則嘗試解成日期衍生 feature: fn = "{col_name}{suffix}"
+        matched = False
+        for suf in _DATE_SUFFIXES:
+            if fn.endswith(suf):
+                col_name = fn[: -len(suf)]
+                if col_name in df.columns and col_name != target:
+                    parsed = pd.to_datetime(df[col_name], errors="coerce")
+                    cols[fn] = _date_feature_value(parsed, suf).astype(float)
+                    matched = True
+                    break
+        if matched:
+            continue
+
+        raise ValueError(f"未知特徵: {fn}")
 
     return pd.DataFrame(cols), feature_names
+
+
+def _detect_date_columns(df: pd.DataFrame, target: str) -> list[str]:
+    """Auto 模式專用 — 抓出看起來像 datetime 的欄位。"""
+    out: list[str] = []
+    for c in df.columns:
+        if c == target:
+            continue
+        if pd.api.types.is_datetime64_any_dtype(df[c]):
+            out.append(c)
+            continue
+        if df[c].dtype == object:
+            sample = df[c].dropna().head(50)
+            if len(sample) == 0:
+                continue
+            parsed = pd.to_datetime(sample, errors="coerce")
+            if parsed.notna().sum() / len(sample) > 0.7:
+                out.append(c)
+    return out
 
 
 # ============================================================
