@@ -1,6 +1,5 @@
-# 可視化模組(visualizer.py) — SHAP 解釋 module
+# 可視化 module — SHAP 
 
-實作 AutoML Pipeline 中的可視化與決策支援層。  
 接收訓練完成的模型與測試集，計算 SHAP 值，並輸出三種可解釋性圖表。
 
 ---
@@ -16,7 +15,7 @@
    ↓
 模型訓練（XGBoost / LightGBM / 神經網路）
    ↓
-【AutoMLVisualizer】← this 
+【AutoMLVisualizer】← this module
    ↓
 Global / Local / Interaction 圖表（PNG）
 ```
@@ -74,7 +73,29 @@ viz.generate_all_plots(
 
 模組在初始化時自動偵測模型類型，切換模型不需要修改任何程式碼。
 
-> **神經網路注意事項**：模型的 `predict` 函數必須能接受 `pd.DataFrame` 或 `np.ndarray` 作為輸入。若模型只接受 PyTorch tensor，需由模型訓練組提供一個 wrapper 函數。
+> **神經網路注意事項**：模型必須具備 `predict` 方法且能接受 `pd.DataFrame` 或 `np.ndarray` 作為輸入。若模型只接受 PyTorch tensor，需由模型訓練組提供一個 wrapper，範例如下：
+>
+> ```python
+> class SklearnWrapper:
+>     def __init__(self, model, scaler):
+>         self.model = model
+>         self.scaler = scaler
+>         self.model.eval()
+>
+>     def predict(self, X):
+>         if isinstance(X, pd.DataFrame):
+>             X = X.values
+>         X_scaled = self.scaler.transform(X)
+>         X_tensor = torch.FloatTensor(X_scaled)
+>         with torch.no_grad():
+>             proba = self.model(X_tensor).numpy().flatten()
+>         return (proba > 0.5).astype(int)
+>
+>     def __call__(self, X):
+>         return self.predict(X)
+> ```
+>
+> 完整範例參考 `test_nn.py`。
 
 ---
 
@@ -89,13 +110,14 @@ viz.generate_all_plots(
 | 房價預測（Ames） | 回歸 | Kaggle CSV | `test_generality.py` |
 | ETT 電力變壓器油溫 | 時序回歸 | GitHub CSV | `test_timeseries.py` |
 | Diabetes 130-US Hospitals | 分類（類別不平衡、醫療場景） | OpenML API（ID: 4541） | `test_diabetes.py` |
+| IBM HR 員工離職預測（MLP） | 分類（PyTorch 神經網路） | Kaggle CSV | `test_nn.py` |
 
 ---
 
 ## 環境安裝
 
 ```bash
-pip install shap plotly kaleido xgboost pandas numpy
+pip install shap plotly kaleido xgboost pandas numpy torch
 ```
 
 ---
@@ -131,6 +153,9 @@ python test_timeseries.py
 
 # 醫療場景測試：Diabetes 130
 python test_diabetes.py
+
+# 神經網路測試：PyTorch MLP on HR Attrition（驗證 fallback 路徑）
+python test_nn.py
 ```
 
 ---
@@ -144,6 +169,7 @@ visualization/
 ├── test_generality.py     # HR 離職 + 房價通用性測試
 ├── test_timeseries.py     # ETTh1 時序測試
 ├── test_diabetes.py       # Diabetes 130 醫療場景測試
+├── test_nn.py             # 神經網路（PyTorch MLP）fallback 路徑驗證
 └── README.md              # 本文件
 ```
 
@@ -154,5 +180,6 @@ visualization/
 ├── test_hr_results/
 ├── test_house_results/
 ├── timeseries_results/
-└── diabetes_results/
+├── diabetes_results/
+└── nn_results/
 ```
