@@ -28,10 +28,11 @@ class AutoMLVisualizer:
             print("  Using TreeExplainer (tree-based model detected)")
         except Exception:
             print("  TreeExplainer not applicable, falling back to shap.Explainer...")
-            # 對神經網路，需要傳入 background dataset 作為基準
-            # 取 X_test 的前 100 筆作為 background（太多會很慢）
+            # 對神經網路，shap.Explainer 需要傳入 predict 函數（而非模型物件本身）
+            # 取 X_test 前 100 筆作為 background（太多會很慢）
             background = self.X_test.iloc[:100]
-            self.explainer = shap.Explainer(self.model, background)
+            predict_fn = self.model.predict if hasattr(self.model, "predict") else self.model
+            self.explainer = shap.Explainer(predict_fn, background)
             self.shap_values = self.explainer(self.X_test)
             print("  Using shap.Explainer (model-agnostic)")
 
@@ -50,7 +51,7 @@ class AutoMLVisualizer:
         return v
 
     def generate_beeswarm_plot(self, filename="global_importance.png"):
-        
+        # UI 優化：將雜亂的蜂群圖改為清晰的「全局特徵重要性長條圖」
         vals = np.abs(self._get_shap_matrix()).mean(0)
         df = pd.DataFrame({'Feature': self.X_test.columns, 'Importance': vals})
         df = df.sort_values(by='Importance', ascending=True).tail(15) # 取前 15 重要
@@ -68,7 +69,7 @@ class AutoMLVisualizer:
         print(f"Generated: {filepath}")
 
     def generate_waterfall_plot(self, sample_index=0, filename="waterfall.png"):
-        # Plotly 瀑布圖 (垂直顯示，文字永不重疊，精確小數點)
+        # Plotly 現代化瀑布圖 (垂直顯示，文字永不重疊，精確小數點)
         sample_shap = self._get_shap_matrix()[sample_index]
         base_value = self.shap_values[sample_index].base_values
         
@@ -151,7 +152,7 @@ class AutoMLVisualizer:
 
     def generate_all_plots(self, sample_index=0, target_feature=None, prefix=""):
         p = f"{prefix}_" if prefix else ""
-        print(f"開始生成 {prefix if prefix else '預設'} 圖表...")
+        print(f"開始生成 {prefix if prefix else '預設'} 專案圖表...")
         self.generate_beeswarm_plot(filename=f"{p}global.png")
         self.generate_waterfall_plot(sample_index=sample_index, filename=f"{p}waterfall.png")
         if target_feature is None:
