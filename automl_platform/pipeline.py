@@ -29,17 +29,23 @@ class AutoMLPipeline:
 
     def __init__(
         self,
-        task: str = "classification",   # 任務型別："classification" 或 "regression"
-        is_timeseries: bool = False,    # 是否為時序資料（每列代表一條完整序列）
-        n_hpo_trials: int = 25,         # 每個模型的 HPO 試驗次數
-        n_folds: int = 5,               # 交叉驗證折數（HPO 與 OOF 都使用）
-        top_k_hpo: int = 5,             # 每個模型保留前 k 組超參數設定
-        use_nas: bool = True,           # 是否啟用神經架構搜尋作為 L1 base learner 之一
-        mi_k: int = 50,                 # 互資訊（Mutual Information）保留的特徵數
-        poly_max_cols: int = 15,        # 多項式交互生成時最多取前幾欄（避免維度爆炸）
-        use_shap_pruning: bool = True,  # 是否在最後使用 SHAP 重要性剪枝
+        task: str = "classification",
+        is_timeseries: bool = False,
+        n_hpo_trials: int = 25,
+        n_folds: int = 5,
+        top_k_hpo: int = 5,
+        use_nas: bool = True,
+        mi_k: int = 50,
+        poly_max_cols: int = 15,
+        use_shap_pruning: bool = True,
+        # ── 新增 (集成相關) ──
+        top_k_ensemble: int = 3,           # L1 每個樹模型取 HPO 前幾組進入 stacking
+        n_nas_seeds: int = 1,              # NAS 多 seed 集成數
+        use_extratrees: bool = True,       # L1 加入 ExtraTrees
+        use_knn: bool = True,              # L1 加入 KNN
+        hpo_models=None,                   # HPO 跑哪些模型，預設 ["xgb","lgb","rf"]
+        per_model_trials=None,             # dict 覆寫單模型試驗次數
     ):
-        # --- 將外部設定保存為實例屬性 ---
         self.task = task
         self.is_timeseries = is_timeseries
         self.n_hpo_trials = n_hpo_trials
@@ -49,6 +55,12 @@ class AutoMLPipeline:
         self.mi_k = mi_k
         self.poly_max_cols = poly_max_cols
         self.use_shap_pruning = use_shap_pruning
+        self.top_k_ensemble = top_k_ensemble
+        self.n_nas_seeds = n_nas_seeds
+        self.use_extratrees = use_extratrees
+        self.use_knn = use_knn
+        self.hpo_models = hpo_models
+        self.per_model_trials = per_model_trials
 
         # --- 訓練後才會被填入的內部物件 ---
         self.fe_pipeline_ = None     # 特徵工程 pipeline（fit 後保存以供 transform 使用）
@@ -97,6 +109,8 @@ class AutoMLPipeline:
             n_trials=self.n_hpo_trials,
             n_folds=self.n_folds,
             top_k=self.top_k_hpo,
+            model_names=self.hpo_models,
+            per_model_trials=self.per_model_trials,
         )
         self.hpo_configs_ = optimizer.optimize(X_arr, y_enc)
 
@@ -105,8 +119,11 @@ class AutoMLPipeline:
         self.ensemble_ = StackingEnsemble(
             task=self.task,
             n_folds=self.n_folds,
-            top_k_configs=3,        # L1 base learner 取每個模型 HPO 前 3 組（增加多樣性）
+            top_k_configs=self.top_k_ensemble,
             use_nas=self.use_nas,
+            n_nas_seeds=self.n_nas_seeds,
+            use_extratrees=self.use_extratrees,
+            use_knn=self.use_knn,
         )
         self.ensemble_.fit(X_arr, y_enc, self.hpo_configs_)
 

@@ -20,17 +20,11 @@ warnings.filterwarnings("ignore")
 # ── 模型工廠：根據參數產生對應的 sklearn-API 模型 ──────────────────────────────
 
 def _make_xgb_clf(params):
-    """建立 XGBoost 分類器（已固定 random_state、停用 label encoder、設定 logloss 評估）。"""
+    """建立 XGBoost 分類器（**params 直接展開，搜尋空間擴充時不需改 factory）。"""
     return xgb.XGBClassifier(
-        n_estimators=params["n_estimators"],
-        max_depth=params["max_depth"],
-        learning_rate=params["learning_rate"],
-        subsample=params["subsample"],
-        colsample_bytree=params["colsample_bytree"],
-        reg_alpha=params["reg_alpha"],
-        reg_lambda=params["reg_lambda"],
+        **params,
         use_label_encoder=False,
-        eval_metric="logloss",
+        eval_metric="mlogloss",
         random_state=42,
         n_jobs=-1,
         verbosity=0,
@@ -38,15 +32,8 @@ def _make_xgb_clf(params):
 
 
 def _make_xgb_reg(params):
-    """建立 XGBoost 回歸器。"""
     return xgb.XGBRegressor(
-        n_estimators=params["n_estimators"],
-        max_depth=params["max_depth"],
-        learning_rate=params["learning_rate"],
-        subsample=params["subsample"],
-        colsample_bytree=params["colsample_bytree"],
-        reg_alpha=params["reg_alpha"],
-        reg_lambda=params["reg_lambda"],
+        **params,
         random_state=42,
         n_jobs=-1,
         verbosity=0,
@@ -54,37 +41,11 @@ def _make_xgb_reg(params):
 
 
 def _make_lgb_clf(params):
-    """建立 LightGBM 分類器（verbose=-1 關閉 LightGBM 自身的輸出）。"""
-    return lgb.LGBMClassifier(
-        n_estimators=params["n_estimators"],
-        max_depth=params["max_depth"],
-        learning_rate=params["learning_rate"],
-        num_leaves=params["num_leaves"],
-        subsample=params["subsample"],
-        colsample_bytree=params["colsample_bytree"],
-        reg_alpha=params["reg_alpha"],
-        reg_lambda=params["reg_lambda"],
-        random_state=42,
-        n_jobs=-1,
-        verbose=-1,
-    )
+    return lgb.LGBMClassifier(**params, random_state=42, n_jobs=-1, verbose=-1)
 
 
 def _make_lgb_reg(params):
-    """建立 LightGBM 回歸器。"""
-    return lgb.LGBMRegressor(
-        n_estimators=params["n_estimators"],
-        max_depth=params["max_depth"],
-        learning_rate=params["learning_rate"],
-        num_leaves=params["num_leaves"],
-        subsample=params["subsample"],
-        colsample_bytree=params["colsample_bytree"],
-        reg_alpha=params["reg_alpha"],
-        reg_lambda=params["reg_lambda"],
-        random_state=42,
-        n_jobs=-1,
-        verbose=-1,
-    )
+    return lgb.LGBMRegressor(**params, random_state=42, n_jobs=-1, verbose=-1)
 
 
 def _make_rf_clf(params):
@@ -115,23 +76,26 @@ def _make_rf_reg(params):
 # 參數範圍依 GBDT / RF 常用區間設計，learning_rate 與正則項採對數採樣
 SEARCH_SPACES = {
     "xgb": lambda trial: {
-        "n_estimators": trial.suggest_int("n_estimators", 50, 300),
-        "max_depth": trial.suggest_int("max_depth", 3, 8),
-        "learning_rate": trial.suggest_float("learning_rate", 1e-3, 0.3, log=True),
+        # 拉寬：高維資料常需更多樹與更深 / 更強正則
+        "n_estimators": trial.suggest_int("n_estimators", 100, 800),
+        "max_depth": trial.suggest_int("max_depth", 3, 12),
+        "learning_rate": trial.suggest_float("learning_rate", 5e-3, 0.3, log=True),
         "subsample": trial.suggest_float("subsample", 0.6, 1.0),
-        "colsample_bytree": trial.suggest_float("colsample_bytree", 0.6, 1.0),
-        "reg_alpha": trial.suggest_float("reg_alpha", 1e-8, 1.0, log=True),
-        "reg_lambda": trial.suggest_float("reg_lambda", 1e-8, 1.0, log=True),
+        "colsample_bytree": trial.suggest_float("colsample_bytree", 0.4, 1.0),
+        "min_child_weight": trial.suggest_int("min_child_weight", 1, 30),
+        "reg_alpha": trial.suggest_float("reg_alpha", 1e-8, 5.0, log=True),
+        "reg_lambda": trial.suggest_float("reg_lambda", 1e-8, 5.0, log=True),
     },
     "lgb": lambda trial: {
-        "n_estimators": trial.suggest_int("n_estimators", 50, 300),
-        "max_depth": trial.suggest_int("max_depth", 3, 8),
-        "learning_rate": trial.suggest_float("learning_rate", 1e-3, 0.3, log=True),
-        "num_leaves": trial.suggest_int("num_leaves", 15, 127),
+        "n_estimators": trial.suggest_int("n_estimators", 100, 800),
+        "max_depth": trial.suggest_int("max_depth", 3, 12),
+        "learning_rate": trial.suggest_float("learning_rate", 5e-3, 0.3, log=True),
+        "num_leaves": trial.suggest_int("num_leaves", 15, 255),
+        "min_child_samples": trial.suggest_int("min_child_samples", 5, 100),
         "subsample": trial.suggest_float("subsample", 0.6, 1.0),
-        "colsample_bytree": trial.suggest_float("colsample_bytree", 0.6, 1.0),
-        "reg_alpha": trial.suggest_float("reg_alpha", 1e-8, 1.0, log=True),
-        "reg_lambda": trial.suggest_float("reg_lambda", 1e-8, 1.0, log=True),
+        "colsample_bytree": trial.suggest_float("colsample_bytree", 0.4, 1.0),
+        "reg_alpha": trial.suggest_float("reg_alpha", 1e-8, 5.0, log=True),
+        "reg_lambda": trial.suggest_float("reg_lambda", 1e-8, 5.0, log=True),
     },
     "rf": lambda trial: {
         "n_estimators": trial.suggest_int("n_estimators", 50, 300),
@@ -155,12 +119,21 @@ class TPEOptimizer:
     回傳：每個模型的前 k 組 (params, score)。
     """
 
-    def __init__(self, task="classification", n_trials=25, n_folds=5, top_k=5):
-        self.task = task                # classification 或 regression
-        self.n_trials = n_trials        # 每個模型的搜尋次數
-        self.n_folds = n_folds          # 交叉驗證折數
-        self.top_k = top_k              # 每個模型保留前 k 組設定
-        self.results_ = {}              # 訓練後保存：model_name -> [(score, params), ...]
+    def __init__(self, task="classification", n_trials=25, n_folds=5, top_k=5,
+                 model_names=None, per_model_trials=None):
+        """
+        Args:
+            n_trials: 預設每模型試驗次數（被 per_model_trials 覆寫）
+            model_names: 要搜尋的模型清單，預設 ["xgb", "lgb", "rf"]
+            per_model_trials: dict[model_name -> n_trials]，可單獨覆寫某模型試驗次數
+        """
+        self.task = task
+        self.n_trials = n_trials
+        self.n_folds = n_folds
+        self.top_k = top_k
+        self.model_names = model_names if model_names is not None else ["xgb", "lgb", "rf"]
+        self.per_model_trials = per_model_trials or {}
+        self.results_ = {}
 
     def optimize(self, X: np.ndarray, y: np.ndarray) -> dict:
         """
@@ -176,9 +149,11 @@ class TPEOptimizer:
 
         all_top_configs = {}
 
-        # 依序對 xgb / lgb / rf 跑 HPO
-        for model_name in ["xgb", "lgb", "rf"]:
-            print(f"  [HPO] Optimizing {model_name.upper()} ({self.n_trials} trials)...")
+        for model_name in self.model_names:
+            n_trials = int(self.per_model_trials.get(model_name, self.n_trials))
+            if n_trials <= 0:
+                continue
+            print(f"  [HPO] Optimizing {model_name.upper()} ({n_trials} trials)...")
             trial_records = []
 
             def objective(trial):
@@ -200,7 +175,7 @@ class TPEOptimizer:
                 pruner=pruner,
                 sampler=sampler,
             )
-            study.optimize(objective, n_trials=self.n_trials, show_progress_bar=False)
+            study.optimize(objective, n_trials=n_trials, show_progress_bar=False)
 
             # 收集所有有效（非 pruned）試驗的成績
             for t in study.trials:

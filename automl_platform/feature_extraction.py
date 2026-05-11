@@ -331,20 +331,32 @@ class FeatureExtractionPipeline:
             print(f"  [FE] After TS feature extraction: {X.shape}")
         else:
             numeric_X = X.select_dtypes(include=[np.number]).fillna(0)
-            self.mi_selector_ = MIFeatureSelector(k=self.mi_k, task=self.task)
-            self.mi_selector_.fit(numeric_X, y)
-            X_mi = self.mi_selector_.transform(numeric_X)
-            print(f"  [FE] After MI selection: {X_mi.shape}")
+            # 短路：當特徵數已 ≤ mi_k，跳過 MI 分數計算（節省 sklearn CPU 時間）
+            if numeric_X.shape[1] <= self.mi_k:
+                self.mi_selector_ = None
+                X_mi = numeric_X
+                print(f"  [FE] MI skipped (n_features {X_mi.shape[1]} <= mi_k {self.mi_k})")
+            else:
+                self.mi_selector_ = MIFeatureSelector(k=self.mi_k, task=self.task)
+                self.mi_selector_.fit(numeric_X, y)
+                X_mi = self.mi_selector_.transform(numeric_X)
+                print(f"  [FE] After MI selection: {X_mi.shape}")
 
             self.group_agg_ = GroupAggregationFeatures()
             self.group_agg_.fit(X, y)
             X_grp = self.group_agg_.transform(X)
 
-            self.poly_gen_ = PolynomialInteractionGenerator(max_input_cols=self.poly_max_cols)
-            self.poly_gen_.fit(X_mi)
-            X_poly = self.poly_gen_.transform(X_mi)
+            # poly_max_cols <= 1 時直接跳過：對近一致尺度的特徵，poly 通常只增加雜訊
+            if self.poly_max_cols >= 2:
+                self.poly_gen_ = PolynomialInteractionGenerator(max_input_cols=self.poly_max_cols)
+                self.poly_gen_.fit(X_mi)
+                X_poly = self.poly_gen_.transform(X_mi)
+                parts = [X_mi, X_poly]
+            else:
+                self.poly_gen_ = None
+                parts = [X_mi]
+                print("  [FE] Poly skipped (poly_max_cols < 2)")
 
-            parts = [X_mi, X_poly]
             if not X_grp.empty:
                 parts.append(X_grp)
             X = pd.concat(parts, axis=1)
@@ -372,10 +384,12 @@ class FeatureExtractionPipeline:
             X = self.ts_extractor_.transform(X)
         else:
             numeric_X = X.select_dtypes(include=[np.number]).fillna(0)
-            X_mi   = self.mi_selector_.transform(numeric_X)
-            X_grp  = self.group_agg_.transform(X)
-            X_poly = self.poly_gen_.transform(X_mi)
-            parts  = [X_mi, X_poly]
+            # MI 短路時 mi_selector_ 為 None
+            X_mi = self.mi_selector_.transform(numeric_X) if self.mi_selector_ is not None else numeric_X
+            X_grp = self.group_agg_.transform(X)
+            parts = [X_mi]
+            if self.poly_gen_ is not None:
+                parts.append(self.poly_gen_.transform(X_mi))
             if not X_grp.empty:
                 parts.append(X_grp)
             X = pd.concat(parts, axis=1)
