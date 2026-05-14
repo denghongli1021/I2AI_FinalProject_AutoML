@@ -414,54 +414,85 @@ ColumnTransformer(
 ```
 **Router 也只分析訓練集：** 欄位的類型判斷（唯一值數量、字串長度等）只基於 X_train，確保測試集資訊不影響任何決策。
  
+## 🧩 核心處理器模組 (Core Processors)
 
-# 🧩 核心處理器模組 (Core Processors)
-
-## 1. 數值處理器 (Numeric Processor)
+### 1. 數值處理器 (Numeric Processor)
 * **功能定位**：處理連續型數值資料，如硬體效能計數器 (HPC) 的數值（例如：Cache misses, Branch mispredictions）、CPU 溫度或頻率。
 * **採用演算法**：Median Imputation (中位數填補) + RobustScaler (強健標準化)。
 * **數學原理**：
   硬體側信號 (Side-channel) 數據常夾帶極端的雜訊或離群值（Outliers）。傳統的 $Z$-score 標準化容易被極端值扭曲，因此我們採用基於四分位距 (IQR) 的 RobustScaler：
-  $$X_{scaled} = \frac{X - Q_2(X)}{Q_3(X) - Q_1(X)}$$
+
+  $$
+  X_{scaled} = \frac{X - Q_2(X)}{Q_3(X) - Q_1(X)}
+  $$
+
   其中 $Q_2(X)$ 為中位數，$Q_3(X) - Q_1(X)$ 為涵蓋中間 50% 資料的四分位距。這能確保防禦模型在特徵縮放時，對異常的微架構攻擊訊號保持敏銳且不被雜訊干擾。
 
-## 2. 類別處理器 (Categorical Processor)
+### 2. 類別處理器 (Categorical Processor)
 * **功能定位**：處理低基數 (Low-Cardinality) 的離散特徵，例如：行程權限級別 (User/Kernel mode)、觸發的 Opcode 類別、或是特定的硬體設備 ID。
 * **採用演算法**：One-Hot Encoding (獨熱編碼) 搭配未知類別防護 (`handle_unknown='ignore'`)。
 * **數學原理**：
   將包含 $k$ 種可能性的類別變數 $C \in \{c_1, c_2, \dots, c_k\}$ 映射到一個 $k$ 維的歐幾里得空間中。對於第 $i$ 個類別，轉換後的向量 $v$ 定義為：
-  $$v_j = \begin{cases} 1, & \text{if } C = c_j \\ 0, & \text{otherwise} \end{cases} \quad \text{for } j = 1, \dots, k$$
+
+  $$
+  v_j = \begin{cases} 1, & \text{if } C = c_j \\ 0, & \text{otherwise} \end{cases} \quad \text{for } j = 1, \dots, k
+  $$
+
   這消除了類別特徵中原本不存在的「大小」或「順序」關係，避免模型產生錯誤的權重推論。
 
-## 3. 文字處理器 (Text Processor)
+### 3. 文字處理器 (Text Processor)
 * **功能定位**：處理非結構化或長度不一的字串，例如：反組譯後的組合語言片段、系統異常日誌 (System logs) 或是威脅情資的自由文本。
 * **採用演算法**：TF-IDF Vectorization + Truncated SVD (潛在語意分析 LSA)。
 * **數學原理**：
   1. **TF-IDF**：首先將文字轉為詞頻-逆文件頻率矩陣。字詞 $t$ 在文件 $d$ 中的權重計算為：
-     $$w_{t,d} = \text{tf}_{t,d} \times \log\left(\frac{N}{\text{df}_t}\right)$$
+  
+     $$
+     w_{t,d} = \text{tf}_{t,d} \times \log\left(\frac{N}{\text{df}_t}\right)
+     $$
+     
      （其中 $N$ 為總文件數，$\text{df}_t$ 為包含該字詞的文件數）。
   2. **Truncated SVD**：TF-IDF 會產生極度稀疏的高維度矩陣 $A$。為了避免維度災難並萃取潛在語意，我們利用奇異值分解 (SVD) 將矩陣降維至 $k$ 維空間：
-     $$A \approx U_k \Sigma_k V_k^T$$
+  
+     $$
+     A \approx U_k \Sigma_k V_k^T
+     $$
+     
      系統會動態確保 $k < \text{樣本數}$，藉此過濾掉無用的字串雜訊，保留最具代表性的日誌特徵。
 
-## 4. 時間處理器 (Temporal/Datetime Processor)
+### 4. 時間處理器 (Temporal/Datetime Processor)
 * **功能定位**：處理時間戳記，捕捉攻擊行為在時間維度上的週期性規律。
 * **採用演算法**：時間拆解 (Datetime Extraction) 與 Cyclic Encoding (週期性編碼)。
 * **數學原理**：
   時間資料（如小時、星期）本質上是循環的（例如 23:59 與 00:01 其實非常接近）。若單純視為線性數值會破壞此特性。我們將時間單位 $t$ (週期為 $T$) 映射到二維的單位圓上：
-  $$x_{\sin} = \sin\left(\frac{2\pi t}{T}\right), \quad x_{\cos} = \cos\left(\frac{2\pi t}{T}\right)$$
+  
+  $$
+  x_{\sin} = \sin\left(\frac{2\pi t}{T}\right), \quad x_{\cos} = \cos\left(\frac{2\pi t}{T}\right)
+  $$
+  
   這樣能讓模型完美理解「深夜時段的異常存取」與「凌晨攻擊」之間的連續性關聯。
 
-## 5. 視覺/圖片特徵處理器 (Visual/Image Feature Processor)
+### 5. 視覺/圖片特徵處理器 (Visual/Image Feature Processor)
 * **功能定位**：處理 2D 視覺化資料。在硬體安全領域，常將功耗軌跡 (Power Traces)、電磁輻射 (EM Radiation) 或記憶體存取頻率轉換為 2D 頻譜圖或熱力圖。此模組負責從這些影像中萃取統計特徵，避免直接輸入高維度像素矩陣造成的維度災難與記憶體溢出 (OOM)。
 * **採用演算法**：Global Statistical Pooling (全域統計池化) + 破圖防護補值 + StandardScaler。
 * **數學原理**：
   若將一張 $H \times W$ 的 RGB 頻譜圖攤平，會產生數十萬個維度。我們改為在各個色彩通道 $C \in \{R, G, B\}$ 上計算一階與二階統計量：
+  
   1. **通道平均值 (Mean)**：捕捉頻譜圖的整體能量分佈。
-     $$\mu_c = \frac{1}{H \times W} \sum_{i=1}^{H}\sum_{j=1}^{W} P_{c}(i, j)$$
+  
+     $$
+     \mu_c = \frac{1}{H \times W} \sum_{i=1}^{H}\sum_{j=1}^{W} P_{c}(i, j)
+     $$
+     
   2. **通道標準差 (Standard Deviation)**：捕捉頻譜圖的對比度與紋理豐富度（代表側信號波動的劇烈程度）。
-     $$\sigma_c = \sqrt{\frac{1}{H \times W} \sum_{i=1}^{H}\sum_{j=1}^{W} (P_{c}(i, j) - \mu_c)^2}$$
+  
+     $$
+     \sigma_c = \sqrt{\frac{1}{H \times W} \sum_{i=1}^{H}\sum_{j=1}^{W} (P_{c}(i, j) - \mu_c)^2}
+     $$
+     
   3. **感知亮度 (Perceived Luminance)**：利用人類視覺感知公式，將 RGB 轉換為單一的能量強度特徵 $L$：
-     $$L = 0.299\mu_R + 0.587\mu_G + 0.114\mu_B$$
+  
+     $$
+     L = 0.299\mu_R + 0.587\mu_G + 0.114\mu_B
+     $$
   
   透過此數學轉換，系統能將龐大的圖片路徑瞬間壓縮成 7 維的高密度數值特徵（3 個平均值 + 3 個標準差 + 1 個亮度），並無縫融合至下游的樹狀模型中。
