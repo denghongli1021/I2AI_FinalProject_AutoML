@@ -1,7 +1,7 @@
 // ===== MAIN APPLICATION LOGIC =====
 
 // ---- Global State ----
-let appMode = 'demo'; // 'demo' | 'real'
+let appMode = 'real'; // 'demo' | 'real' — 預設實作模式
 
 document.addEventListener('DOMContentLoaded', () => {
   initNavigation();
@@ -14,10 +14,23 @@ document.addEventListener('DOMContentLoaded', () => {
   initCorrTopN();
   initShapSampleSelect();
   initSettings();
+  initApiKeepAlive();
   // Show demo data on first load
   showDemoDataset();
   setTimeout(() => renderPageCharts('dashboard'), 100);
 });
+
+// ===== API KEEP-ALIVE =====
+// 每 30 秒 ping 一次後端 /api/health,避免 Render 免費方案 15 分鐘無請求就睡眠。
+// 只在「使用 Python 後端 API」開啟時才 ping。
+function initApiKeepAlive() {
+  if (typeof ApiClient === 'undefined') return;
+  setInterval(() => {
+    if (ApiClient.enabled) {
+      ApiClient.health().catch(() => {});  // 靜默 — keep-alive 失敗不打擾使用者
+    }
+  }, 30000);
+}
 
 // ===== MODE TOGGLE =====
 function initModeToggle() {
@@ -2023,12 +2036,14 @@ function renderRealExperimentsPage() {
 
   const buildAlgoCheckboxes = () => {
     algoBox.innerHTML = '';
+    const activeAlgos = getSettings().activeAlgos;  // 系統設定的預設啟用演算法
     Object.entries(MLEngine.ALGORITHMS).forEach(([key, algo]) => {
       const lbl = document.createElement('label');
       lbl.className = 'flex items-center gap-1.5 text-xs text-dark-300 cursor-pointer hover:text-dark-100 transition-colors';
       const typeTag = algo.type === 'regression' ? '回歸' : algo.type === 'classification' ? '分類' : '通用';
       const tagColor = algo.type === 'regression' ? 'text-blue-400' : algo.type === 'classification' ? 'text-amber-400' : 'text-green-400';
-      lbl.innerHTML = `<input type="checkbox" class="exp-algo-cb accent-primary-500" value="${key}" data-algo-type="${algo.type}" checked> ${escapeHtml(algo.label)} <span class="${tagColor} text-[10px]">(${typeTag})</span>`;
+      const checked = activeAlgos.includes(key) ? 'checked' : '';
+      lbl.innerHTML = `<input type="checkbox" class="exp-algo-cb accent-primary-500" value="${key}" data-algo-type="${algo.type}" ${checked}> ${escapeHtml(algo.label)} <span class="${tagColor} text-[10px]">(${typeTag})</span>`;
       algoBox.appendChild(lbl);
     });
     updateAlgoCount();
@@ -2157,6 +2172,15 @@ function renderRealExperimentsPage() {
   });
   ppSelect.addEventListener('change', syncTargetToPreprocessor);
 
+  // --- 套用系統設定的預設值 (任務類型 / 資料來源勾選) ---
+  const _settings = getSettings();
+  const taskRadio = document.querySelector(`input[name="exp-task-type"][value="${_settings.taskType}"]`);
+  if (taskRadio) taskRadio.checked = true;
+  srcRaw.checked = _settings.srcRaw;
+  // 已預處理資料:只有後端真的有 preprocessor 時才依設定勾 (srcPp.disabled 由 refreshPpSelect 決定)
+  if (!srcPp.disabled) srcPp.checked = _settings.srcPp;
+  ppSelect.disabled = !srcPp.checked;
+
   // Train button
   const btn = document.getElementById('btn-real-train');
   const newBtn = btn.cloneNode(true);
@@ -2183,6 +2207,8 @@ function renderRealExperimentsPage() {
     }
     if (selectedAlgos.length === 0) { alert('請至少選擇一個演算法'); return; }
 
+    // 測試集比例 / 隨機種子 來自系統設定
+    const s = getSettings();
     const options = {
       features: selectedFeatures,
       algorithms: selectedAlgos,
@@ -2190,6 +2216,8 @@ function renderRealExperimentsPage() {
       timeSeries: timeSeries,
       sources: sources,
       preprocessorId: preprocessorId,
+      testSize: s.testSize,
+      randomState: s.seed,
     };
     startRealTraining(ds, targetSel.value, options);
   });
@@ -2245,7 +2273,12 @@ async function startRealTraining(ds, targetCol, options = {}) {
         target: targetCol,
         features: options.features,
         algorithms: options.algorithms,
-        options: { taskType: options.taskType, timeSeries: options.timeSeries },
+        options: {
+          taskType: options.taskType,
+          timeSeries: options.timeSeries,
+          testSize: options.testSize,
+          randomState: options.randomState,
+        },
         sources: options.sources || ['raw'],
         preprocessorId: options.preprocessorId || null,
       }, (ev) => {
@@ -2806,7 +2839,7 @@ async function loadShapFigures() {
 
   try {
     const res = await ApiClient.visualizeShap({
-      modelId, sampleIndex, targetFeature, maxSamples: 200,
+      modelId, sampleIndex, targetFeature, maxSamples: getSettings().shapSamples,
     });
     const cfg = { responsive: true, displaylogo: false };
     Plotly.newPlot('shap-fig-global', res.global.data, res.global.layout, cfg);
@@ -3112,17 +3145,44 @@ function updateDashboardRealMetrics() {
 }
 
 // ===== SYSTEM SETTINGS =====
+// ===== SETTINGS — 全域存取 =====
+// 預設值 (localStorage 沒有時用這套)
+const DEFAULT_SETTINGS = {
+  testSize: 0.2,
+  seed: 42,
+  taskType: 'auto',
+  srcRaw: true,
+  srcPp: false,
+  // 預設啟用的演算法 key (對應 MLEngine.ALGORITHMS) — 預設全開
+  activeAlgos: ['linear_regression', 'ridge', 'lasso', 'knn_3', 'knn_5', 'knn_7',
+                'decision_tree', 'random_forest', 'gradient_boosting', 'xgboost',
+                'naive_bayes', 'logistic', 'svr'],
+  shapSamples: 200,
+};
+
+// 其他頁面要讀設定就呼叫這個 — 一律回傳完整物件 (缺的欄位用預設補)
+function getSettings() {
+  let saved = {};
+  try {
+    saved = JSON.parse(localStorage.getItem('automl_settings') || '{}');
+  } catch (e) { saved = {}; }
+  return { ...DEFAULT_SETTINGS, ...saved };
+}
+
 function initSettings() {
-  const timeoutSel = document.getElementById('setting-timeout');
-  const autofeCb = document.getElementById('setting-autofe');
-  const hpoInput = document.getElementById('setting-hpotrials');
-  const emailCb = document.getElementById('setting-email');
-  const kfoldSel = document.getElementById('setting-kfold');
+  const testSizeRange = document.getElementById('setting-test-size');
+  const testSizeLabel = document.getElementById('setting-test-size-label');
+  const seedInput = document.getElementById('setting-seed');
+  const taskTypeSel = document.getElementById('setting-task-type');
+  const srcRawCb = document.getElementById('setting-src-raw');
+  const srcPpCb = document.getElementById('setting-src-pp');
+  const shapSamplesInput = document.getElementById('setting-shap-samples');
   const algoContainer = document.getElementById('setting-algos-container');
   const saveBtn = document.getElementById('btn-save-settings');
+  const resetBtn = document.getElementById('btn-reset-settings');
   const toast = document.getElementById('settings-save-toast');
 
-  // ---- API Toggle ----
+  // ---- API 區 (本來就有效,保留) ----
   const apiToggle = document.getElementById('setting-use-api');
   const apiUrlInput = document.getElementById('setting-api-url');
   const apiPingBtn = document.getElementById('btn-api-ping');
@@ -3140,71 +3200,88 @@ function initSettings() {
     });
   }
 
-  let activeAlgos = ['XGBoost', 'LightGBM', 'CatBoost'];
+  // ---- 演算法 chips — 依 MLEngine.ALGORITHMS 動態產生 ----
+  let activeAlgos = getSettings().activeAlgos.slice();
 
-  const renderAlgos = () => {
-    if (!algoContainer) return;
-    algoContainer.querySelectorAll('.setting-algo-chip').forEach(chip => {
-      const val = chip.dataset.val;
-      if (activeAlgos.includes(val)) {
-        chip.className = 'setting-algo-chip text-xs bg-primary-500/10 text-primary-400 px-2 py-1 rounded-lg cursor-pointer select-none';
-      } else {
-        chip.className = 'setting-algo-chip text-xs bg-dark-600 text-dark-400 px-2 py-1 rounded-lg cursor-pointer select-none';
-      }
+  const renderAlgoChips = () => {
+    if (!algoContainer || typeof MLEngine === 'undefined') return;
+    algoContainer.innerHTML = '';
+    Object.entries(MLEngine.ALGORITHMS).forEach(([key, algo]) => {
+      const on = activeAlgos.includes(key);
+      const chip = document.createElement('span');
+      chip.className = on
+        ? 'setting-algo-chip text-xs bg-primary-500/15 text-primary-400 border border-primary-500/30 px-2.5 py-1 rounded-lg cursor-pointer select-none transition-colors'
+        : 'setting-algo-chip text-xs bg-dark-700 text-dark-400 border border-dark-600 px-2.5 py-1 rounded-lg cursor-pointer select-none transition-colors';
+      chip.dataset.val = key;
+      chip.textContent = algo.label || algo.name || key;
+      algoContainer.appendChild(chip);
     });
   };
 
   if (algoContainer) {
     algoContainer.addEventListener('click', (e) => {
       const chip = e.target.closest('.setting-algo-chip');
-      if (chip) {
-        const val = chip.dataset.val;
-        if (activeAlgos.includes(val)) {
-          activeAlgos = activeAlgos.filter(v => v !== val);
-        } else {
-          activeAlgos.push(val);
-        }
-        renderAlgos();
+      if (!chip) return;
+      const val = chip.dataset.val;
+      if (activeAlgos.includes(val)) activeAlgos = activeAlgos.filter(v => v !== val);
+      else activeAlgos.push(val);
+      renderAlgoChips();
+    });
+  }
+
+  // ---- 載入已存設定到 UI ----
+  const applyToUI = (s) => {
+    if (testSizeRange) {
+      testSizeRange.value = s.testSize;
+      if (testSizeLabel) testSizeLabel.textContent = `${Math.round(s.testSize * 100)}%`;
+    }
+    if (seedInput) seedInput.value = s.seed;
+    if (taskTypeSel) taskTypeSel.value = s.taskType;
+    if (srcRawCb) srcRawCb.checked = s.srcRaw;
+    if (srcPpCb) srcPpCb.checked = s.srcPp;
+    if (shapSamplesInput) shapSamplesInput.value = s.shapSamples;
+    activeAlgos = s.activeAlgos.slice();
+    renderAlgoChips();
+  };
+  applyToUI(getSettings());
+
+  // test-size slider 即時更新標籤
+  if (testSizeRange && testSizeLabel) {
+    testSizeRange.addEventListener('input', () => {
+      testSizeLabel.textContent = `${Math.round(testSizeRange.value * 100)}%`;
+    });
+  }
+
+  // ---- 儲存 ----
+  if (saveBtn) {
+    saveBtn.addEventListener('click', () => {
+      const cfg = {
+        testSize: testSizeRange ? parseFloat(testSizeRange.value) : 0.2,
+        seed: seedInput ? parseInt(seedInput.value) || 42 : 42,
+        taskType: taskTypeSel ? taskTypeSel.value : 'auto',
+        srcRaw: srcRawCb ? srcRawCb.checked : true,
+        srcPp: srcPpCb ? srcPpCb.checked : false,
+        activeAlgos: activeAlgos.slice(),
+        shapSamples: shapSamplesInput ? (parseInt(shapSamplesInput.value) || 200) : 200,
+      };
+      localStorage.setItem('automl_settings', JSON.stringify(cfg));
+      if (toast) {
+        toast.style.opacity = '1';
+        setTimeout(() => { toast.style.opacity = '0'; }, 2000);
       }
     });
   }
 
-  // Load from localStorage
-  const configStr = localStorage.getItem('automl_settings');
-  if (configStr) {
-    try {
-      const config = JSON.parse(configStr);
-      if (timeoutSel && config.timeout) timeoutSel.value = config.timeout;
-      if (autofeCb && config.autofe !== undefined) autofeCb.checked = config.autofe;
-      if (hpoInput && config.hpo) hpoInput.value = config.hpo;
-      if (emailCb && config.email !== undefined) emailCb.checked = config.email;
-      if (kfoldSel && config.kfold) kfoldSel.value = config.kfold;
-      if (config.activeAlgos) {
-        activeAlgos = config.activeAlgos;
-        renderAlgos();
-      }
-    } catch (e) {}
-  } else {
-    renderAlgos(); // Initial render for defaults
-  }
-
-  // Save to localStorage
-  if (saveBtn) {
-    saveBtn.addEventListener('click', () => {
-      const newConfig = {
-        timeout: timeoutSel ? timeoutSel.value : '1 小時',
-        autofe: autofeCb ? autofeCb.checked : true,
-        hpo: hpoInput ? hpoInput.value : 200,
-        email: emailCb ? emailCb.checked : true,
-        kfold: kfoldSel ? kfoldSel.value : '5-Fold',
-        activeAlgos: activeAlgos
-      };
-      localStorage.setItem('automl_settings', JSON.stringify(newConfig));
-      
-      // Toast animation
+  // ---- 重置 ----
+  if (resetBtn) {
+    resetBtn.addEventListener('click', () => {
+      if (!confirm('確定要清除所有已儲存的設定,回到預設值嗎?')) return;
+      localStorage.removeItem('automl_settings');
+      applyToUI({ ...DEFAULT_SETTINGS });
       if (toast) {
+        toast.textContent = '已重置為預設值';
         toast.style.opacity = '1';
-        setTimeout(() => { toast.style.opacity = '0'; }, 2000);
+        setTimeout(() => { toast.style.opacity = '0'; toast.textContent = '設定已儲存'; }, 2000);
       }
     });
   }

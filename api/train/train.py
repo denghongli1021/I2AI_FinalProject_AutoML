@@ -52,25 +52,26 @@ except Exception:
 # ============================================================
 # Algorithm registry — 對應 js MLEngine.ALGORITHMS
 # ============================================================
-def _algo_factory(key: str, task_type: str):
+def _algo_factory(key: str, task_type: str, random_state: int = 42):
+    # random_state 傳給所有有隨機性的模型,固定種子才能重現結果
     if key == "linear_regression": return LinearRegression()
     if key == "ridge":              return Ridge(alpha=1.0)
     if key == "lasso":              return Lasso(alpha=0.1, max_iter=2000)
-    if key == "logistic":           return LogisticRegression(max_iter=300)
+    if key == "logistic":           return LogisticRegression(max_iter=300, random_state=random_state)
     if key == "naive_bayes":        return GaussianNB()
     if key == "knn_3":  return KNeighborsClassifier(3) if task_type == "classification" else KNeighborsRegressor(3)
     if key == "knn_5":  return KNeighborsClassifier(5) if task_type == "classification" else KNeighborsRegressor(5)
     if key == "knn_7":  return KNeighborsClassifier(7) if task_type == "classification" else KNeighborsRegressor(7)
     if key == "decision_tree":
-        return DecisionTreeClassifier(max_depth=6) if task_type == "classification" else DecisionTreeRegressor(max_depth=6)
+        return DecisionTreeClassifier(max_depth=6, random_state=random_state) if task_type == "classification" else DecisionTreeRegressor(max_depth=6, random_state=random_state)
     if key == "random_forest":
-        return RandomForestClassifier(n_estimators=20, max_depth=5, n_jobs=-1) if task_type == "classification" else RandomForestRegressor(n_estimators=20, max_depth=5, n_jobs=-1)
+        return RandomForestClassifier(n_estimators=20, max_depth=5, n_jobs=-1, random_state=random_state) if task_type == "classification" else RandomForestRegressor(n_estimators=20, max_depth=5, n_jobs=-1, random_state=random_state)
     if key == "gradient_boosting":
-        return GradientBoostingClassifier(n_estimators=30, max_depth=3) if task_type == "classification" else GradientBoostingRegressor(n_estimators=30, max_depth=3)
+        return GradientBoostingClassifier(n_estimators=30, max_depth=3, random_state=random_state) if task_type == "classification" else GradientBoostingRegressor(n_estimators=30, max_depth=3, random_state=random_state)
     if key == "xgboost":
         if not _HAS_XGB:
             raise RuntimeError("xgboost 套件未安裝,請執行 pip install xgboost")
-        return XGBClassifier(n_estimators=40, max_depth=4, learning_rate=0.1, eval_metric="logloss", verbosity=0) if task_type == "classification" else XGBRegressor(n_estimators=40, max_depth=4, learning_rate=0.1, verbosity=0)
+        return XGBClassifier(n_estimators=40, max_depth=4, learning_rate=0.1, eval_metric="logloss", verbosity=0, random_state=random_state) if task_type == "classification" else XGBRegressor(n_estimators=40, max_depth=4, learning_rate=0.1, verbosity=0, random_state=random_state)
     if key == "svr":
         if task_type != "regression":
             raise RuntimeError("SVR 僅支援回歸任務")
@@ -138,6 +139,7 @@ def run(
             except Exception: pass
     is_time_series = bool(options.get("timeSeries", False))
     test_size = float(options.get("testSize", 0.2))
+    random_state = int(options.get("randomState", 42))
     task_override = options.get("taskType")
 
     # 1. Build feature matrix (handle date-derived features)
@@ -172,7 +174,7 @@ def run(
         y_train, y_test = y[:split], y[split:]
     else:
         X_train, X_test, y_train, y_test = train_test_split(
-            X, y, test_size=test_size, shuffle=True, random_state=42,
+            X, y, test_size=test_size, shuffle=True, random_state=random_state,
         )
 
     _emit({"type": "log", "msg": f"資料準備完成: {len(X)} 筆有效數據, {X.shape[1]} 個特徵", "level": "success"})
@@ -181,7 +183,7 @@ def run(
 
     # 5-8. Standardize + train + sort (與 run_prepared 共用)
     return _train_all(X_train, X_test, y_train, y_test, feature_names, target,
-                      task_type, algorithms, _emit)
+                      task_type, algorithms, _emit, random_state)
 
 
 def run_prepared(
@@ -225,11 +227,13 @@ def run_prepared(
         y_train = np.asarray(y_train).astype(str)
         y_test = np.asarray(y_test).astype(str)
 
+    random_state = int(options.get("randomState", 42))
+
     _emit({"type": "log", "msg": f"使用已預處理資料: 訓練 {len(X_train)} 筆 / 測試 {len(X_test)} 筆, {X_train.shape[1]} 個特徵", "level": "success"})
     _emit({"type": "log", "msg": f"任務類型: {'回歸' if task_type == 'regression' else '分類'}", "level": "info"})
 
     return _train_all(X_train, X_test, y_train, y_test, feature_names, target,
-                      task_type, algorithms, _emit)
+                      task_type, algorithms, _emit, random_state)
 
 
 # ============================================================
@@ -245,6 +249,7 @@ def _train_all(
     task_type: str,
     algorithms: list[str],
     _emit: Callable[[dict], None],
+    random_state: int = 42,
 ) -> list[tuple[dict[str, Any], Any, StandardScaler, pd.DataFrame]]:
     # 5. Standardize
     scaler = StandardScaler()
@@ -277,7 +282,7 @@ def _train_all(
         try:
             bundle, estimator = _train_one(
                 key, task_type, X_train_norm, X_test_norm, y_train, y_test,
-                feature_names, target, feature_stats, scaler,
+                feature_names, target, feature_stats, scaler, random_state,
             )
             results.append((bundle, estimator, scaler, X_test_df))
             score = bundle["metrics"].get("testScore", 0.0)
@@ -310,9 +315,10 @@ def _train_one(
     target: str,
     feature_stats: list[dict[str, float]],
     scaler: StandardScaler,
+    random_state: int = 42,
 ) -> tuple[dict[str, Any], Any]:
     t0 = time.perf_counter()
-    estimator = _algo_factory(key, task_type)
+    estimator = _algo_factory(key, task_type, random_state)
     estimator.fit(X_train, y_train)
 
     train_pred = estimator.predict(X_train)
