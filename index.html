@@ -10,7 +10,7 @@
   <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="css/style.css?v=4">
+  <link rel="stylesheet" href="css/style.css?v=8">
   <script>
     tailwind.config = {
       theme: {
@@ -1147,6 +1147,7 @@
                     <input type="checkbox" id="select-all-models" class="rounded bg-dark-700 border-dark-500">
                   </th>
                   <th class="py-3 px-4 text-left font-medium">排名</th>
+                  <th class="py-3 px-4 text-left font-medium">資料來源</th>
                   <th class="py-3 px-4 text-left font-medium cursor-pointer hover:text-dark-200 sortable" data-sort="name">演算法 <span class="sort-arrow">&#8597;</span></th>
                   <th id="lb-col1" class="py-3 px-4 text-left font-medium cursor-pointer hover:text-dark-200 sortable" data-sort="metric1">F1-Score <span class="sort-arrow">&#8597;</span></th>
                   <th id="lb-col2" class="py-3 px-4 text-left font-medium cursor-pointer hover:text-dark-200 sortable" data-sort="metric2">AUC-ROC <span class="sort-arrow">&#8597;</span></th>
@@ -1720,76 +1721,77 @@
             </div>
 
             <div>
-              <h4 class="text-sm font-medium text-dark-300 mb-3">一般設定</h4>
+              <h4 class="text-sm font-medium text-dark-300 mb-3">訓練預設值 <span class="text-xs text-dark-500 font-normal">— 實驗室建立新實驗時會自動套用</span></h4>
               <div class="space-y-4">
                 <div class="flex items-center justify-between p-3 rounded-lg bg-dark-800/50">
                   <div>
-                    <p class="text-sm font-medium">預設任務超時時間</p>
-                    <p class="text-xs text-dark-400">超過此時間的訓練將自動停止</p>
+                    <p class="text-sm font-medium">預設測試集比例</p>
+                    <p class="text-xs text-dark-400">train_test_split 的 test_size,套用於「原始資料集」訓練</p>
                   </div>
-                  <select id="setting-timeout" class="bg-dark-700 border border-dark-600 rounded-lg px-3 py-1.5 text-sm focus:border-primary-500 outline-none">
-                    <option>30 分鐘</option>
-                    <option selected>1 小時</option>
-                    <option>2 小時</option>
-                    <option>無限制</option>
+                  <div class="flex items-center gap-3">
+                    <input type="range" id="setting-test-size" min="0.1" max="0.5" step="0.05" value="0.2" class="w-40 accent-primary-500">
+                    <span id="setting-test-size-label" class="text-sm font-mono text-primary-400 w-12 text-right">20%</span>
+                  </div>
+                </div>
+                <div class="flex items-center justify-between p-3 rounded-lg bg-dark-800/50">
+                  <div>
+                    <p class="text-sm font-medium">隨機種子 (random_state)</p>
+                    <p class="text-xs text-dark-400">固定種子讓切分與模型結果可重現,改了就會得到不同切分</p>
+                  </div>
+                  <input type="number" id="setting-seed" value="42" min="0" class="w-24 bg-dark-700 border border-dark-600 rounded-lg px-3 py-1.5 text-sm text-right focus:border-primary-500 outline-none">
+                </div>
+                <div class="flex items-center justify-between p-3 rounded-lg bg-dark-800/50">
+                  <div>
+                    <p class="text-sm font-medium">預設任務類型</p>
+                    <p class="text-xs text-dark-400">實驗室「任務類型」的預設選項</p>
+                  </div>
+                  <select id="setting-task-type" class="bg-dark-700 border border-dark-600 rounded-lg px-3 py-1.5 text-sm focus:border-primary-500 outline-none">
+                    <option value="auto" selected>自動偵測</option>
+                    <option value="regression">回歸</option>
+                    <option value="classification">分類</option>
                   </select>
                 </div>
                 <div class="flex items-center justify-between p-3 rounded-lg bg-dark-800/50">
                   <div>
-                    <p class="text-sm font-medium">自動特徵工程</p>
-                    <p class="text-xs text-dark-400">自動產生交互特徵與多項式特徵</p>
+                    <p class="text-sm font-medium">預設資料來源</p>
+                    <p class="text-xs text-dark-400">實驗室「資料來源」預先勾選哪些</p>
                   </div>
-                  <label class="toggle-switch">
-                    <input type="checkbox" id="setting-autofe" checked>
-                    <span class="toggle-slider"></span>
-                  </label>
-                </div>
-                <div class="flex items-center justify-between p-3 rounded-lg bg-dark-800/50">
-                  <div>
-                    <p class="text-sm font-medium">超參數優化試驗次數</p>
-                    <p class="text-xs text-dark-400">增加次數可提升效能但耗時更長</p>
+                  <div class="flex gap-4 text-sm">
+                    <label class="flex items-center gap-1.5 cursor-pointer"><input type="checkbox" id="setting-src-raw" class="accent-primary-500" checked> 原始資料集</label>
+                    <label class="flex items-center gap-1.5 cursor-pointer"><input type="checkbox" id="setting-src-pp" class="accent-primary-500"> 已預處理資料</label>
                   </div>
-                  <input type="number" id="setting-hpotrials" value="200" class="w-24 bg-dark-700 border border-dark-600 rounded-lg px-3 py-1.5 text-sm text-right focus:border-primary-500 outline-none">
-                </div>
-                <div class="flex items-center justify-between p-3 rounded-lg bg-dark-800/50">
-                  <div>
-                    <p class="text-sm font-medium">Email 通知</p>
-                    <p class="text-xs text-dark-400">訓練完成或失敗時發送通知</p>
-                  </div>
-                  <label class="toggle-switch">
-                    <input type="checkbox" id="setting-email" checked>
-                    <span class="toggle-slider"></span>
-                  </label>
                 </div>
               </div>
             </div>
 
             <div>
-              <h4 class="text-sm font-medium text-dark-300 mb-3">模型設定</h4>
+              <h4 class="text-sm font-medium text-dark-300 mb-3">預設啟用演算法 <span class="text-xs text-dark-500 font-normal">— 實驗室會預先勾選這些(點擊切換)</span></h4>
+              <div class="flex flex-wrap gap-2 p-3 rounded-lg bg-dark-800/50" id="setting-algos-container">
+                <!-- 由 JS 依 MLEngine.ALGORITHMS 動態產生 -->
+              </div>
+            </div>
+
+            <div>
+              <h4 class="text-sm font-medium text-dark-300 mb-3">視覺化</h4>
               <div class="space-y-4">
                 <div class="flex items-center justify-between p-3 rounded-lg bg-dark-800/50">
                   <div>
-                    <p class="text-sm font-medium">啟用的演算法</p>
-                    <p class="text-xs text-dark-400">選擇要包含在自動搜尋中的模型</p>
+                    <p class="text-sm font-medium">SHAP 最大樣本數</p>
+                    <p class="text-xs text-dark-400">洞察頁 SHAP 計算的樣本上限,越大越準但越慢</p>
                   </div>
-                  <div class="flex gap-2" id="setting-algos-container">
-                    <span class="setting-algo-chip text-xs bg-primary-500/10 text-primary-400 px-2 py-1 rounded-lg cursor-pointer select-none" data-val="XGBoost">XGBoost</span>
-                    <span class="setting-algo-chip text-xs bg-primary-500/10 text-primary-400 px-2 py-1 rounded-lg cursor-pointer select-none" data-val="LightGBM">LightGBM</span>
-                    <span class="setting-algo-chip text-xs bg-primary-500/10 text-primary-400 px-2 py-1 rounded-lg cursor-pointer select-none" data-val="CatBoost">CatBoost</span>
-                    <span class="setting-algo-chip text-xs bg-dark-600 text-dark-400 px-2 py-1 rounded-lg cursor-pointer select-none" data-val="Random Forest">Random Forest</span>
-                  </div>
+                  <input type="number" id="setting-shap-samples" value="200" min="20" max="2000" step="20" class="w-24 bg-dark-700 border border-dark-600 rounded-lg px-3 py-1.5 text-sm text-right focus:border-primary-500 outline-none">
                 </div>
-                <div class="flex items-center justify-between p-3 rounded-lg bg-dark-800/50">
-                  <div>
-                    <p class="text-sm font-medium">交叉驗證折數</p>
-                    <p class="text-xs text-dark-400">K-Fold Cross Validation</p>
-                  </div>
-                  <select id="setting-kfold" class="bg-dark-700 border border-dark-600 rounded-lg px-3 py-1.5 text-sm focus:border-primary-500 outline-none">
-                    <option>3-Fold</option>
-                    <option selected>5-Fold</option>
-                    <option>10-Fold</option>
-                  </select>
+              </div>
+            </div>
+
+            <div>
+              <h4 class="text-sm font-medium text-dark-300 mb-3">其他</h4>
+              <div class="flex items-center justify-between p-3 rounded-lg bg-dark-800/50">
+                <div>
+                  <p class="text-sm font-medium">重置所有設定</p>
+                  <p class="text-xs text-dark-400">清除瀏覽器儲存的設定,回到預設值</p>
                 </div>
+                <button id="btn-reset-settings" class="px-3 py-1.5 bg-danger-600/80 hover:bg-danger-500 rounded-lg text-xs font-medium text-white transition-colors">重置</button>
               </div>
             </div>
           </div>
@@ -1803,11 +1805,11 @@
   </main>
 
   <!-- ?v= 是 cache-busting:改 JS 後把版本號 +1,瀏覽器就會強制重抓,不用手動硬重整 -->
-  <script src="js/data-engine.js?v=4"></script>
-  <script src="js/ml-engine.js?v=4"></script>
-  <script src="js/mock-data.js?v=4"></script>
-  <script src="js/charts.js?v=4"></script>
-  <script src="js/api.js?v=4"></script>
-  <script src="js/app.js?v=4"></script>
+  <script src="js/data-engine.js?v=8"></script>
+  <script src="js/ml-engine.js?v=8"></script>
+  <script src="js/mock-data.js?v=8"></script>
+  <script src="js/charts.js?v=8"></script>
+  <script src="js/api.js?v=8"></script>
+  <script src="js/app.js?v=8"></script>
 </body>
 </html>

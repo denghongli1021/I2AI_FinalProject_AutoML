@@ -1308,6 +1308,7 @@ function renderLeaderboardTable() {
     tr.innerHTML = `
       <td class="py-3 px-4"><input type="checkbox" class="model-checkbox" data-model="${m.name}" ${selectedModels.has(m.name) ? 'checked' : ''}></td>
       <td class="py-3 px-4 font-mono text-dark-400 text-xs">#${rank}</td>
+      <td class="py-3 px-4"><span class="inline-block px-2 py-0.5 rounded-md text-[11px] font-semibold bg-dark-700 text-dark-300 border border-dark-600">Demo</span></td>
       <td class="py-3 px-4 font-medium text-sm">${m.name}</td>
       <td class="py-3 px-4"><span class="font-mono text-sm ${rank <= 2 ? 'text-success-400' : ''}">${m.f1.toFixed(3)}</span>${f1Bar}</td>
       <td class="py-3 px-4 font-mono text-sm">${m.auc.toFixed(3)}</td>
@@ -1331,6 +1332,14 @@ function initSorting() {
       const isAsc = th.classList.contains('sort-asc');
       document.querySelectorAll('.sortable').forEach(t => t.classList.remove('sort-asc', 'sort-desc'));
       th.classList.add(isAsc ? 'sort-desc' : 'sort-asc');
+      const ascending = !isAsc;  // 點擊後的新狀態
+
+      // 實作模式 — 排序真實訓練模型,不要去動 demo 假資料
+      if (appMode === 'real' && MLEngine.trainedModels.length > 0) {
+        sortRealLeaderboard(key, ascending);
+        return;
+      }
+
       MOCK.leaderboardModels.sort((a, b) => {
         let va = a[key], vb = b[key];
         if (key === 'name') return isAsc ? vb.localeCompare(va) : va.localeCompare(vb);
@@ -1342,6 +1351,35 @@ function initSorting() {
       initModelSelection();
     });
   });
+}
+
+// 實作模式的排行榜排序 — 直接排 MLEngine.trainedModels 再重繪
+function sortRealLeaderboard(key, ascending) {
+  const models = MLEngine.trainedModels;
+  if (models.length === 0) return;
+  const isReg = models[0].taskType === 'regression';
+
+  const valOf = (m) => {
+    switch (key) {
+      case 'name':    return m.name;
+      case 'metric1': return isReg ? m.metrics.testR2   : m.metrics.f1;
+      case 'metric2': return isReg ? m.metrics.testRMSE : 0;          // 分類的 AUC 暫無
+      case 'metric3': return isReg ? m.metrics.testMAE  : m.metrics.testAccuracy;
+      case 'time':    return m.trainTime;
+      case 'latency': return m.inferLatency || 0;
+      default:        return 0;
+    }
+  };
+
+  models.sort((a, b) => {
+    const va = valOf(a), vb = valOf(b);
+    if (key === 'name') {
+      return ascending ? String(va).localeCompare(String(vb))
+                       : String(vb).localeCompare(String(va));
+    }
+    return ascending ? va - vb : vb - va;
+  });
+  renderRealLeaderboard();
 }
 
 function initModelSelection() {
@@ -2470,6 +2508,10 @@ function renderRealLeaderboard() {
   if (!tbody) return;
   tbody.innerHTML = '';
 
+  // 找出訓練最快的模型 (給「最快」標籤用) — 只看有成功訓練的
+  const trained = models.filter(m => m.trainTime > 0);
+  const fastestTrainTime = trained.length ? Math.min(...trained.map(m => m.trainTime)) : null;
+
   models.forEach((m, i) => {
     const tr = document.createElement('tr');
     tr.className = 'border-b border-dark-700/30';
@@ -2493,17 +2535,47 @@ function renderRealLeaderboard() {
         <td class="py-3 px-4 font-mono text-xs">${(m.metrics.testAccuracy * 100).toFixed(2)}%</td>`;
     }
 
-    const badge = i === 0 ? '<span class="badge badge-success">最佳</span>' : '';
+    // 標籤:最佳 (rank 1) + 最快 (訓練時間最短)
+    let tags = '';
+    if (i === 0) tags += '<span class="badge badge-success mr-1">最佳</span>';
+    if (fastestTrainTime !== null && m.trainTime === fastestTrainTime && m.trainTime > 0) {
+      tags += '<span class="text-[10px] bg-accent-500/15 text-accent-400 px-1.5 py-0.5 rounded-full">⚡ 最快</span>';
+    }
+    if (!tags) tags = '<span class="text-dark-600 text-xs">—</span>';
+
+    // 推論延遲 (每筆樣本平均 ms) — 後端量測
+    const lat = (typeof m.inferLatency === 'number' && m.inferLatency > 0)
+      ? (m.inferLatency < 0.01 ? '<0.01ms' : m.inferLatency.toFixed(3) + 'ms')
+      : '<span class="text-dark-600">—</span>';
+
+    // 操作:分析按鈕 → 跳到洞察頁,並讓 SHAP 區塊自動選這個模型
+    const actions = m.id
+      ? `<button class="text-xs text-primary-400 hover:text-primary-300 transition-colors" onclick="analyzeModel('${m.id}')">分析</button>`
+      : '<span class="text-dark-600 text-xs">—</span>';
+
+    // 資料來源 badge + 去掉名稱的 [原始]/[預處理] 文字前綴
+    const cleanName = m.name.replace(/^\[(原始|預處理)\]\s*/, '');
+    let srcBadge;
+    if (m.dataSource === 'preprocessed') {
+      srcBadge = '<span class="inline-block px-2 py-0.5 rounded-md text-[11px] font-semibold bg-accent-500/15 text-accent-400 border border-accent-500/30">預處理</span>';
+      tr.classList.add('border-l-2', 'border-l-accent-500/40');
+    } else if (m.dataSource === 'raw') {
+      srcBadge = '<span class="inline-block px-2 py-0.5 rounded-md text-[11px] font-semibold bg-primary-500/15 text-primary-400 border border-primary-500/30">原始</span>';
+      tr.classList.add('border-l-2', 'border-l-primary-500/40');
+    } else {
+      srcBadge = '<span class="text-dark-500 text-xs">—</span>';
+    }
 
     tr.innerHTML = `
       <td class="py-3 px-4"><input type="checkbox" class="model-select-cb" data-idx="${i}"></td>
       <td class="py-3 px-4">${rankEl}</td>
-      <td class="py-3 px-4"><span class="font-medium">${escapeHtml(m.name)}</span></td>
+      <td class="py-3 px-4">${srcBadge}</td>
+      <td class="py-3 px-4"><span class="font-medium">${escapeHtml(cleanName)}</span></td>
       ${extraCols}
       <td class="py-3 px-4 font-mono text-xs">${m.trainTime.toFixed(0)}ms</td>
-      <td class="py-3 px-4 font-mono text-xs">—</td>
-      <td class="py-3 px-4">${badge}</td>
-      <td class="py-3 px-4">—</td>
+      <td class="py-3 px-4 font-mono text-xs">${lat}</td>
+      <td class="py-3 px-4">${tags}</td>
+      <td class="py-3 px-4">${actions}</td>
     `;
     tbody.appendChild(tr);
   });
@@ -2646,34 +2718,62 @@ function renderRealInsights() {
 
 // ===== SHAP SECTION (Plotly figures from /api/visualize/shap) =====
 let _shapInitialized = false;
+let _shapRequestedModelId = null;   // 排行榜「分析」按鈕指定要看的模型
+
+// 排行榜 / 結果表的「分析」按鈕呼叫:跳到洞察頁並指定 SHAP 要顯示哪個模型
+function analyzeModel(modelId) {
+  _shapRequestedModelId = modelId || null;
+  navigateTo('insights');
+}
+
+// 依選定模型重填「交互特徵」下拉 (raw / 預處理 的特徵名不同)
+function _populateShapFeatureSelect(model) {
+  const featSel = document.getElementById('shap-target-feature');
+  if (!featSel) return;
+  featSel.innerHTML = '';
+  (model?.featureNames || []).forEach(fn => {
+    const opt = document.createElement('option');
+    opt.value = fn; opt.textContent = fn;
+    featSel.appendChild(opt);
+  });
+}
 
 function initShapSection(models, best) {
   const modelSel = document.getElementById('shap-model-select');
-  const featSel = document.getElementById('shap-target-feature');
-  const sampleInput = document.getElementById('shap-sample-index');
   const btn = document.getElementById('btn-shap-refresh');
   if (!modelSel || !btn) return;  // 沒掛這段 HTML 就跳過
 
-  // 只填會打 SHAP 的模型 (Tree-based 最快;線性也行)
+  // 填模型下拉
   modelSel.innerHTML = '';
   models.forEach(m => {
     if (!m.id) return;  // 訓練失敗的模型沒 id
     const opt = document.createElement('option');
     opt.value = m.id;
-    opt.textContent = `${m.name} (${(m.taskType === 'regression' ? 'R²=' + m.metrics.testR2.toFixed(3) : 'Acc=' + (m.metrics.testAccuracy*100).toFixed(1) + '%')})`;
+    const scoreStr = m.taskType === 'regression'
+      ? 'R²=' + m.metrics.testR2.toFixed(3)
+      : 'Acc=' + (m.metrics.testAccuracy * 100).toFixed(1) + '%';
+    opt.textContent = `${m.name} (${scoreStr})`;
     modelSel.appendChild(opt);
   });
 
-  // 預設選最佳模型
-  if (best && best.id) modelSel.value = best.id;
+  // 決定預設選哪個:有指定 (從「分析」按鈕進來) 就用指定的,否則用最佳模型
+  let targetId = best && best.id ? best.id : (models[0] && models[0].id);
+  if (_shapRequestedModelId && models.some(m => m.id === _shapRequestedModelId)) {
+    targetId = _shapRequestedModelId;
+  }
+  _shapRequestedModelId = null;  // 用完清掉
+  if (targetId) modelSel.value = targetId;
 
-  // 填特徵下拉 (給 dependence plot)
-  featSel.innerHTML = '';
-  (best?.featureNames || []).forEach(fn => {
-    const opt = document.createElement('option');
-    opt.value = fn; opt.textContent = fn;
-    featSel.appendChild(opt);
-  });
+  // 交互特徵下拉 — 依「目前選定的模型」而非 best (raw/預處理特徵不同)
+  const curModel = models.find(m => m.id === modelSel.value) || best;
+  _populateShapFeatureSelect(curModel);
+
+  // 切換模型 → 重填交互特徵下拉 + 重算
+  modelSel.onchange = () => {
+    const m = models.find(x => x.id === modelSel.value);
+    _populateShapFeatureSelect(m);
+    loadShapFigures();
+  };
 
   if (!_shapInitialized) {
     btn.addEventListener('click', loadShapFigures);

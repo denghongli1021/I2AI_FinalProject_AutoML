@@ -316,8 +316,12 @@ def _train_one(
     estimator.fit(X_train, y_train)
 
     train_pred = estimator.predict(X_train)
+    # 量測測試集推論時間 → 換算每筆樣本的平均延遲 (ms)
+    t_pred = time.perf_counter()
     test_pred = estimator.predict(X_test)
+    pred_elapsed_ms = (time.perf_counter() - t_pred) * 1000
     train_time_ms = (time.perf_counter() - t0) * 1000
+    infer_latency_ms = pred_elapsed_ms / max(len(X_test), 1)
 
     metrics = (
         _regression_metrics(y_test, test_pred, y_train, train_pred)
@@ -338,6 +342,7 @@ def _train_one(
         "testTrue": _to_jsonable_list(y_test),
         "testPred": _to_jsonable_list(test_pred),
         "trainTime": round(train_time_ms, 2),
+        "inferLatency": round(infer_latency_ms, 4),  # 每筆樣本平均推論延遲 (ms)
         "trainSize": int(len(y_train)),
         "testSize": int(len(y_test)),
         "means": scaler.mean_.tolist(),
@@ -359,7 +364,7 @@ def _failed_bundle(key: str, task_type: str, target: str, feature_names: list[st
         "type": key, "name": _ALGO_LABELS.get(key, key),
         "taskType": task_type, "targetName": target, "featureNames": feature_names,
         "metrics": zero, "featureImportance": [0.0] * len(feature_names),
-        "testTrue": [], "testPred": [], "trainTime": 0.0,
+        "testTrue": [], "testPred": [], "trainTime": 0.0, "inferLatency": 0.0,
         "trainSize": 0, "testSize": 0, "means": [], "stds": [], "featureStats": [],
         "error": err,
     }
