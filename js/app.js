@@ -15,6 +15,7 @@ document.addEventListener('DOMContentLoaded', () => {
   initShapSampleSelect();
   initSettings();
   initApiKeepAlive();
+  initNotifications();
   // Show demo data on first load
   showDemoDataset();
   setTimeout(() => renderPageCharts('dashboard'), 100);
@@ -30,6 +31,93 @@ function initApiKeepAlive() {
       ApiClient.health().catch(() => {});  // 靜默 — keep-alive 失敗不打擾使用者
     }
   }, 30000);
+}
+
+// ===== NOTIFICATIONS (右上角鈴鐺) =====
+let _notifications = [];   // { title, message, type, time, read }
+
+function notify(title, message, type = 'info') {
+  _notifications.unshift({
+    title, message, type,
+    time: new Date(),
+    read: false,
+  });
+  if (_notifications.length > 30) _notifications = _notifications.slice(0, 30);
+  renderNotifications();
+}
+
+function renderNotifications() {
+  const list = document.getElementById('notification-list');
+  const badge = document.getElementById('notification-badge');
+  if (!list || !badge) return;
+
+  const unread = _notifications.filter(n => !n.read).length;
+  if (unread > 0) {
+    badge.textContent = unread > 9 ? '9+' : String(unread);
+    badge.classList.remove('hidden');
+    badge.classList.add('flex');
+  } else {
+    badge.classList.add('hidden');
+    badge.classList.remove('flex');
+  }
+
+  if (_notifications.length === 0) {
+    list.innerHTML = '<p class="px-4 py-6 text-center text-xs text-dark-500">目前沒有通知</p>';
+    return;
+  }
+
+  const iconMap = {
+    success: '<span class="text-success-400">✓</span>',
+    error: '<span class="text-danger-400">✗</span>',
+    warning: '<span class="text-warning-400">⚠</span>',
+    info: '<span class="text-primary-400">ℹ</span>',
+  };
+  list.innerHTML = _notifications.map(n => {
+    const t = n.time;
+    const ts = `${String(t.getHours()).padStart(2,'0')}:${String(t.getMinutes()).padStart(2,'0')}`;
+    return `
+      <div class="px-4 py-3 border-b border-dark-800/50 ${n.read ? 'opacity-60' : 'bg-dark-800/30'}">
+        <div class="flex items-start gap-2">
+          <span class="text-sm mt-0.5">${iconMap[n.type] || iconMap.info}</span>
+          <div class="flex-1 min-w-0">
+            <p class="text-xs font-semibold text-dark-100">${escapeHtml(n.title)}</p>
+            <p class="text-[11px] text-dark-400 mt-0.5">${escapeHtml(n.message)}</p>
+            <p class="text-[10px] text-dark-600 mt-1">${ts}</p>
+          </div>
+        </div>
+      </div>`;
+  }).join('');
+}
+
+function initNotifications() {
+  const btn = document.getElementById('btn-notification');
+  const panel = document.getElementById('notification-panel');
+  const clearBtn = document.getElementById('btn-clear-notifications');
+  if (!btn || !panel) return;
+
+  btn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    const opening = panel.classList.contains('hidden');
+    panel.classList.toggle('hidden');
+    if (opening) {
+      // 打開時把所有通知標為已讀
+      _notifications.forEach(n => n.read = true);
+      renderNotifications();
+    }
+  });
+  // 點面板外面關閉
+  document.addEventListener('click', (e) => {
+    if (!panel.classList.contains('hidden') && !panel.contains(e.target) && e.target !== btn) {
+      panel.classList.add('hidden');
+    }
+  });
+  if (clearBtn) {
+    clearBtn.addEventListener('click', () => {
+      _notifications = [];
+      renderNotifications();
+    });
+  }
+  renderNotifications();
 }
 
 // ===== MODE TOGGLE =====
@@ -2300,6 +2388,7 @@ async function startRealTraining(ds, targetCol, options = {}) {
       addLog('所有演算法均訓練失敗，請檢查資料或調整設定', 'error');
       btn.innerHTML = '重試訓練';
       btn.disabled = false;
+      notify('訓練失敗', '所有演算法均訓練失敗,請檢查資料或設定', 'error');
       return;
     }
 
@@ -2315,10 +2404,19 @@ async function startRealTraining(ds, targetCol, options = {}) {
     const txt = document.getElementById('global-status-text');
     if (txt) txt.textContent = '訓練完成';
 
+    // 訓練完成通知 — 右上角鈴鐺
+    const best = models[0];
+    const isReg = (data.taskType === 'regression');
+    const scoreStr = isReg
+      ? `R²=${best.metrics.testR2.toFixed(4)}`
+      : `Acc=${(best.metrics.testAccuracy * 100).toFixed(2)}%`;
+    notify('訓練完成 ✓', `${models.length} 個模型完成,最佳: ${best.name} (${scoreStr})`, 'success');
+
   } catch (err) {
     addLog(`錯誤: ${err.message}`, 'error');
     btn.innerHTML = '重試訓練';
     btn.disabled = false;
+    notify('訓練發生錯誤', err.message, 'error');
   }
 }
 
@@ -2426,6 +2524,82 @@ function renderExperimentResults(models, data) {
     chartSel.value = '0';
     renderChartsFor(0);
   }
+
+  // --- 批次預測區 ---
+  initBatchPredict(models);
+}
+
+// 批次預測:選模型 + 上傳 CSV → 後端整批預測 → 下載含 prediction 欄的 CSV
+function initBatchPredict(models) {
+  const modelSel = document.getElementById('batch-model-select');
+  const fileInput = document.getElementById('batch-csv-input');
+  const sampleInput = document.getElementById('batch-sample-input');
+  const btn = document.getElementById('btn-batch-predict');
+  const statusEl = document.getElementById('batch-predict-status');
+  if (!modelSel || !btn) return;
+
+  // 只列有 id 的模型 (訓練成功、後端有存)
+  const usable = models.filter(m => m.id);
+  modelSel.innerHTML = '';
+  if (usable.length === 0) {
+    modelSel.innerHTML = '<option value="">無可用模型 (需後端 API 模式訓練)</option>';
+    btn.disabled = true;
+    return;
+  }
+  btn.disabled = false;
+  usable.forEach((m, i) => {
+    const opt = document.createElement('option');
+    opt.value = m.id;
+    const srcTag = m.dataSource === 'preprocessed' ? '🟦預處理 ' : m.dataSource === 'raw' ? '🔵原始 ' : '';
+    opt.textContent = `${i === 0 ? '⭐ ' : ''}${srcTag}${m.name.replace(/^\[(原始|預處理)\]\s*/, '')}`;
+    modelSel.appendChild(opt);
+  });
+
+  btn.onclick = async () => {
+    const modelId = modelSel.value;
+    const file = fileInput.files[0];
+    const sampleFile = sampleInput ? sampleInput.files[0] : null;
+    const errCls = 'px-4 pb-4 pt-1 text-xs text-danger-400';
+    const okCls = 'px-4 pb-4 pt-1 text-xs text-success-400';
+    const infoCls = 'px-4 pb-4 pt-1 text-xs text-dark-400';
+    if (!modelId) { statusEl.textContent = '✗ 請選擇模型'; statusEl.className = errCls; return; }
+    if (!file) { statusEl.textContent = '✗ 請選擇測試 CSV 檔案'; statusEl.className = errCls; return; }
+    if (typeof ApiClient === 'undefined' || !ApiClient.enabled) {
+      statusEl.textContent = '✗ 批次預測需要開啟「使用 Python 後端 API」';
+      statusEl.className = errCls;
+      return;
+    }
+
+    btn.disabled = true;
+    const origLabel = btn.textContent;
+    btn.innerHTML = '<div class="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin inline-block mr-2"></div>預測中...';
+    statusEl.textContent = '處理中...';
+    statusEl.className = infoCls;
+    try {
+      const blob = await ApiClient.predictBatch(modelId, file, sampleFile);
+      // 有給範本 → submission.csv;沒給 → {原檔名}_predicted.csv
+      const outName = sampleFile ? 'submission.csv' : `${file.name.replace(/\.[^.]+$/, '')}_predicted.csv`;
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = outName;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+      const note = sampleFile ? '(已套用範本 submission 格式)' : '(新增 prediction 欄)';
+      statusEl.textContent = `✓ 預測完成,已下載 ${outName} ${note}`;
+      statusEl.className = okCls;
+      notify('批次預測完成 ✓', `${file.name} → ${outName}`, 'success');
+    } catch (e) {
+      statusEl.textContent = `✗ ${e.message}`;
+      statusEl.className = errCls;
+      notify('批次預測失敗', e.message, 'error');
+    } finally {
+      btn.disabled = false;
+      btn.textContent = origLabel;
+    }
+  };
 }
 
 function renderExpFeatureImportance(model) {
@@ -2899,6 +3073,16 @@ function renderRealWhatIf(models) {
   setModel(0);
 }
 
+// 算「漂亮的步進值」— 讓數字框上下鍵一次調整一個合理的量 (1 / 2 / 5 × 10^n)
+function _niceStep(range) {
+  if (!range || range <= 0) return 0.01;
+  const raw = range / 100;                              // 目標:整個範圍約 100 階
+  const mag = Math.pow(10, Math.floor(Math.log10(raw)));
+  const norm = raw / mag;
+  const nice = norm < 1.5 ? 1 : norm < 3 ? 2 : norm < 7 ? 5 : 10;
+  return nice * mag;
+}
+
 function buildRealWhatIfSliders() {
   const wrap = document.getElementById('real-whatif-sliders');
   const m = RealWhatIfState.currentModel;
@@ -2908,17 +3092,23 @@ function buildRealWhatIfSliders() {
   m.featureNames.forEach((name, i) => {
     const stats = m.featureStats[i];
     const range = stats.max - stats.min;
-    const step = range > 100 ? 1 : (range / 200 || 0.01);
+    // 二元 0/1 欄位 (預處理 OneHot 出來的) → step=1,直接在 0/1 間切換
+    const isBinary = (stats.min === 0 && stats.max === 1);
+    // 滑桿:細步進 (好拖);數字框:漂亮步進 (上下鍵一次調整有感)
+    const sliderStep = isBinary ? 1 : (range / 200 || 0.01);
+    const numStep = isBinary ? 1 : _niceStep(range);
     const cur = RealWhatIfState.values[i];
 
     const div = document.createElement('div');
     div.className = 'slider-group';
     div.innerHTML = `
-      <div class="flex items-center justify-between mb-1">
-        <label class="text-xs font-medium text-dark-200 truncate" title="${escapeHtml(name)}">${escapeHtml(name)}</label>
-        <span class="text-xs font-mono text-accent-400" data-val-display="${i}">${formatRwifVal(cur)}</span>
+      <div class="flex items-center justify-between mb-1 gap-2">
+        <label class="text-xs font-medium text-dark-200 truncate" title="${escapeHtml(name)}">${escapeHtml(name)}${isBinary ? ' <span class="text-dark-500">(0/1)</span>' : ''}</label>
+        <input type="number" min="${stats.min}" max="${stats.max}" step="${numStep}" value="${formatRwifVal(cur)}" data-val-input="${i}" data-num-step="${numStep}"
+          title="範圍 ${formatRwifVal(stats.min)} ~ ${formatRwifVal(stats.max)},上下鍵每次 ±${numStep}"
+          class="w-24 bg-dark-800 border border-dark-600 rounded px-2 py-0.5 text-xs font-mono text-accent-400 text-right focus:border-accent-500 outline-none flex-shrink-0">
       </div>
-      <input type="range" min="${stats.min}" max="${stats.max}" step="${step}" value="${cur}" data-feat-idx="${i}" class="slider-input w-full">
+      <input type="range" min="${stats.min}" max="${stats.max}" step="${sliderStep}" value="${cur}" data-feat-idx="${i}" class="slider-input w-full">
       <div class="flex justify-between text-[9px] text-dark-500 mt-0.5">
         <span>${formatRwifVal(stats.min)}</span>
         <span class="text-dark-600">μ ${formatRwifVal(stats.mean)}</span>
@@ -2928,13 +3118,43 @@ function buildRealWhatIfSliders() {
     wrap.appendChild(div);
   });
 
+  // 滑桿拖動 → 更新數字框 + 狀態 + 重新預測
   wrap.querySelectorAll('input[type="range"]').forEach(input => {
     input.addEventListener('input', (e) => {
       const idx = parseInt(e.target.dataset.featIdx);
       const v = parseFloat(e.target.value);
       RealWhatIfState.values[idx] = v;
-      const display = wrap.querySelector(`[data-val-display="${idx}"]`);
-      if (display) display.textContent = formatRwifVal(v);
+      const numInput = wrap.querySelector(`[data-val-input="${idx}"]`);
+      if (numInput) numInput.value = formatRwifVal(v);
+      updateRealWhatIfPrediction();
+    });
+  });
+
+  // 數字框輸入 → 夾在 [min, max] 範圍內 + 同步滑桿 + 重新預測
+  wrap.querySelectorAll('input[type="number"]').forEach(input => {
+    const idx = parseInt(input.dataset.valInput);
+    const stats = m.featureStats[idx];
+    // 即時打字:更新狀態+滑桿,但不強制夾(讓使用者打完)
+    input.addEventListener('input', (e) => {
+      const v = parseFloat(e.target.value);
+      if (isNaN(v)) return;
+      RealWhatIfState.values[idx] = v;
+      const slider = wrap.querySelector(`input[type="range"][data-feat-idx="${idx}"]`);
+      if (slider) slider.value = v;  // 超出範圍時滑桿自動停在邊界
+      updateRealWhatIfPrediction();
+    });
+    // 失焦 / 按 Enter / 點上下鍵:夾回範圍 + 對齊到 step 網格 (避免出現一堆醜小數)
+    const numStep = parseFloat(input.dataset.numStep) || 0.01;
+    input.addEventListener('change', (e) => {
+      let v = parseFloat(e.target.value);
+      if (isNaN(v)) v = stats.mean;
+      v = Math.min(stats.max, Math.max(stats.min, v));        // clamp 到 [min,max]
+      v = Math.round(v / numStep) * numStep;                  // snap 到 step 網格
+      v = Math.min(stats.max, Math.max(stats.min, v));        // snap 後可能微超界,再夾一次
+      e.target.value = formatRwifVal(v);
+      RealWhatIfState.values[idx] = v;
+      const slider = wrap.querySelector(`input[type="range"][data-feat-idx="${idx}"]`);
+      if (slider) slider.value = v;
       updateRealWhatIfPrediction();
     });
   });

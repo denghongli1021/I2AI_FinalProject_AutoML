@@ -33,7 +33,7 @@ if hasattr(sys.stdout, "reconfigure"):
 import io
 
 import numpy as np
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel
@@ -339,6 +339,7 @@ def _run_sources(req: TrainRequest, on_progress=None):
         for bundle, est, scaler, xtdf in pp_results:
             bundle["dataSource"] = "preprocessed"
             bundle["dataSourceLabel"] = f"預處理 ({req.preprocessorId})"
+            bundle["preprocessorId"] = req.preprocessorId  # 批次預測時要用它把原始 CSV 轉換
             if multi:
                 bundle["name"] = f"[預處理] {bundle['name']}"
             combined.append((bundle, est, scaler, xtdf))
@@ -363,6 +364,7 @@ def _store_models(results) -> list[dict[str, Any]]:
             "scaler": scaler,
             "featureNames": bundle["featureNames"],
             "X_test_df": X_test_df,  # for SHAP visualizer
+            "preprocessorId": bundle.get("preprocessorId"),  # 預處理來源模型才有
         }
         bundles.append(bundle)
     return bundles
@@ -533,3 +535,110 @@ def predict_endpoint(req: PredictRequest) -> dict[str, Any]:
     if hasattr(pred, "item"):
         pred = pred.item()
     return {"prediction": pred}
+
+
+# ============================================================
+# 4b. PREDICT (BATCH) — 上傳一份 CSV,用訓練好的模型整批預測,回傳含預測欄的 CSV
+# ============================================================
+@app.post("/api/predict/batch")
+async def predict_batch_endpoint(
+    modelId: str = Form(...),
+    file: UploadFile = File(...),
+    sampleFile: UploadFile | None = File(None),
+) -> Response:
+    import pandas as pd
+
+    entry = MODELS.get(modelId)
+    if entry is None:
+        raise HTTPException(status_code=404, detail="modelId 不存在")
+    estimator = entry["estimator"]
+    scaler = entry["scaler"]
+    feature_names = entry["featureNames"]
+    preprocessor_id = entry.get("preprocessorId")
+    if estimator is None:
+        raise HTTPException(status_code=400, detail="此模型訓練失敗,無法預測")
+
+    raw = await file.read()
+    try:
+        df = pd.read_csv(io.BytesIO(raw))
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"CSV 解析失敗: {e}")
+
+    if preprocessor_id:
+        # ── 預處理來源的模型 ──
+        # 上傳的 CSV 是「原始格式」(跟訓練資料同欄位),要先過同一個 preprocessor 轉換
+        pp_entry = PREPROCESSORS.get(preprocessor_id)
+        if pp_entry is None:
+            raise HTTPException(
+                status_code=400,
+                detail="此模型對應的 preprocessor 已不存在 (後端可能重啟過),請重新執行預處理再訓練",
+            )
+        preprocessor = pp_entry["preprocessor"]
+        pp_target = pp_entry["target"]
+        # 丟掉目標欄 (CSV 若有帶),其餘原始欄位交給 preprocessor
+        feat_df = df.drop(columns=[pp_target], errors="ignore")
+        try:
+            X_t = preprocessor.transform(feat_df)
+            if hasattr(X_t, "toarray"):
+                X_t = X_t.toarray()
+            X = np.asarray(X_t, dtype=float)
+        except Exception as e:
+            raise HTTPException(
+                status_code=400,
+                detail=f"套用預處理失敗 — test.csv 的欄位需與訓練資料的原始欄位一致: {e}",
+            )
+    else:
+        # ── 原始來源的模型 ── CSV 需直接含模型的特徵欄位
+        missing = [c for c in feature_names if c not in df.columns]
+        if missing:
+            preview = ", ".join(missing[:8]) + (" ..." if len(missing) > 8 else "")
+            raise HTTPException(
+                status_code=400,
+                detail=f"CSV 缺少 {len(missing)} 個模型需要的特徵欄位: {preview}",
+            )
+        X = df[feature_names].apply(pd.to_numeric, errors="coerce").fillna(0.0).to_numpy(dtype=float)
+
+    try:
+        X_norm = scaler.transform(X)
+        preds = estimator.predict(X_norm)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"批次預測失敗: {e}")
+
+    pred_list = [p.item() if hasattr(p, "item") else p for p in preds]
+
+    if sampleFile is not None:
+        # ── 有給範本 submission ── 輸出比照範本格式 (第一欄=ID,第二欄=預測欄)
+        sample_raw = await sampleFile.read()
+        try:
+            sample_df = pd.read_csv(io.BytesIO(sample_raw))
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"範本 submission 解析失敗: {e}")
+        sample_cols = list(sample_df.columns)
+        if len(sample_cols) < 2:
+            raise HTTPException(status_code=400, detail="範本 submission 至少需要 2 欄 (ID 欄 + 預測欄)")
+        id_col, pred_col = sample_cols[0], sample_cols[1]
+        if id_col not in df.columns:
+            raise HTTPException(
+                status_code=400,
+                detail=f"test.csv 缺少範本要求的 ID 欄位「{id_col}」",
+            )
+        out_df = pd.DataFrame()
+        out_df[id_col] = df[id_col].values
+        out_df[pred_col] = pred_list
+        filename = "submission.csv"
+    else:
+        # ── 沒給範本 ── 預測結果接回原始 CSV 最右邊
+        out_df = df.copy()
+        out_df["prediction"] = pred_list
+        base = (file.filename or "test.csv").rsplit(".", 1)[0]
+        filename = f"{base}_predicted.csv"
+
+    buf = io.StringIO()
+    out_df.to_csv(buf, index=False)
+    csv_bytes = buf.getvalue().encode("utf-8-sig")  # BOM 讓 Excel 開中文不亂碼
+
+    return Response(
+        content=csv_bytes,
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )

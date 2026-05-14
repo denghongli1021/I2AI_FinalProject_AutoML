@@ -10,7 +10,7 @@
   <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="css/style.css?v=9">
+  <link rel="stylesheet" href="css/style.css?v=14">
   <script>
     tailwind.config = {
       theme: {
@@ -124,10 +124,22 @@
             <span id="global-status-text" class="text-dark-300">系統就緒</span>
           </div>
           <!-- Notification -->
-          <button class="relative p-2 text-dark-400 hover:text-dark-100 transition-colors">
-            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M15 17h5l-1.405-1.405A2.032 2.032 0 0118 14.158V11a6.002 6.002 0 00-4-5.659V5a2 2 0 10-4 0v.341C7.67 6.165 6 8.388 6 11v3.159c0 .538-.214 1.055-.595 1.436L4 17h5m6 0v1a3 3 0 11-6 0v-1m6 0H9"/></svg>
-            <span class="absolute top-1 right-1 w-2 h-2 bg-danger-500 rounded-full"></span>
-          </button>
+          <div class="relative">
+            <button id="btn-notification" class="relative p-2 text-dark-400 hover:text-dark-100 transition-colors">
+              <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M15 17h5l-1.405-1.405A2.032 2.032 0 0118 14.158V11a6.002 6.002 0 00-4-5.659V5a2 2 0 10-4 0v.341C7.67 6.165 6 8.388 6 11v3.159c0 .538-.214 1.055-.595 1.436L4 17h5m6 0v1a3 3 0 11-6 0v-1m6 0H9"/></svg>
+              <span id="notification-badge" class="absolute top-0.5 right-0.5 min-w-[16px] h-4 px-1 bg-danger-500 rounded-full text-[10px] font-bold text-white items-center justify-center hidden">0</span>
+            </button>
+            <!-- Notification dropdown -->
+            <div id="notification-panel" class="hidden absolute right-0 mt-2 w-80 bg-dark-900 border border-dark-700 rounded-xl shadow-2xl z-50 overflow-hidden">
+              <div class="flex items-center justify-between px-4 py-3 border-b border-dark-700/50">
+                <h4 class="text-sm font-semibold">通知</h4>
+                <button id="btn-clear-notifications" class="text-xs text-dark-400 hover:text-dark-200 transition-colors">全部清除</button>
+              </div>
+              <div id="notification-list" class="max-h-80 overflow-y-auto">
+                <p class="px-4 py-6 text-center text-xs text-dark-500">目前沒有通知</p>
+              </div>
+            </div>
+          </div>
         </div>
       </div>
     </header>
@@ -926,6 +938,37 @@
                   <div class="card-header"><h3 class="card-title">預測 vs 實際 <span id="exp-chart-scatter-sub" class="text-xs text-dark-400 font-normal"></span></h3></div>
                   <div id="chart-exp-scatter" class="h-64"></div>
                 </div>
+              </div>
+
+              <!-- 批次預測 — 上傳 test.csv,用訓練好的模型整批預測並下載結果 -->
+              <div class="card mb-6">
+                <div class="card-header">
+                  <h3 class="card-title">批次預測 (Batch Predict)</h3>
+                  <span class="text-xs text-dark-400">上傳一份 CSV (例如預處理頁下載的 test.csv),用模型整批預測</span>
+                </div>
+                <div class="p-4 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 items-end">
+                  <div>
+                    <label class="block text-xs font-medium text-dark-400 mb-1.5">選擇模型</label>
+                    <select id="batch-model-select" class="w-full bg-dark-800 border border-dark-600 rounded-lg px-3 py-2 text-sm focus:border-primary-500 outline-none"></select>
+                  </div>
+                  <div>
+                    <label class="block text-xs font-medium text-dark-400 mb-1.5">測試 CSV 檔案</label>
+                    <input type="file" id="batch-csv-input" accept=".csv" class="w-full text-xs text-dark-300 file:mr-3 file:py-1.5 file:px-3 file:rounded-lg file:border-0 file:bg-dark-700 file:text-dark-200 file:text-xs file:cursor-pointer hover:file:bg-dark-600">
+                  </div>
+                  <div>
+                    <label class="block text-xs font-medium text-dark-400 mb-1.5">範本 submission <span class="text-dark-600">(選填)</span></label>
+                    <input type="file" id="batch-sample-input" accept=".csv" class="w-full text-xs text-dark-300 file:mr-3 file:py-1.5 file:px-3 file:rounded-lg file:border-0 file:bg-dark-700 file:text-dark-200 file:text-xs file:cursor-pointer hover:file:bg-dark-600">
+                  </div>
+                  <div>
+                    <button id="btn-batch-predict" class="w-full px-4 py-2 bg-gradient-to-r from-primary-600 to-accent-600 hover:from-primary-500 hover:to-accent-500 rounded-lg text-sm font-semibold transition-all shadow-lg shadow-primary-500/20">
+                      執行預測並下載
+                    </button>
+                  </div>
+                </div>
+                <p class="px-4 text-[11px] text-dark-500">
+                  💡 給範本 submission (例如 Kaggle 的 <code class="text-dark-400">gender_submission.csv</code>) → 輸出只留範本欄位 (第一欄當 ID、第二欄放預測值),檔名 <code class="text-dark-400">submission.csv</code>,可直接交 Kaggle。不給範本則輸出原始欄位 + prediction 欄。
+                </p>
+                <p id="batch-predict-status" class="px-4 pb-4 pt-1 text-xs text-dark-400"></p>
               </div>
 
               <div class="flex justify-center gap-3">
@@ -1805,11 +1848,11 @@
   </main>
 
   <!-- ?v= 是 cache-busting:改 JS 後把版本號 +1,瀏覽器就會強制重抓,不用手動硬重整 -->
-  <script src="js/data-engine.js?v=9"></script>
-  <script src="js/ml-engine.js?v=9"></script>
-  <script src="js/mock-data.js?v=9"></script>
-  <script src="js/charts.js?v=9"></script>
-  <script src="js/api.js?v=9"></script>
-  <script src="js/app.js?v=9"></script>
+  <script src="js/data-engine.js?v=14"></script>
+  <script src="js/ml-engine.js?v=14"></script>
+  <script src="js/mock-data.js?v=14"></script>
+  <script src="js/charts.js?v=14"></script>
+  <script src="js/api.js?v=14"></script>
+  <script src="js/app.js?v=14"></script>
 </body>
 </html>

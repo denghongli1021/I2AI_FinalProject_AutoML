@@ -120,6 +120,18 @@ const ApiClient = {
     return r.json();
   },
 
+  // ---- 4b. PREDICT (BATCH) — 上傳 CSV,整批預測,回傳含預測欄的 CSV blob ----
+  // sampleFile 選填:給了就照範本 submission 格式輸出
+  async predictBatch(modelId, file, sampleFile = null) {
+    const fd = new FormData();
+    fd.append('modelId', modelId);
+    fd.append('file', file);
+    if (sampleFile) fd.append('sampleFile', sampleFile);
+    const r = await fetch(`${this.baseUrl}/api/predict/batch`, { method: 'POST', body: fd });
+    if (!r.ok) throw new Error(`批次預測失敗 (${r.status}): ${await r.text()}`);
+    return r.blob();  // CSV 檔
+  },
+
   // ---- 5. TRAIN (SSE streaming) ----
   // onEvent: callback({type, ...}) — type 可能是 'progress' | 'log' | 'done' | 'error'
   // 回傳 promise,完成時 resolve 為 done 事件中的 models 陣列
