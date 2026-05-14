@@ -1,69 +1,69 @@
 # test_run.py
+import warnings
 import pandas as pd
-import numpy as np
-import os
-from preprocessing import preprocess_for_training, run_data_audit
+
+# 關閉未來版本的 Pandas 警告，讓終端機輸出更乾淨
+warnings.simplefilter(action='ignore', category=FutureWarning)
+
+from preprocessing.interface import run_data_audit, preprocess_for_training
+from preprocessing.utils.data_health import print_health_report
 
 if __name__ == "__main__":
-    print("="*60)
-    print("🚀 AutoML 預處理模組：真實 CSV 實戰測試 (train1.csv) 🚀")
-    print("="*60)
+    print("="*70)
+    print("🚀 AutoML Preprocessing Engine - 真實資料實戰測試")
+    print("="*70)
+    
+    # ==========================================
+    # 1. 讀取真實資料
+    # ==========================================
+    try:
+        # 請確認 train1.csv 放在與這個腳本相同的目錄下
+        raw_df = pd.read_csv('train1.csv')
+        print(f"✅ 成功讀取 train1.csv，共 {raw_df.shape[0]} 列 × {raw_df.shape[1]} 欄")
+    except FileNotFoundError:
+        print("❌ 找不到 train1.csv，請確認檔案路徑是否正確！")
+        exit()
 
-    # 1. 設定檔案路徑與目標欄位
-    csv_path = 'train1.csv'
-    # 💡 請務必確認 train1.csv 裡的標籤欄位名稱，如果是 'Label' 或 'Target' 請修改下方：
-    target_column = 'SalePrice' 
+    # ⚠️ 這裡非常重要：請把 'Your_Target_Column' 換成你 train1.csv 裡面的真實「標籤/預測目標」欄位名稱
+    # 例如：'label', 'is_malware', 'click', 'price' 等等
+    TARGET_COL = 'SalePrice'  
+    
+    if TARGET_COL not in raw_df.columns:
+        print(f"\n❌ 錯誤：在資料集中找不到目標欄位 '{TARGET_COL}'。")
+        print(f"現有欄位包含: {list(raw_df.columns)[:10]} ...等")
+        print("👉 請修改 test_run.py 裡的 TARGET_COL 變數！")
+        exit()
 
-    if not os.path.exists(csv_path):
-        print(f"❌ 找不到檔案: {csv_path}。請確認檔案已放在專案根目錄。")
-    else:
-        # 2. 讀取資料
-        try:
-            # 如果 CSV 有中文字，可以嘗試加上 encoding='utf-8' 或 'big5'
-            raw_df = pd.read_csv(csv_path) 
-            
-            # 💡 關鍵步驟：嘗試將可能是日期的字串轉為 datetime 物件，否則 Router 會判定為 Text 或 Category
-            # 如果你知道哪幾欄是日期，可以手動轉換，例如：
-            # for col in ['Date', 'Timestamp']:
-            #     if col in raw_df.columns:
-            #         raw_df[col] = pd.to_datetime(raw_df[col], errors='coerce')
-
-            print(f"\n[載入成功] 資料維度: {raw_df.shape[0]} 筆資料, {raw_df.shape[1]} 個欄位")
-            
-            # 3. 執行健檢中心
-            print("\n" + "-"*30)
-            audit_report = run_data_audit(raw_df, target_col=target_column)
-            print("[健檢報告摘要]:")
-            if audit_report["missing_summary"]:
-                for col, count in audit_report["missing_summary"].items():
-                    print(f"  - {col}: 缺失 {count} 筆")
-            else:
-                print("  ✅ 恭喜！原始資料沒有缺失值。")
-            
-            # 4. 執行預處理管線
-            print("\n" + "-"*30)
-            X_train, X_test, y_train, y_test, preprocessor = preprocess_for_training(
-                raw_df=raw_df, 
-                target_col=target_column, 
-                test_size=0.2
-            )
-            
-            print("\n" + "="*60)
-            print("🎉 預處理完畢！")
-            print(f"👉 原始特徵數: {raw_df.shape[1] - 1}")
-            print(f"👉 處理後特徵數: {X_train.shape[1]}")
-            print("-" * 60)
-            print("\n[處理後的資料前 5 筆]:")
-            print(X_train.head())
-            
-            # 驗證最終結果
-            final_missing = X_train.isnull().sum().sum()
-            print(f"\n[最終檢查] 轉換後矩陣空值總數: {final_missing}")
-            if final_missing == 0:
-                print("✨ 成果：資料已完全洗淨，可直接餵給模型訓練！")
-
-        except Exception as e:
-            print(f"\n❌ 發生錯誤: {e}")
-            # 如果發生錯誤，印出更詳細的資訊方便 Debug
-            import traceback
-            traceback.print_exc()
+    # ==========================================
+    # Phase 1: 健檢中心 (Data Audit)
+    # ==========================================
+    print("\n\n>>> 🟢 Phase 1: 啟動健檢中心")
+    report = run_data_audit(raw_df, target_col=TARGET_COL)
+    print_health_report(report)
+    
+    # ==========================================
+    # Phase 2: 訓練管線 (Training Pipeline)
+    # ==========================================
+    print("\n\n>>> 🔵 Phase 2: 啟動訓練管線")
+    
+    try:
+        # 如果有特定欄位你想強制覆蓋處理邏輯，可以寫在這裡
+        # config = {'某個郵遞區號欄位': 'high_cardinality'}
+        config = {}
+        
+        X_train, X_test, y_train, y_test, preprocessor = preprocess_for_training(
+            raw_df=raw_df,
+            target_col=TARGET_COL,
+            test_size=0.2,
+            schema_override=config
+        )
+        
+        print("\n✅ 訓練管線執行成功！")
+        print(f"   [原始資料維度]: {raw_df.shape[0]} 列 × {raw_df.shape[1]-1} 欄 (不含目標)")
+        print(f"   [最終訓練特徵]: {X_train.shape[0]} 列 × {X_train.shape[1]} 欄")
+        
+        print("\n   [X_train 預覽 (前 5 筆, 顯示前 8 個特徵)]:")
+        print(X_train.iloc[:, :8].head(5).round(3).to_string())
+        
+    except Exception as e:
+        print(f"\n❌ 訓練管線執行失敗: {e}")
