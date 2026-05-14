@@ -56,6 +56,7 @@ function updateModeUI() {
 const PAGE_NAMES = {
   dashboard: '總覽儀表板',
   datasets: '數據集管理',
+  preprocessing: '預處理',
   experiments: '實驗室',
   leaderboard: '模型排行榜',
   insights: '洞察與決策',
@@ -100,6 +101,9 @@ function renderPageCharts(page) {
       break;
     case 'datasets':
       renderDatasetPage();
+      break;
+    case 'preprocessing':
+      renderPreprocessingPage();
       break;
     case 'experiments':
       if (appMode === 'demo') {
@@ -1514,6 +1518,383 @@ function initTrainingButton() {
   });
 }
 
+// ===== PREPROCESSING PAGE (隊友模組) =====
+let ppLastPreprocessorId = null;
+let ppLastFeatureColumns = [];   // 原始欄位 (不含 target)
+let ppHistory = [];              // 所有跑過的預處理結果 (給實驗室「資料來源」下拉用)
+let ppListenersBound = false;
+
+function renderPreprocessingPage() {
+  const ds = DataEngine.currentDataset;
+  const noData = document.getElementById('pp-no-data');
+  const config = document.getElementById('pp-config-wrap');
+  if (!ds) {
+    noData.classList.remove('hidden');
+    config.classList.add('hidden');
+    return;
+  }
+  noData.classList.add('hidden');
+  config.classList.remove('hidden');
+
+  document.getElementById('pp-dataset-badge').textContent = ds.fileName || 'Dataset';
+
+  // Target select
+  const targetSel = document.getElementById('pp-target-select');
+  const prevTarget = targetSel.value;
+  targetSel.innerHTML = '';
+  (ds.analysis || []).forEach(col => {
+    const opt = document.createElement('option');
+    opt.value = col.name;
+    opt.textContent = `${col.name} (${col.type})`;
+    targetSel.appendChild(opt);
+  });
+  if (prevTarget && [...targetSel.options].some(o => o.value === prevTarget)) {
+    targetSel.value = prevTarget;
+  }
+
+  // Test size slider
+  const slider = document.getElementById('pp-test-size');
+  const sliderLabel = document.getElementById('pp-test-size-label');
+  slider.oninput = () => { sliderLabel.textContent = `${Math.round(slider.value * 100)}%`; };
+  sliderLabel.textContent = `${Math.round(slider.value * 100)}%`;
+
+  // Bind buttons once
+  if (!ppListenersBound) {
+    document.getElementById('btn-pp-audit').addEventListener('click', runPreprocessAudit);
+    document.getElementById('btn-pp-run').addEventListener('click', runPreprocessTransform);
+    document.getElementById('btn-pp-inference').addEventListener('click', runPreprocessInference);
+    ppListenersBound = true;
+  }
+}
+
+function ppSetStatus(visible, text) {
+  const wrap = document.getElementById('pp-status');
+  const txt = document.getElementById('pp-status-text');
+  if (visible) {
+    wrap.classList.remove('hidden');
+    txt.textContent = text || '處理中...';
+  } else {
+    wrap.classList.add('hidden');
+  }
+}
+
+function ppRequireApi() {
+  const ds = DataEngine.currentDataset;
+  if (!ds || !ds._fromApi || !ds.id || typeof ds.id !== 'string') {
+    alert('預處理功能需要連接 Python 後端 API。\n請至「系統設定」啟用「使用 Python 後端 API」,並重新上傳 CSV。');
+    return null;
+  }
+  return ds;
+}
+
+async function runPreprocessAudit() {
+  const ds = ppRequireApi();
+  if (!ds) return;
+  const target = document.getElementById('pp-target-select').value;
+  ppSetStatus(true, '快速健檢中...');
+  try {
+    const res = await ApiClient.preprocessAudit({ datasetId: ds.id, target });
+    renderAuditReport(res.auditReport);
+    renderFeatureGroups(res.featureGroups);
+    document.getElementById('pp-audit-section').classList.remove('hidden');
+    document.getElementById('pp-groups-section').classList.remove('hidden');
+  } catch (e) {
+    alert(`健檢失敗: ${e.message}`);
+  } finally {
+    ppSetStatus(false);
+  }
+}
+
+async function runPreprocessTransform() {
+  const ds = ppRequireApi();
+  if (!ds) return;
+  const target = document.getElementById('pp-target-select').value;
+  const testSize = parseFloat(document.getElementById('pp-test-size').value);
+  ppSetStatus(true, '執行完整預處理管線...');
+  try {
+    const res = await ApiClient.preprocessTransform({ datasetId: ds.id, target, testSize });
+    renderAuditReport(res.auditReport);
+    renderFeatureGroups(res.featureGroups);
+    renderTransformResult(res);
+    renderInferenceForm(ds, target);
+    ppLastPreprocessorId = res.preprocessorId;
+    ppLastFeatureColumns = (ds.headers || []).filter(h => h !== target);
+    // 記錄到 history,實驗室「資料來源」下拉會用到
+    ppHistory = ppHistory.filter(p => p.id !== res.preprocessorId);
+    ppHistory.unshift({
+      id: res.preprocessorId,
+      datasetId: ds.id,
+      fileName: ds.fileName || 'Dataset',
+      target,
+      trainSize: res.trainSize,
+      testSize: res.testSize,
+      featureCount: res.transformedFeatureCount,
+    });
+    document.getElementById('pp-audit-section').classList.remove('hidden');
+    document.getElementById('pp-groups-section').classList.remove('hidden');
+    document.getElementById('pp-result-section').classList.remove('hidden');
+    document.getElementById('pp-inference-section').classList.remove('hidden');
+  } catch (e) {
+    alert(`預處理失敗: ${e.message}`);
+  } finally {
+    ppSetStatus(false);
+  }
+}
+
+function renderAuditReport(audit) {
+  if (!audit || audit.error) {
+    document.getElementById('pp-stat-rows').textContent = '—';
+    return;
+  }
+  document.getElementById('pp-stat-rows').textContent = audit.total_rows ?? '—';
+  document.getElementById('pp-stat-cols').textContent = audit.total_columns ?? '—';
+  document.getElementById('pp-stat-perfect').textContent = audit.perfect_columns ?? '—';
+  const missingCols = Object.keys(audit.missing_summary || {}).length;
+  document.getElementById('pp-stat-missing').textContent = missingCols;
+
+  // Warnings
+  const warnList = document.getElementById('pp-warnings-list');
+  warnList.innerHTML = '';
+  const warns = audit.warnings || [];
+  document.getElementById('pp-warning-count').textContent = warns.length;
+  if (warns.length === 0) {
+    warnList.innerHTML = '<p class="text-xs text-success-400">✓ 沒有偵測到問題</p>';
+  } else {
+    warns.forEach(w => {
+      const div = document.createElement('div');
+      div.className = 'text-xs px-3 py-2 bg-warning-500/10 border-l-2 border-warning-500 rounded-r text-warning-300';
+      div.textContent = w;
+      warnList.appendChild(div);
+    });
+  }
+
+  // Missing summary table
+  const tbody = document.getElementById('pp-missing-table');
+  tbody.innerHTML = '';
+  const summary = audit.missing_summary || {};
+  if (Object.keys(summary).length === 0) {
+    tbody.innerHTML = '<tr><td colspan="3" class="text-center py-3 text-xs text-dark-500">所有欄位均無缺失值</td></tr>';
+  } else {
+    Object.entries(summary).forEach(([col, info]) => {
+      const tr = document.createElement('tr');
+      tr.className = 'border-b border-dark-800/50';
+      const pct = (info.ratio * 100).toFixed(1);
+      const pctColor = info.ratio > 0.3 ? 'text-danger-400' : info.ratio > 0.1 ? 'text-warning-400' : 'text-dark-300';
+      tr.innerHTML = `
+        <td class="py-1.5 px-3">${escapeHtml(col)}</td>
+        <td class="py-1.5 px-3 text-right text-dark-300">${info.count}</td>
+        <td class="py-1.5 px-3 text-right font-mono ${pctColor}">${pct}%</td>
+      `;
+      tbody.appendChild(tr);
+    });
+  }
+}
+
+function renderFeatureGroups(groups) {
+  if (!groups || groups.error) return;
+  const types = ['numeric', 'categorical', 'text', 'datetime'];
+  const chipColors = {
+    numeric: 'bg-blue-500/15 text-blue-300 border-blue-500/30',
+    categorical: 'bg-amber-500/15 text-amber-300 border-amber-500/30',
+    text: 'bg-purple-500/15 text-purple-300 border-purple-500/30',
+    datetime: 'bg-green-500/15 text-green-300 border-green-500/30',
+  };
+  types.forEach(t => {
+    const cols = groups[t] || [];
+    document.getElementById(`pp-group-${t}-count`).textContent = cols.length;
+    const wrap = document.getElementById(`pp-group-${t}`);
+    wrap.innerHTML = '';
+    if (cols.length === 0) {
+      wrap.innerHTML = '<span class="text-[10px] text-dark-600">(無)</span>';
+    } else {
+      cols.forEach(c => {
+        const chip = document.createElement('span');
+        chip.className = `text-[10px] px-1.5 py-0.5 rounded border ${chipColors[t]} font-mono`;
+        chip.textContent = c;
+        chip.title = c;
+        wrap.appendChild(chip);
+      });
+    }
+  });
+}
+
+function renderTransformResult(res) {
+  document.getElementById('pp-result-train').textContent = res.trainSize;
+  document.getElementById('pp-result-test').textContent = res.testSize;
+  document.getElementById('pp-result-feat').textContent = `${res.originalFeatureCount} → ${res.transformedFeatureCount}`;
+  document.getElementById('pp-result-id').textContent = res.preprocessorId;
+
+  const thead = document.getElementById('pp-result-thead');
+  const tbody = document.getElementById('pp-result-tbody');
+  thead.innerHTML = '';
+  tbody.innerHTML = '';
+  const cols = res.preview?.columns || [];
+  const rows = res.preview?.rows || [];
+
+  // Header — abbreviate long names with title tooltip
+  thead.innerHTML = cols.map(c => {
+    const short = c.length > 22 ? c.slice(0, 20) + '…' : c;
+    return `<th class="text-left py-1 px-2 font-medium text-[10px] whitespace-nowrap" title="${escapeHtml(c)}">${escapeHtml(short)}</th>`;
+  }).join('');
+
+  rows.forEach(row => {
+    const tr = document.createElement('tr');
+    tr.className = 'border-b border-dark-800/50 hover:bg-dark-800/30';
+    tr.innerHTML = row.map(v => {
+      const num = typeof v === 'number' ? v.toFixed(3) : String(v);
+      return `<td class="py-0.5 px-2 font-mono text-dark-300 whitespace-nowrap">${escapeHtml(num)}</td>`;
+    }).join('');
+    tbody.appendChild(tr);
+  });
+
+  // 收合 / 展開 toggle (預設收合)
+  const wrap = document.getElementById('pp-result-table-wrap');
+  const btn = document.getElementById('btn-pp-result-toggle');
+  wrap.classList.add('hidden');
+  btn.textContent = '展開預覽';
+  btn.onclick = (e) => {
+    e.stopPropagation();
+    const hidden = wrap.classList.toggle('hidden');
+    btn.textContent = hidden ? '展開預覽' : '收合預覽';
+  };
+
+  // 下載按鈕 — 直接導到 backend 的下載 endpoint
+  const dl = (split) => {
+    if (!ppLastPreprocessorId) { alert('請先執行預處理'); return; }
+    const url = `${ApiClient.baseUrl}/api/preprocess/download/${ppLastPreprocessorId}/${split}`;
+    // 用隱藏 <a download> 觸發瀏覽器下載
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `${split}_${ppLastPreprocessorId}.csv`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+  };
+  document.getElementById('btn-pp-download-train').onclick = (e) => { e.stopPropagation(); dl('train'); };
+  document.getElementById('btn-pp-download-test').onclick = (e) => { e.stopPropagation(); dl('test'); };
+}
+
+function renderInferenceForm(ds, target) {
+  const wrap = document.getElementById('pp-inference-inputs');
+  const wrapOuter = document.getElementById('pp-inference-inputs-wrap');
+  const hint = document.getElementById('pp-inference-hint');
+  const toggleBtn = document.getElementById('btn-pp-inference-toggle');
+  const searchInput = document.getElementById('pp-inference-search');
+  const outputsWrap = document.getElementById('pp-inference-outputs');
+  const inputCountEl = document.getElementById('pp-input-count');
+  const outputCountEl = document.getElementById('pp-output-count');
+
+  wrap.innerHTML = '';
+  outputsWrap.innerHTML = '<p class="text-[11px] text-dark-500 px-2 py-1">點擊下方「轉換這筆資料」後會顯示處理結果。</p>';
+  outputCountEl.textContent = '尚未轉換';
+
+  const inputCols = (ds.headers || []).filter(h => h !== target);
+  inputCountEl.textContent = `${inputCols.length} 個欄位`;
+
+  inputCols.forEach(col => {
+    const colMeta = (ds.analysis || []).find(c => c.name === col);
+    const sample = ds.data?.[0]?.[ds.headers.indexOf(col)] ?? '';
+    const row = document.createElement('div');
+    row.dataset.ppCol = col.toLowerCase();
+    row.className = 'flex items-center gap-2';
+    row.innerHTML = `
+      <span class="text-[10px] text-dark-400 truncate w-28 flex-shrink-0" title="${escapeHtml(col)}">${escapeHtml(col)} <span class="text-dark-600">${colMeta?.type || ''}</span></span>
+      <input type="text" data-pp-input="${escapeHtml(col)}" value="${escapeHtml(String(sample))}"
+        class="flex-1 min-w-0 bg-dark-800 border border-dark-600 rounded px-1.5 py-1 text-[11px] font-mono focus:border-accent-500 outline-none">
+    `;
+    wrap.appendChild(row);
+  });
+
+  // 大量欄位預設收合
+  const manyCols = inputCols.length > 12;
+  wrapOuter.classList.toggle('hidden', manyCols);
+  toggleBtn.textContent = manyCols ? `展開 (${inputCols.length})` : `收合`;
+  hint.textContent = manyCols
+    ? `共 ${inputCols.length} 個欄位,預設值已用第一筆資料帶入。可直接按「轉換這筆資料」,或展開後修改。`
+    : `預設值已自動帶入第一筆資料,可直接修改後轉換。`;
+
+  toggleBtn.onclick = () => {
+    const hidden = wrapOuter.classList.toggle('hidden');
+    toggleBtn.textContent = hidden ? `展開 (${inputCols.length})` : `收合`;
+  };
+  searchInput.value = '';
+  searchInput.oninput = () => {
+    const q = searchInput.value.trim().toLowerCase();
+    wrap.querySelectorAll('[data-pp-col]').forEach(el => {
+      el.style.display = !q || el.dataset.ppCol.includes(q) ? '' : 'none';
+    });
+    // 右側也跟著過濾 (用 prefix 比對)
+    outputsWrap.querySelectorAll('[data-pp-out]').forEach(el => {
+      el.style.display = !q || el.dataset.ppOut.includes(q) ? '' : 'none';
+    });
+  };
+}
+
+async function runPreprocessInference() {
+  if (!ppLastPreprocessorId) { alert('請先執行預處理'); return; }
+  const inputs = document.querySelectorAll('[data-pp-input]');
+  const row = {};
+  inputs.forEach(el => {
+    const v = el.value;
+    const num = Number(v);
+    row[el.dataset.ppInput] = (v !== '' && !isNaN(num)) ? num : v;
+  });
+  ppSetStatus(true, '套用 preprocessor...');
+  try {
+    const res = await ApiClient.preprocessInference({
+      preprocessorId: ppLastPreprocessorId,
+      rows: [row],
+    });
+    renderInferenceOutput(res.columns || [], res.rows[0] || []);
+    // 確保右欄展開可見 (若 input 在收合狀態)
+    document.getElementById('pp-inference-inputs-wrap').classList.remove('hidden');
+    document.getElementById('btn-pp-inference-toggle').textContent = '收合';
+  } catch (e) {
+    alert(`Inference 失敗: ${e.message}`);
+  } finally {
+    ppSetStatus(false);
+  }
+}
+
+function renderInferenceOutput(columns, values) {
+  const wrap = document.getElementById('pp-inference-outputs');
+  const countEl = document.getElementById('pp-output-count');
+  wrap.innerHTML = '';
+  countEl.textContent = `${values.length} 維`;
+
+  if (values.length === 0) {
+    wrap.innerHTML = '<p class="text-[11px] text-dark-500 px-2 py-1">無輸出</p>';
+    return;
+  }
+
+  values.forEach((v, i) => {
+    const name = columns[i] || `[${i}]`;
+    // 把 sklearn pipeline prefix 拆出來,讓 UI 更乾淨
+    // e.g. "num_pipeline__age" → group="num", short="age"
+    const m = name.match(/^(num|cat|text|time)_pipeline__(.+)$/);
+    const group = m ? m[1] : '';
+    const short = m ? m[2] : name;
+    const groupColors = {
+      num: 'text-blue-400',
+      cat: 'text-amber-400',
+      text: 'text-purple-400',
+      time: 'text-green-400',
+    };
+    const groupColor = groupColors[group] || 'text-dark-500';
+    const num = typeof v === 'number' ? v.toFixed(4) : String(v);
+
+    const row = document.createElement('div');
+    row.className = 'flex items-center gap-2';
+    row.dataset.ppOut = name.toLowerCase();
+    row.innerHTML = `
+      <span class="text-[10px] text-dark-500 w-6 flex-shrink-0 font-mono">[${i}]</span>
+      <span class="text-[10px] ${groupColor} truncate flex-1 min-w-0 font-mono" title="${escapeHtml(name)}">${group ? `<span class="text-dark-600">${group}·</span>` : ''}${escapeHtml(short)}</span>
+      <span class="text-[11px] font-mono text-accent-400 w-20 text-right flex-shrink-0">${escapeHtml(num)}</span>
+    `;
+    wrap.appendChild(row);
+  });
+}
+
 // ===== SHAP SAMPLE SELECT =====
 function initShapSampleSelect() {
   const select = document.getElementById('shap-sample-select');
@@ -1664,6 +2045,80 @@ function renderRealExperimentsPage() {
   updateTargetInfo();
   buildAlgoCheckboxes();
 
+  // --- Data source (multi-select) ---
+  const srcRaw = document.getElementById('exp-src-raw');
+  const srcPp = document.getElementById('exp-src-pp');
+  const ppSelect = document.getElementById('exp-pp-select');
+  const ppHint = document.getElementById('exp-pp-hint');
+  let ppMatches = [];   // 當前資料集可用的 preprocessor 清單
+
+  // 選了 preprocessor → 目標變數自動同步成它的 target (兩邊一致才能比較)
+  const syncTargetToPreprocessor = () => {
+    if (!srcPp.checked || !ppSelect.value) {
+      if (ppHint) ppHint.textContent = '';
+      return;
+    }
+    const sel = ppMatches.find(p => p.id === ppSelect.value);
+    if (!sel) return;
+    const inDropdown = [...targetSel.options].some(o => o.value === sel.target);
+    if (inDropdown) {
+      if (targetSel.value !== sel.target) {
+        targetSel.value = sel.target;
+        updateTargetInfo();
+      }
+      if (ppHint) ppHint.textContent = `目標變數已同步為「${sel.target}」(預處理時設定的)`;
+    } else {
+      // preprocessor 的目標不在實驗室目標下拉裡 (例如分類目標) — 警告
+      if (ppHint) ppHint.textContent = `⚠ 此預處理的目標「${sel.target}」不在目標下拉中,原始資料集那條路會用不同目標`;
+    }
+  };
+
+  const refreshPpSelect = async () => {
+    // 直接問後端有哪些 preprocessor (不依賴前端記憶體,重整也不會掉)
+    let all = [];
+    let fetchErr = null;
+    try {
+      const res = await ApiClient.preprocessList();
+      all = res.preprocessors || [];
+    } catch (e) {
+      fetchErr = e.message;
+      all = ppHistory;  // fallback to in-memory
+    }
+    // 當前資料集的排前面,其他資料集的也顯示 (但標註),避免「明明跑過卻看不到」
+    const mine = all.filter(p => p.datasetId === ds.id);
+    const others = all.filter(p => p.datasetId !== ds.id);
+    ppMatches = [...mine, ...others];
+
+    ppSelect.innerHTML = '';
+    if (ppMatches.length === 0) {
+      const msg = fetchErr
+        ? `無法取得預處理清單: ${fetchErr}`
+        : '尚無預處理結果 — 請先到「預處理」頁面執行';
+      ppSelect.innerHTML = `<option value="">${escapeHtml(msg)}</option>`;
+      srcPp.checked = false;
+      srcPp.disabled = true;
+      ppSelect.disabled = true;
+      if (ppHint) ppHint.textContent = '';
+    } else {
+      srcPp.disabled = false;
+      ppMatches.forEach(p => {
+        const opt = document.createElement('option');
+        opt.value = p.id;
+        const tag = p.datasetId === ds.id ? '' : ' ⚠其他資料集';
+        opt.textContent = `${p.id} — target=${p.target}, ${p.featureCount} 特徵 (train ${p.trainSize}/test ${p.testSize})${tag}`;
+        ppSelect.appendChild(opt);
+      });
+      ppSelect.disabled = !srcPp.checked;
+      syncTargetToPreprocessor();
+    }
+  };
+  refreshPpSelect();
+  srcPp.addEventListener('change', () => {
+    ppSelect.disabled = !srcPp.checked;
+    syncTargetToPreprocessor();
+  });
+  ppSelect.addEventListener('change', syncTargetToPreprocessor);
+
   // Train button
   const btn = document.getElementById('btn-real-train');
   const newBtn = btn.cloneNode(true);
@@ -1676,7 +2131,18 @@ function renderRealExperimentsPage() {
     const taskType = taskTypeRadio ? taskTypeRadio.value : 'auto';
     const timeSeries = document.getElementById('exp-time-series').checked;
 
-    if (selectedFeatures.length === 0) { alert('請至少選擇一個特徵欄位'); return; }
+    // 資料來源 (多選)
+    const sources = [];
+    if (srcRaw.checked) sources.push('raw');
+    if (srcPp.checked) sources.push('preprocessed');
+    if (sources.length === 0) { alert('請至少選擇一個資料來源'); return; }
+
+    const preprocessorId = srcPp.checked ? ppSelect.value : null;
+    if (srcPp.checked && !preprocessorId) { alert('已勾選「已預處理資料」,請選擇一個預處理結果'); return; }
+
+    if (sources.includes('raw') && selectedFeatures.length === 0) {
+      alert('「原始資料集」需至少選擇一個特徵欄位'); return;
+    }
     if (selectedAlgos.length === 0) { alert('請至少選擇一個演算法'); return; }
 
     const options = {
@@ -1684,6 +2150,8 @@ function renderRealExperimentsPage() {
       algorithms: selectedAlgos,
       taskType: taskType,
       timeSeries: timeSeries,
+      sources: sources,
+      preprocessorId: preprocessorId,
     };
     startRealTraining(ds, targetSel.value, options);
   });
@@ -1740,6 +2208,8 @@ async function startRealTraining(ds, targetCol, options = {}) {
         features: options.features,
         algorithms: options.algorithms,
         options: { taskType: options.taskType, timeSeries: options.timeSeries },
+        sources: options.sources || ['raw'],
+        preprocessorId: options.preprocessorId || null,
       }, (ev) => {
         if (ev.type === 'log') {
           addLog(ev.msg, ev.level || 'info');
@@ -1820,10 +2290,25 @@ function renderExperimentResults(models, data) {
     const barWidth = Math.max(5, Math.round(score * 100));
     const barColor = score > 0.8 ? 'bg-success-500' : score > 0.5 ? 'bg-warning-500' : 'bg-danger-500';
 
+    // 資料來源 badge + 去掉名稱裡的 [原始]/[預處理] 文字前綴 (改用 badge 呈現)
+    const cleanName = m.name.replace(/^\[(原始|預處理)\]\s*/, '');
+    let srcBadge;
+    if (m.dataSource === 'preprocessed') {
+      srcBadge = '<span class="inline-block px-2 py-0.5 rounded-md text-[11px] font-semibold bg-accent-500/15 text-accent-400 border border-accent-500/30">預處理</span>';
+    } else if (m.dataSource === 'raw') {
+      srcBadge = '<span class="inline-block px-2 py-0.5 rounded-md text-[11px] font-semibold bg-primary-500/15 text-primary-400 border border-primary-500/30">原始</span>';
+    } else {
+      srcBadge = '<span class="text-dark-500 text-xs">—</span>';
+    }
+    // 預處理來源整列加一條左邊框,視覺上更好掃
+    if (m.dataSource === 'preprocessed') tr.classList.add('border-l-2', 'border-l-accent-500/40');
+    else if (m.dataSource === 'raw') tr.classList.add('border-l-2', 'border-l-primary-500/40');
+
     tr.innerHTML = `
       <td class="py-3 px-4">${rankBadge}</td>
+      <td class="py-3 px-4">${srcBadge}</td>
       <td class="py-3 px-4">
-        <p class="font-medium text-sm">${escapeHtml(m.name)}</p>
+        <p class="font-medium text-sm">${escapeHtml(cleanName)}</p>
         <div class="w-24 bg-dark-800 rounded-full h-1.5 mt-1"><div class="${barColor} h-1.5 rounded-full" style="width:${barWidth}%"></div></div>
       </td>
       <td class="py-3 px-4 font-mono text-sm ${i === 0 ? 'text-accent-400 font-semibold' : ''}">${col1}</td>
@@ -1834,15 +2319,41 @@ function renderExperimentResults(models, data) {
     tbody.appendChild(tr);
   });
 
-  // Feature importance chart (best model) — defer using rAF so DOM has time to layout before ECharts measures
-  if (models.length > 0) {
-    const best = models[0];
-    requestAnimationFrame(() => {
-      requestAnimationFrame(() => {
-        renderExpFeatureImportance(best);
-        renderExpPredictionChart(best, data);
-      });
+  // 模型選擇器 — 可切換要看哪個模型的特徵重要性 / 預測散佈圖
+  const chartSel = document.getElementById('exp-chart-model-select');
+  if (chartSel && models.length > 0) {
+    chartSel.innerHTML = '';
+    models.forEach((m, idx) => {
+      const opt = document.createElement('option');
+      opt.value = String(idx);
+      const srcTag = m.dataSource === 'preprocessed' ? '🟦 預處理 · '
+                   : m.dataSource === 'raw' ? '🔵 原始 · ' : '';
+      const cleanName = m.name.replace(/^\[(原始|預處理)\]\s*/, '');
+      const sc = isReg ? `R²=${m.metrics.testR2.toFixed(3)}` : `Acc=${(m.metrics.testAccuracy*100).toFixed(1)}%`;
+      opt.textContent = `${idx === 0 ? '⭐ ' : ''}${srcTag}${cleanName} (${sc})`;
+      chartSel.appendChild(opt);
     });
+
+    const renderChartsFor = (idx) => {
+      const m = models[idx];
+      if (!m) return;
+      const srcLabel = m.dataSource === 'preprocessed' ? '預處理資料'
+                     : m.dataSource === 'raw' ? '原始資料' : '';
+      const cleanName = m.name.replace(/^\[(原始|預處理)\]\s*/, '');
+      const sub = `— ${cleanName}${srcLabel ? ` · ${srcLabel}` : ''}`;
+      document.getElementById('exp-chart-importance-sub').textContent = sub;
+      document.getElementById('exp-chart-scatter-sub').textContent = sub;
+      requestAnimationFrame(() => {
+        requestAnimationFrame(() => {
+          renderExpFeatureImportance(m);
+          renderExpPredictionChart(m, data);
+        });
+      });
+    };
+
+    chartSel.onchange = () => renderChartsFor(parseInt(chartSel.value));
+    chartSel.value = '0';
+    renderChartsFor(0);
   }
 }
 
@@ -2117,6 +2628,9 @@ function renderRealInsights() {
   document.getElementById('insight-feature-count').textContent = best.featureNames.length;
   document.getElementById('insight-model-count').textContent = models.length;
 
+  // SHAP section (隊友 AutoMLVisualizer)
+  initShapSection(models, best);
+
   // Defer chart rendering so DOM has time to compute container sizes
   requestAnimationFrame(() => {
     requestAnimationFrame(() => {
@@ -2128,6 +2642,82 @@ function renderRealInsights() {
       renderRealWhatIf(models);
     });
   });
+}
+
+// ===== SHAP SECTION (Plotly figures from /api/visualize/shap) =====
+let _shapInitialized = false;
+
+function initShapSection(models, best) {
+  const modelSel = document.getElementById('shap-model-select');
+  const featSel = document.getElementById('shap-target-feature');
+  const sampleInput = document.getElementById('shap-sample-index');
+  const btn = document.getElementById('btn-shap-refresh');
+  if (!modelSel || !btn) return;  // 沒掛這段 HTML 就跳過
+
+  // 只填會打 SHAP 的模型 (Tree-based 最快;線性也行)
+  modelSel.innerHTML = '';
+  models.forEach(m => {
+    if (!m.id) return;  // 訓練失敗的模型沒 id
+    const opt = document.createElement('option');
+    opt.value = m.id;
+    opt.textContent = `${m.name} (${(m.taskType === 'regression' ? 'R²=' + m.metrics.testR2.toFixed(3) : 'Acc=' + (m.metrics.testAccuracy*100).toFixed(1) + '%')})`;
+    modelSel.appendChild(opt);
+  });
+
+  // 預設選最佳模型
+  if (best && best.id) modelSel.value = best.id;
+
+  // 填特徵下拉 (給 dependence plot)
+  featSel.innerHTML = '';
+  (best?.featureNames || []).forEach(fn => {
+    const opt = document.createElement('option');
+    opt.value = fn; opt.textContent = fn;
+    featSel.appendChild(opt);
+  });
+
+  if (!_shapInitialized) {
+    btn.addEventListener('click', loadShapFigures);
+    _shapInitialized = true;
+  }
+
+  // 自動觸發第一次
+  loadShapFigures();
+}
+
+async function loadShapFigures() {
+  if (typeof Plotly === 'undefined') {
+    document.getElementById('shap-error').classList.remove('hidden');
+    document.getElementById('shap-error').textContent = 'Plotly.js 未載入,請檢查網路或 CDN。';
+    return;
+  }
+  const modelId = document.getElementById('shap-model-select').value;
+  const sampleIndex = parseInt(document.getElementById('shap-sample-index').value) || 0;
+  const targetFeature = document.getElementById('shap-target-feature').value || null;
+  const errEl = document.getElementById('shap-error');
+  const loadEl = document.getElementById('shap-loading');
+
+  if (!modelId) {
+    errEl.classList.remove('hidden');
+    errEl.textContent = '請先選擇模型';
+    return;
+  }
+  errEl.classList.add('hidden');
+  loadEl.classList.remove('hidden');
+
+  try {
+    const res = await ApiClient.visualizeShap({
+      modelId, sampleIndex, targetFeature, maxSamples: 200,
+    });
+    const cfg = { responsive: true, displaylogo: false };
+    Plotly.newPlot('shap-fig-global', res.global.data, res.global.layout, cfg);
+    Plotly.newPlot('shap-fig-waterfall', res.waterfall.data, res.waterfall.layout, cfg);
+    Plotly.newPlot('shap-fig-dependence', res.dependence.data, res.dependence.layout, cfg);
+  } catch (e) {
+    errEl.classList.remove('hidden');
+    errEl.textContent = e.message;
+  } finally {
+    loadEl.classList.add('hidden');
+  }
 }
 
 // ===== REAL WHAT-IF SIMULATOR =====

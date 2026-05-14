@@ -34,6 +34,44 @@ const ApiClient = {
     return r.json();
   },
 
+  // ---- 1b. PREPROCESS — 隊友模組 (audit / transform / inference) ----
+  async preprocessAudit(payload) {
+    const r = await fetch(`${this.baseUrl}/api/preprocess/audit`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    if (!r.ok) throw new Error(`audit 失敗 (${r.status}): ${await r.text()}`);
+    return r.json();
+  },
+
+  async preprocessTransform(payload) {
+    const r = await fetch(`${this.baseUrl}/api/preprocess/transform`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    if (!r.ok) throw new Error(`transform 失敗 (${r.status}): ${await r.text()}`);
+    return r.json();
+  },
+
+  async preprocessInference(payload) {
+    const r = await fetch(`${this.baseUrl}/api/preprocess/inference`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    if (!r.ok) throw new Error(`inference 失敗 (${r.status}): ${await r.text()}`);
+    return r.json();
+  },
+
+  // 列出後端所有可用的 preprocessor
+  async preprocessList() {
+    const r = await fetch(`${this.baseUrl}/api/preprocess/list`, { method: 'GET' });
+    if (!r.ok) throw new Error(`preprocess list 失敗 (${r.status}): ${await r.text()}`);
+    return r.json();
+  },
+
   // ---- 2. TRAIN ----
   // payload: { datasetId, target, features, algorithms, options }
   async train(payload) {
@@ -55,6 +93,18 @@ const ApiClient = {
       body: JSON.stringify(payload),
     });
     if (!r.ok) throw new Error(`visualize 失敗 (${r.status}): ${await r.text()}`);
+    return r.json();
+  },
+
+  // ---- 3b. VISUALIZE (SHAP) — 隊友 AutoMLVisualizer ----
+  // payload: { modelId, sampleIndex, targetFeature?, maxSamples? }
+  async visualizeShap(payload) {
+    const r = await fetch(`${this.baseUrl}/api/visualize/shap`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    if (!r.ok) throw new Error(`SHAP 失敗 (${r.status}): ${await r.text()}`);
     return r.json();
   },
 

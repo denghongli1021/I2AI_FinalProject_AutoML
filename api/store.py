@@ -15,3 +15,11 @@ DATASETS: dict[str, dict[str, Any]] = {}
 #   "featureNames": [str, ...],
 # }
 MODELS: dict[str, dict[str, Any]] = {}
+
+# preprocessor_id -> {
+#   "preprocessor": sklearn ColumnTransformer (fitted),
+#   "target":       str,
+#   "datasetId":    str,
+#   "featureNames": [str, ...],   # 處理後的欄位名 (含 OneHot 展開)
+# }
+PREPROCESSORS: dict[str, dict[str, Any]] = {}

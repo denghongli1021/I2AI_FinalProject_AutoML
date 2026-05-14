@@ -1,9 +1,11 @@
-"""api.train package — 對外只暴露 run()。
+"""api.train package.
 
-實作在 train.py。隊友 B 改 train.py(或在資料夾內加新檔案,例如 algorithms.py、metrics.py)即可,
-main.py 永遠透過 `from api import train; train.run(...)` 呼叫,介面不變。
+兩條對外介面 (都實作在 train.py):
+  - `run(df, target, features, algorithms, options)` — 從原始 DataFrame 訓練,自己做特徵建構 / 切分。
+  - `run_prepared(X_train_df, X_test_df, y_train, y_test, target, algorithms, options)`
+    — 從預處理模組切好的 train/test 直接訓練。
 """
 
-from .train import run
+from .train import run, run_prepared
 
-__all__ = ["run"]
+__all__ = ["run", "run_prepared"]

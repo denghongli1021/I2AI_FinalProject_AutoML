@@ -9,32 +9,46 @@ import warnings
 warnings.filterwarnings('ignore')
 
 class AutoMLVisualizer:
-    def __init__(self, model, X_test, output_dir="plots"):
+    def __init__(self, model, X_test, output_dir=None):
         self.model = model
         self.X_test = X_test
         self.output_dir = output_dir
-        
-        if not os.path.exists(self.output_dir):
+
+        # 只有要寫 PNG 才需要建資料夾;return_fig=True 模式直接跳過
+        if self.output_dir and not os.path.exists(self.output_dir):
             os.makedirs(self.output_dir)
             
         print("Initializing SHAP Explainer...")
         # 自動偵測模型類型，選擇最適合的 Explainer：
-        # - 樹模型（XGBoost, LightGBM）→ TreeExplainer（精確解，速度快）
-        # - 神經網路（TCN, LSTM 等）   → 自動 fallback 到 PermutationExplainer
-        # - 其他模型                   → KernelExplainer
+        # - 樹模型（XGBoost, LightGBM, RandomForest）→ TreeExplainer（精確解，速度快）
+        # - 線性模型（LinearRegression, Ridge, Lasso, LogisticRegression）→ LinearExplainer（精確解）
+        # - 神經網路 / 其他模型 → shap.Explainer（Permutation，需要 max_evals >= 2*n_features+1）
+        n_features = self.X_test.shape[1]
         try:
             self.explainer = shap.TreeExplainer(self.model)
             self.shap_values = self.explainer(self.X_test)
             print("  Using TreeExplainer (tree-based model detected)")
         except Exception:
-            print("  TreeExplainer not applicable, falling back to shap.Explainer...")
-            # 對神經網路，shap.Explainer 需要傳入 predict 函數（而非模型物件本身）
-            # 取 X_test 前 100 筆作為 background（太多會很慢）
+            # 線性模型 (有 coef_ 屬性) — 用 LinearExplainer 取得精確解
+            if hasattr(self.model, "coef_"):
+                try:
+                    background = self.X_test.iloc[:100]
+                    self.explainer = shap.LinearExplainer(self.model, background)
+                    self.shap_values = self.explainer(self.X_test)
+                    print("  Using LinearExplainer (linear model detected)")
+                    return
+                except Exception as e:
+                    print(f"  LinearExplainer failed: {e}, falling back further...")
+
+            print("  Falling back to shap.Explainer (Permutation)...")
+            # 對神經網路 / 其他模型，shap.Explainer 需要 predict 函數
             background = self.X_test.iloc[:100]
             predict_fn = self.model.predict if hasattr(self.model, "predict") else self.model
             self.explainer = shap.Explainer(predict_fn, background)
-            self.shap_values = self.explainer(self.X_test)
-            print("  Using shap.Explainer (model-agnostic)")
+            # Permutation explainer 需要 max_evals >= 2*n_features+1,留一些餘裕
+            max_evals = max(500, 2 * n_features + 100)
+            self.shap_values = self.explainer(self.X_test, max_evals=max_evals)
+            print(f"  Using shap.Explainer (model-agnostic, max_evals={max_evals})")
 
     def _get_shap_matrix(self):
         """
@@ -50,7 +64,7 @@ class AutoMLVisualizer:
             return v[:, :, -1]
         return v
 
-    def generate_beeswarm_plot(self, filename="global_importance.png"):
+    def generate_beeswarm_plot(self, filename="global_importance.png", return_fig=False):
         # UI 優化：將雜亂的蜂群圖改為清晰的「全局特徵重要性長條圖」
         vals = np.abs(self._get_shap_matrix()).mean(0)
         df = pd.DataFrame({'Feature': self.X_test.columns, 'Importance': vals})
@@ -63,12 +77,15 @@ class AutoMLVisualizer:
             color_continuous_scale='Blues'
         )
         fig.update_layout(margin=dict(l=150, r=50, t=80, b=50), title_font_size=20)
-        
+
+        if return_fig:
+            return fig
+
         filepath = os.path.join(self.output_dir, filename)
         fig.write_image(filepath, scale=2) # scale=2 讓圖片變高畫質
         print(f"Generated: {filepath}")
 
-    def generate_waterfall_plot(self, sample_index=0, filename="waterfall.png"):
+    def generate_waterfall_plot(self, sample_index=0, filename="waterfall.png", return_fig=False):
         # Plotly 現代化瀑布圖 (垂直顯示，文字永不重疊，精確小數點)
         sample_shap = self._get_shap_matrix()[sample_index]
         base_value = self.shap_values[sample_index].base_values
@@ -112,12 +129,15 @@ class AutoMLVisualizer:
             title_font_size=20
         )
         fig.update_xaxes(tickangle=45) # 底部文字旋轉
-        
+
+        if return_fig:
+            return fig
+
         filepath = os.path.join(self.output_dir, filename)
         fig.write_image(filepath, scale=2)
         print(f"Generated: {filepath}")
 
-    def generate_dependence_plot(self, target_feature, filename="c_dependence.png"):
+    def generate_dependence_plot(self, target_feature, filename="c_dependence.png", return_fig=False):
         # 自動挑選 color_feature：
         # 1. 排除目標特徵本身
         # 2. 優先選 unique 值數量 > 10 的連續數值欄位（避免選到 race 等低基數類別）
@@ -145,7 +165,10 @@ class AutoMLVisualizer:
         )
         fig.update_traces(marker=dict(size=8, opacity=0.8))
         fig.update_layout(margin=dict(l=80, r=50, t=80, b=50), title_font_size=20)
-        
+
+        if return_fig:
+            return fig
+
         filepath = os.path.join(self.output_dir, filename)
         fig.write_image(filepath, scale=2)
         print(f"Generated: {filepath}")

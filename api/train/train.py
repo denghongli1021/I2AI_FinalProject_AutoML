@@ -125,14 +125,12 @@ def run(
     algorithms: list[str],
     options: dict[str, Any],
     on_progress: Callable[[dict], None] | None = None,
-) -> list[tuple[dict[str, Any], Any, StandardScaler]]:
+) -> list[tuple[dict[str, Any], Any, StandardScaler, pd.DataFrame]]:
     """
-    回傳 list of (bundle, estimator, scaler).
-    main.py 會把 bundle 變成 JSON 回前端,estimator/scaler 存在 in-memory store
-    供 /api/predict 重用。
+    從「原始 DataFrame」訓練 — 自己做特徵建構 / 切分。
+    回傳 list of (bundle, estimator, scaler, X_test_df)。
 
-    on_progress: 可選回呼,接收 {"type": "log"/"progress", ...} 事件,
-                 給 SSE streaming 用。
+    on_progress: 可選回呼,接收 {"type": "log"/"progress", ...} 事件,給 SSE streaming 用。
     """
     def _emit(ev):
         if on_progress:
@@ -177,20 +175,88 @@ def run(
             X, y, test_size=test_size, shuffle=True, random_state=42,
         )
 
+    _emit({"type": "log", "msg": f"資料準備完成: {len(X)} 筆有效數據, {X.shape[1]} 個特徵", "level": "success"})
+    _emit({"type": "log", "msg": f"任務類型: {'回歸' if task_type == 'regression' else '分類'}{' (時間序列)' if is_time_series else ''}", "level": "info"})
+    _emit({"type": "log", "msg": f"訓練集: {len(y_train)} 筆, 測試集: {len(y_test)} 筆", "level": "info"})
+
+    # 5-8. Standardize + train + sort (與 run_prepared 共用)
+    return _train_all(X_train, X_test, y_train, y_test, feature_names, target,
+                      task_type, algorithms, _emit)
+
+
+def run_prepared(
+    X_train_df: pd.DataFrame,
+    X_test_df: pd.DataFrame,
+    y_train_series: pd.Series,
+    y_test_series: pd.Series,
+    target: str,
+    algorithms: list[str],
+    options: dict[str, Any],
+    on_progress: Callable[[dict], None] | None = None,
+) -> list[tuple[dict[str, Any], Any, StandardScaler, pd.DataFrame]]:
+    """
+    從「已預處理好的 train/test」訓練 — 特徵建構與切分都已由 preprocessing 模組做完。
+    X_train_df / X_test_df 已是最終特徵矩陣 (含 OneHot / TF-IDF 展開)。
+    回傳格式同 run()。
+    """
+    def _emit(ev):
+        if on_progress:
+            try: on_progress(ev)
+            except Exception: pass
+
+    feature_names = list(X_train_df.columns)
+    X_train = X_train_df.to_numpy(dtype=float)
+    X_test = X_test_df.to_numpy(dtype=float)
+    y_train = y_train_series.to_numpy()
+    y_test = y_test_series.to_numpy()
+
+    if len(X_train) < 5:
+        raise ValueError("訓練集不足 5 筆,無法訓練")
+
+    # Detect task type
+    task_override = options.get("taskType")
+    if task_override and task_override != "auto":
+        task_type = task_override
+    else:
+        uniq = set(list(y_train) + list(y_test))
+        task_type = "classification" if len(uniq) <= 10 else "regression"
+
+    if task_type == "classification" and not np.issubdtype(np.asarray(y_train).dtype, np.number):
+        y_train = np.asarray(y_train).astype(str)
+        y_test = np.asarray(y_test).astype(str)
+
+    _emit({"type": "log", "msg": f"使用已預處理資料: 訓練 {len(X_train)} 筆 / 測試 {len(X_test)} 筆, {X_train.shape[1]} 個特徵", "level": "success"})
+    _emit({"type": "log", "msg": f"任務類型: {'回歸' if task_type == 'regression' else '分類'}", "level": "info"})
+
+    return _train_all(X_train, X_test, y_train, y_test, feature_names, target,
+                      task_type, algorithms, _emit)
+
+
+# ============================================================
+# Shared: standardize + train each algorithm + sort  (run / run_prepared 共用)
+# ============================================================
+def _train_all(
+    X_train: np.ndarray,
+    X_test: np.ndarray,
+    y_train: np.ndarray,
+    y_test: np.ndarray,
+    feature_names: list[str],
+    target: str,
+    task_type: str,
+    algorithms: list[str],
+    _emit: Callable[[dict], None],
+) -> list[tuple[dict[str, Any], Any, StandardScaler, pd.DataFrame]]:
     # 5. Standardize
     scaler = StandardScaler()
     X_train_norm = scaler.fit_transform(X_train)
     X_test_norm = scaler.transform(X_test)
 
     # 6. Per-feature stats for What-If sliders (raw scale)
+    X_all = np.vstack([X_train, X_test])
     feature_stats = [
-        {"min": float(X[:, j].min()), "max": float(X[:, j].max()), "mean": float(X[:, j].mean())}
-        for j in range(X.shape[1])
+        {"min": float(X_all[:, j].min()), "max": float(X_all[:, j].max()), "mean": float(X_all[:, j].mean())}
+        for j in range(X_all.shape[1])
     ]
-
-    _emit({"type": "log", "msg": f"資料準備完成: {len(X)} 筆有效數據, {X.shape[1]} 個特徵", "level": "success"})
-    _emit({"type": "log", "msg": f"任務類型: {'回歸' if task_type == 'regression' else '分類'}{' (時間序列)' if is_time_series else ''}", "level": "info"})
-    _emit({"type": "log", "msg": f"訓練集: {len(y_train)} 筆, 測試集: {len(y_test)} 筆", "level": "info"})
 
     # 7. Train each algorithm
     valid_algos = [
@@ -200,7 +266,10 @@ def run(
         and not (task_type == "classification" and k in _REGRESSION_ONLY)
     ]
 
-    results: list[tuple[dict[str, Any], Any, StandardScaler]] = []
+    # X_test 標準化後 DataFrame — 給 SHAP visualizer 用 (跟所有模型共用)
+    X_test_df = pd.DataFrame(X_test_norm, columns=feature_names)
+
+    results: list[tuple[dict[str, Any], Any, StandardScaler, pd.DataFrame]] = []
     for i, key in enumerate(valid_algos):
         _emit({"type": "progress", "pct": int(i / max(len(valid_algos), 1) * 100),
                "step": f"訓練 {_ALGO_LABELS[key]}"})
@@ -210,7 +279,7 @@ def run(
                 key, task_type, X_train_norm, X_test_norm, y_train, y_test,
                 feature_names, target, feature_stats, scaler,
             )
-            results.append((bundle, estimator, scaler))
+            results.append((bundle, estimator, scaler, X_test_df))
             score = bundle["metrics"].get("testScore", 0.0)
             score_label = "R²" if task_type == "regression" else "Acc"
             _emit({"type": "log",
@@ -218,7 +287,7 @@ def run(
                    "level": "success" if score > 0.5 else "warning"})
         except Exception as e:
             bundle = _failed_bundle(key, task_type, target, feature_names, str(e))
-            results.append((bundle, None, scaler))
+            results.append((bundle, None, scaler, X_test_df))
             _emit({"type": "log", "msg": f"✗ {_ALGO_LABELS[key]} 失敗: {e}", "level": "error"})
 
     # 8. Sort by testScore desc

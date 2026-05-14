@@ -1,9 +1,23 @@
-"""api.preprocess package — 對外只暴露 run()。
+"""api.preprocess package.
 
-實作在 preprocess.py。隊友 A 改 preprocess.py(或在資料夾內加新檔案)即可,
-main.py 永遠透過 `from api import preprocess; preprocess.run(...)` 呼叫,介面不變。
+兩條對外介面:
+  - `run(file_bytes, filename)` — 既有 CSV 分析 (analysis + correlation + healthScore + log)
+    給 /api/preprocess 端點使用,定義在 preprocess.py。
+  - `run_data_audit`, `preprocess_for_training`, `preprocess_for_inference`
+    — 隊友的 sklearn pipeline 預處理模組,定義在 interface.py。
+    api/main.py 之後改成呼叫這幾個就能切換成新版預處理。
 """
 
 from .preprocess import run
+from .interface import (
+    run_data_audit,
+    preprocess_for_training,
+    preprocess_for_inference,
+)
 
-__all__ = ["run"]
+__all__ = [
+    "run",
+    "run_data_audit",
+    "preprocess_for_training",
+    "preprocess_for_inference",
+]

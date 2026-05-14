@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -X utf8 -c ' *)",
+      "Bash(curl -s http://127.0.0.1:8000/openapi.json)",
+      "Bash(python -c \"import json,sys; d=json.load\\(sys.stdin\\); print\\([p for p in d['paths'] if 'download' in p]\\)\")",
+      "Bash(python -m uvicorn api.main:app --host 127.0.0.1 --port 8000)"
+    ]
+  }
+}

@@ -7,9 +7,10 @@
   <link rel="icon" type="image/png" href="icon.png">
   <script src="https://cdn.tailwindcss.com"></script>
   <script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>
+  <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="css/style.css">
+  <link rel="stylesheet" href="css/style.css?v=4">
   <script>
     tailwind.config = {
       theme: {
@@ -54,6 +55,10 @@
       <a href="#" class="nav-item" data-page="datasets">
         <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M4 7v10c0 2.21 3.582 4 8 4s8-1.79 8-4V7M4 7c0 2.21 3.582 4 8 4s8-1.79 8-4M4 7c0-2.21 3.582-4 8-4s8 1.79 8 4m0 5c0 2.21-3.582 4-8 4s-8-1.79-8-4"/></svg>
         <span>數據集管理</span>
+      </a>
+      <a href="#" class="nav-item" data-page="preprocessing">
+        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M4 6h16M4 12h16M4 18h7"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M14 18l2 2 4-4"/></svg>
+        <span>預處理</span>
       </a>
       <a href="#" class="nav-item" data-page="experiments">
         <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M19.428 15.428a2 2 0 00-1.022-.547l-2.387-.477a6 6 0 00-3.86.517l-.318.158a6 6 0 01-3.86.517L6.05 15.21a2 2 0 00-1.806.547M8 4h8l-1 1v5.172a2 2 0 00.586 1.414l5 5c1.26 1.26.367 3.414-1.415 3.414H4.828c-1.782 0-2.674-2.154-1.414-3.414l5-5A2 2 0 009 10.172V5L8 4z"/></svg>
@@ -103,7 +108,7 @@
   </aside>
 
   <!-- ===== MAIN CONTENT ===== -->
-  <main class="flex-1 ml-64">
+  <main class="flex-1 min-w-0 ml-64">
     <!-- Top Bar -->
     <header class="sticky top-0 z-20 bg-dark-950/80 backdrop-blur-xl border-b border-dark-700/50 px-6 py-3">
       <div class="flex items-center justify-between">
@@ -512,7 +517,235 @@
       </section>
       
       <!-- first insights section removed — merged into the second page-insights below -->
-      
+
+      <!-- ===== PAGE: PREPROCESSING (隊友模組) ===== -->
+      <section id="page-preprocessing" class="page-section hidden">
+        <!-- No dataset state -->
+        <div id="pp-no-data" class="card p-12 text-center hidden">
+          <div class="w-16 h-16 mx-auto mb-4 rounded-2xl bg-accent-500/10 flex items-center justify-center">
+            <svg class="w-8 h-8 text-accent-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12"/></svg>
+          </div>
+          <h3 class="text-lg font-semibold mb-2">尚未上傳數據集</h3>
+          <p class="text-sm text-dark-400 mb-4">請先前往數據集管理頁面上傳 CSV 檔案</p>
+          <button onclick="navigateTo('datasets')" class="px-4 py-2 bg-primary-600 hover:bg-primary-500 rounded-lg text-sm font-medium transition-colors">前往上傳數據集</button>
+        </div>
+
+        <!-- Configuration -->
+        <div id="pp-config-wrap" class="hidden">
+          <div class="card mb-6">
+            <div class="card-header">
+              <h3 class="card-title">預處理設定</h3>
+              <span id="pp-dataset-badge" class="badge badge-primary"></span>
+            </div>
+            <div class="grid grid-cols-1 md:grid-cols-3 gap-6 px-4 pb-4 pt-2">
+              <div>
+                <label class="block text-sm font-medium text-dark-300 mb-2">目標變數 (Target)</label>
+                <select id="pp-target-select" class="w-full bg-dark-800 border border-dark-600 rounded-lg px-3 py-2.5 text-sm focus:border-primary-500 outline-none"></select>
+                <p class="text-xs text-dark-500 mt-1.5">會從特徵欄位中排除,並用來切 train/test。</p>
+              </div>
+              <div>
+                <label class="block text-sm font-medium text-dark-300 mb-2">測試集比例</label>
+                <div class="flex items-center gap-3">
+                  <input type="range" id="pp-test-size" min="0.1" max="0.5" step="0.05" value="0.2" class="flex-1 accent-primary-500">
+                  <span id="pp-test-size-label" class="text-sm font-mono text-primary-400 w-12 text-right">20%</span>
+                </div>
+                <p class="text-xs text-dark-500 mt-1.5">train_test_split 切分比例,固定 random_state=42。</p>
+              </div>
+              <div class="flex items-end gap-2">
+                <button id="btn-pp-audit" class="flex-1 px-4 py-2.5 bg-dark-700 hover:bg-dark-600 border border-dark-600 rounded-lg text-sm font-medium transition-colors">
+                  快速健檢
+                </button>
+                <button id="btn-pp-run" class="flex-1 px-4 py-2.5 bg-gradient-to-r from-primary-600 to-accent-600 hover:from-primary-500 hover:to-accent-500 rounded-lg text-sm font-semibold transition-all shadow-lg shadow-primary-500/20">
+                  執行預處理
+                </button>
+              </div>
+            </div>
+          </div>
+
+          <!-- Status / Loading -->
+          <div id="pp-status" class="card mb-6 hidden">
+            <div class="px-4 py-3 flex items-center gap-3">
+              <div class="w-4 h-4 border-2 border-primary-500 border-t-transparent rounded-full animate-spin"></div>
+              <span id="pp-status-text" class="text-sm text-dark-300">處理中...</span>
+            </div>
+          </div>
+
+          <!-- Audit Report -->
+          <div id="pp-audit-section" class="grid grid-cols-1 lg:grid-cols-3 gap-4 mb-6 hidden">
+            <div class="card">
+              <div class="card-header">
+                <h3 class="card-title">健康診斷</h3>
+              </div>
+              <div class="px-4 pb-4 space-y-3">
+                <div class="grid grid-cols-2 gap-3">
+                  <div class="bg-dark-800/50 rounded-lg p-3">
+                    <p class="text-xs text-dark-400 mb-1">總列數</p>
+                    <p class="text-xl font-bold" id="pp-stat-rows">—</p>
+                  </div>
+                  <div class="bg-dark-800/50 rounded-lg p-3">
+                    <p class="text-xs text-dark-400 mb-1">總欄位</p>
+                    <p class="text-xl font-bold" id="pp-stat-cols">—</p>
+                  </div>
+                  <div class="bg-dark-800/50 rounded-lg p-3">
+                    <p class="text-xs text-dark-400 mb-1">完美欄位</p>
+                    <p class="text-xl font-bold text-success-400" id="pp-stat-perfect">—</p>
+                  </div>
+                  <div class="bg-dark-800/50 rounded-lg p-3">
+                    <p class="text-xs text-dark-400 mb-1">有缺失欄位</p>
+                    <p class="text-xl font-bold text-warning-400" id="pp-stat-missing">—</p>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div class="card col-span-2">
+              <div class="card-header">
+                <h3 class="card-title">警告與缺失值</h3>
+                <span id="pp-warning-count" class="badge badge-warning">0</span>
+              </div>
+              <div class="px-4 pb-4 space-y-3">
+                <div id="pp-warnings-list" class="space-y-2 max-h-32 overflow-y-auto"></div>
+                <div class="overflow-x-auto" style="max-height:180px">
+                  <table class="w-full text-sm">
+                    <thead class="sticky top-0 bg-dark-900 z-10">
+                      <tr class="text-dark-400 text-xs border-b border-dark-700/50">
+                        <th class="text-left py-2 px-3 font-medium">欄位</th>
+                        <th class="text-right py-2 px-3 font-medium">缺失數</th>
+                        <th class="text-right py-2 px-3 font-medium">缺失率</th>
+                      </tr>
+                    </thead>
+                    <tbody id="pp-missing-table"></tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Feature Groups (Router output) -->
+          <div id="pp-groups-section" class="card mb-6 hidden">
+            <div class="card-header">
+              <h3 class="card-title">欄位自動分類 (AutoRouter)</h3>
+              <span class="text-xs text-dark-400">每個欄位自動指派對應的處理管線</span>
+            </div>
+            <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-3 px-4 pb-4">
+              <div class="bg-dark-800/50 rounded-lg p-3 border border-blue-500/20">
+                <div class="flex items-center justify-between mb-2">
+                  <span class="text-xs font-semibold text-blue-400">Numeric</span>
+                  <span class="text-xs text-dark-500" id="pp-group-numeric-count">0</span>
+                </div>
+                <p class="text-[10px] text-dark-500 mb-2">中位數填補 → StandardScaler</p>
+                <div id="pp-group-numeric" class="flex flex-wrap gap-1 max-h-28 overflow-y-auto pr-1"></div>
+              </div>
+              <div class="bg-dark-800/50 rounded-lg p-3 border border-amber-500/20">
+                <div class="flex items-center justify-between mb-2">
+                  <span class="text-xs font-semibold text-amber-400">Categorical</span>
+                  <span class="text-xs text-dark-500" id="pp-group-categorical-count">0</span>
+                </div>
+                <p class="text-[10px] text-dark-500 mb-2">眾數填補 → OneHotEncoder</p>
+                <div id="pp-group-categorical" class="flex flex-wrap gap-1 max-h-28 overflow-y-auto pr-1"></div>
+              </div>
+              <div class="bg-dark-800/50 rounded-lg p-3 border border-purple-500/20">
+                <div class="flex items-center justify-between mb-2">
+                  <span class="text-xs font-semibold text-purple-400">Text (NLP)</span>
+                  <span class="text-xs text-dark-500" id="pp-group-text-count">0</span>
+                </div>
+                <p class="text-[10px] text-dark-500 mb-2">TF-IDF (1000 維) → SVD 50 維</p>
+                <div id="pp-group-text" class="flex flex-wrap gap-1 max-h-28 overflow-y-auto pr-1"></div>
+              </div>
+              <div class="bg-dark-800/50 rounded-lg p-3 border border-green-500/20">
+                <div class="flex items-center justify-between mb-2">
+                  <span class="text-xs font-semibold text-green-400">Datetime</span>
+                  <span class="text-xs text-dark-500" id="pp-group-datetime-count">0</span>
+                </div>
+                <p class="text-[10px] text-dark-500 mb-2">拆 year / month / day / weekday</p>
+                <div id="pp-group-datetime" class="flex flex-wrap gap-1 max-h-28 overflow-y-auto pr-1"></div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Transform Result -->
+          <div id="pp-result-section" class="card mb-6 hidden">
+            <div class="card-header">
+              <h3 class="card-title">處理後特徵 (X_train 前 10 列)</h3>
+              <div class="flex items-center gap-3 text-xs text-dark-400">
+                <span>訓練 <span id="pp-result-train" class="text-dark-100 font-semibold">—</span></span>
+                <span>測試 <span id="pp-result-test" class="text-dark-100 font-semibold">—</span></span>
+                <span>特徵 <span id="pp-result-feat" class="text-dark-100 font-semibold">—</span></span>
+                <span class="text-dark-600">|</span>
+                <span>preprocessorId: <code id="pp-result-id" class="text-accent-400">—</code></span>
+                <button id="btn-pp-download-train" class="ml-2 px-2 py-1 bg-success-600/80 hover:bg-success-500 rounded text-white transition-colors flex items-center gap-1">
+                  <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/></svg>
+                  train.csv
+                </button>
+                <button id="btn-pp-download-test" class="px-2 py-1 bg-primary-600/80 hover:bg-primary-500 rounded text-white transition-colors flex items-center gap-1">
+                  <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/></svg>
+                  test.csv
+                </button>
+                <button id="btn-pp-result-toggle" class="px-2 py-1 bg-dark-800 border border-dark-700 rounded text-dark-300 hover:text-dark-100 transition-colors">展開預覽</button>
+              </div>
+            </div>
+            <div class="px-4 pb-4">
+              <div id="pp-result-table-wrap" class="hidden">
+                <div class="overflow-auto rounded-lg border border-dark-700/50" style="max-height:180px; overscroll-behavior:contain;">
+                  <table class="text-[11px]" style="min-width:100%;">
+                    <thead class="sticky top-0 bg-dark-900 z-10">
+                      <tr id="pp-result-thead" class="text-dark-400 border-b border-dark-700/50"></tr>
+                    </thead>
+                    <tbody id="pp-result-tbody"></tbody>
+                  </table>
+                </div>
+                <p class="text-[10px] text-dark-500 mt-1.5 flex items-center gap-1.5">
+                  <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 16V4m0 0L3 8m4-4l4 4m6 0v12m0 0l4-4m-4 4l-4-4"/></svg>
+                  滾輪捲動查看更多列,Shift+滾輪 / 拖拉捲軸 看橫向欄位
+                </p>
+              </div>
+              <p class="text-[11px] text-dark-500 mt-2">
+                💡 fitted preprocessor 已儲存在後端,可用於日後對新資料套用 (POST /api/preprocess/inference)。
+              </p>
+            </div>
+          </div>
+
+          <!-- Inference Tester -->
+          <div id="pp-inference-section" class="card mb-6 hidden">
+            <div class="card-header">
+              <h3 class="card-title">套用到新資料 (Inference)</h3>
+              <div class="flex items-center gap-2 text-xs">
+                <input type="text" id="pp-inference-search" placeholder="搜尋欄位..." class="bg-dark-800 border border-dark-700 rounded px-2 py-1 text-xs focus:border-accent-500 outline-none w-32">
+                <button id="btn-pp-inference-toggle" class="px-2 py-1 bg-dark-800 border border-dark-700 rounded text-dark-300 hover:text-dark-100 transition-colors">展開</button>
+              </div>
+            </div>
+            <div class="px-4 pb-4">
+              <p id="pp-inference-hint" class="text-[11px] text-dark-500 mb-2">預設值已自動帶入第一筆資料,展開後可修改後再轉換。</p>
+              <div id="pp-inference-inputs-wrap" class="hidden">
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-3 mb-3">
+                  <!-- Left: 原始輸入 -->
+                  <div class="rounded-lg border border-dark-700/50 bg-dark-900/40">
+                    <div class="px-3 py-2 border-b border-dark-700/50 flex items-center justify-between">
+                      <p class="text-[11px] font-semibold text-dark-300">原始資料 (Input)</p>
+                      <span class="text-[10px] text-dark-500" id="pp-input-count">—</span>
+                    </div>
+                    <div id="pp-inference-inputs" class="p-2 space-y-1 max-h-80 overflow-y-auto" style="overscroll-behavior:contain;"></div>
+                  </div>
+                  <!-- Right: 處理後輸出 -->
+                  <div class="rounded-lg border border-accent-500/30 bg-accent-500/[0.03]">
+                    <div class="px-3 py-2 border-b border-accent-500/20 flex items-center justify-between">
+                      <p class="text-[11px] font-semibold text-accent-400">處理後 (Transformed)</p>
+                      <span class="text-[10px] text-dark-500" id="pp-output-count">尚未轉換</span>
+                    </div>
+                    <div id="pp-inference-outputs" class="p-2 space-y-1 max-h-80 overflow-y-auto" style="overscroll-behavior:contain;">
+                      <p class="text-[11px] text-dark-500 px-2 py-1">點擊下方「轉換這筆資料」後會顯示處理結果。</p>
+                    </div>
+                  </div>
+                </div>
+              </div>
+              <button id="btn-pp-inference" class="px-4 py-2 bg-accent-600 hover:bg-accent-500 rounded-lg text-sm font-medium transition-colors">
+                轉換這筆資料
+              </button>
+            </div>
+          </div>
+        </div>
+      </section>
+
       <!-- ===== PAGE: EXPERIMENTS ===== -->
       <section id="page-experiments" class="page-section hidden">
         <!-- Real mode experiment UI -->
@@ -571,11 +804,38 @@
                     </div>
                   </label>
                 </div>
+                <!-- Data Source (multi-select) -->
+                <div class="md:col-span-2">
+                  <label class="block text-sm font-medium text-dark-300 mb-2">
+                    資料來源 <span class="text-dark-500 font-normal text-xs">可多選 — 同時跑可比較前處理效果</span>
+                  </label>
+                  <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <label class="flex items-start gap-3 px-3 py-2.5 rounded-lg bg-dark-800 border border-dark-600 cursor-pointer hover:border-primary-500 transition-colors has-[:checked]:border-primary-500 has-[:checked]:bg-primary-500/10">
+                      <input type="checkbox" id="exp-src-raw" class="exp-src-cb accent-primary-500 mt-0.5" value="raw" checked>
+                      <div>
+                        <p class="text-sm font-medium">原始資料集</p>
+                        <p class="text-xs text-dark-400">後端自動挑數值欄位 + 標準化 (現有流程)</p>
+                      </div>
+                    </label>
+                    <label class="flex items-start gap-3 px-3 py-2.5 rounded-lg bg-dark-800 border border-dark-600 cursor-pointer hover:border-primary-500 transition-colors has-[:checked]:border-primary-500 has-[:checked]:bg-primary-500/10">
+                      <input type="checkbox" id="exp-src-pp" class="exp-src-cb accent-primary-500 mt-0.5" value="preprocessed">
+                      <div class="flex-1 min-w-0">
+                        <p class="text-sm font-medium">已預處理資料</p>
+                        <p class="text-xs text-dark-400 mb-1.5">用「預處理」頁面切好的 train/test (含 OneHot / 文字 / 日期處理)</p>
+                        <select id="exp-pp-select" class="w-full bg-dark-900 border border-dark-600 rounded px-2 py-1 text-xs focus:border-primary-500 outline-none disabled:opacity-50" disabled>
+                          <option value="">尚無預處理結果 — 請先到「預處理」頁面執行</option>
+                        </select>
+                        <p id="exp-pp-hint" class="text-[11px] text-accent-400 mt-1"></p>
+                      </div>
+                    </label>
+                  </div>
+                </div>
+
                 <!-- Feature Columns -->
                 <div class="md:col-span-2">
-                  <div class="flex items-center justify-between mb-2">
+                  <div id="exp-feature-section-header" class="flex items-center justify-between mb-2">
                     <div class="flex items-center gap-4">
-                      <label class="block text-sm font-medium text-dark-300">特徵欄位 <span id="exp-feature-count" class="text-dark-500 font-normal"></span></label>
+                      <label class="block text-sm font-medium text-dark-300">特徵欄位 <span id="exp-feature-count" class="text-dark-500 font-normal"></span> <span class="text-dark-500 font-normal text-xs">(僅套用於「原始資料集」)</span></label>
                       <input type="text" id="exp-feature-search" placeholder="搜尋欄位..." class="bg-dark-800 border border-dark-700 rounded px-2 py-1 text-xs focus:border-primary-500 outline-none w-32">
                     </div>
                     <div class="flex items-center gap-2">
@@ -637,6 +897,7 @@
                     <thead>
                       <tr class="text-dark-400 text-xs border-b border-dark-700/50">
                         <th class="py-3 px-4 text-left font-medium">排名</th>
+                        <th class="py-3 px-4 text-left font-medium">資料來源</th>
                         <th class="py-3 px-4 text-left font-medium">演算法</th>
                         <th class="py-3 px-4 text-left font-medium" id="exp-metric-col1">—</th>
                         <th class="py-3 px-4 text-left font-medium" id="exp-metric-col2">—</th>
@@ -649,14 +910,20 @@
                 </div>
               </div>
 
+              <!-- Model selector for the two charts -->
+              <div class="flex items-center gap-2 mb-3 text-sm">
+                <span class="text-dark-400">檢視模型圖表:</span>
+                <select id="exp-chart-model-select" class="bg-dark-800 border border-dark-600 rounded-lg px-3 py-1.5 text-sm focus:border-primary-500 outline-none min-w-[18rem]"></select>
+              </div>
+
               <!-- Charts row -->
               <div class="grid grid-cols-1 lg:grid-cols-2 gap-4 mb-6">
                 <div class="card">
-                  <div class="card-header"><h3 class="card-title">特徵重要性 (最佳模型)</h3></div>
+                  <div class="card-header"><h3 class="card-title">特徵重要性 <span id="exp-chart-importance-sub" class="text-xs text-dark-400 font-normal"></span></h3></div>
                   <div id="chart-exp-importance" class="h-64"></div>
                 </div>
                 <div class="card">
-                  <div class="card-header"><h3 class="card-title">預測 vs 實際</h3></div>
+                  <div class="card-header"><h3 class="card-title">預測 vs 實際 <span id="exp-chart-scatter-sub" class="text-xs text-dark-400 font-normal"></span></h3></div>
                   <div id="chart-exp-scatter" class="h-64"></div>
                 </div>
               </div>
@@ -940,6 +1207,48 @@
         </div>
         <!-- Real insights content (shown after training) -->
         <div id="insights-real-content" class="hidden">
+          <!-- ===== SHAP 解釋 (隊友 AutoMLVisualizer,Plotly 渲染) ===== -->
+          <div id="shap-section" class="card mb-6">
+            <div class="card-header">
+              <div>
+                <h3 class="card-title">SHAP 解釋分析</h3>
+                <p class="text-xs text-dark-400 mt-0.5">Global Importance / Local Waterfall / Interaction Dependence — 互動式 Plotly 圖表</p>
+              </div>
+              <div class="flex items-center gap-2 text-xs">
+                <label class="text-dark-400">模型:</label>
+                <select id="shap-model-select" class="bg-dark-800 border border-dark-600 rounded px-2 py-1 text-xs focus:border-primary-500 outline-none min-w-[12rem]"></select>
+                <label class="text-dark-400 ml-2">樣本 #</label>
+                <input type="number" id="shap-sample-index" value="0" min="0" class="bg-dark-800 border border-dark-600 rounded px-2 py-1 text-xs w-16 focus:border-primary-500 outline-none">
+                <label class="text-dark-400 ml-2">交互特徵:</label>
+                <select id="shap-target-feature" class="bg-dark-800 border border-dark-600 rounded px-2 py-1 text-xs focus:border-primary-500 outline-none max-w-[10rem]"></select>
+                <button id="btn-shap-refresh" class="px-3 py-1 bg-primary-600 hover:bg-primary-500 rounded text-white font-medium transition-colors">重新計算</button>
+              </div>
+            </div>
+            <div class="px-4 pb-4">
+              <div id="shap-loading" class="hidden flex items-center gap-2 px-3 py-2 mb-3 bg-dark-800/50 rounded text-xs text-dark-400">
+                <div class="w-3 h-3 border-2 border-primary-500 border-t-transparent rounded-full animate-spin"></div>
+                計算 SHAP values 中 (樣本多時可能需數秒)...
+              </div>
+              <div id="shap-error" class="hidden px-3 py-2 mb-3 bg-danger-500/10 border-l-2 border-danger-500 text-xs text-danger-300 rounded-r"></div>
+
+              <!-- Plotly figures -->
+              <div class="grid grid-cols-1 xl:grid-cols-2 gap-3">
+                <div class="bg-white rounded-lg overflow-hidden border border-dark-700/30">
+                  <div id="shap-fig-global" style="height: 420px;"></div>
+                </div>
+                <div class="bg-white rounded-lg overflow-hidden border border-dark-700/30">
+                  <div id="shap-fig-waterfall" style="height: 420px;"></div>
+                </div>
+                <div class="bg-white rounded-lg overflow-hidden border border-dark-700/30 xl:col-span-2">
+                  <div id="shap-fig-dependence" style="height: 420px;"></div>
+                </div>
+              </div>
+              <p class="text-[10px] text-dark-500 mt-2">
+                💡 圖表為矢量 Plotly,可 hover 顯示精確數值、拖選縮放、點右上角相機圖示下載 PNG。
+              </p>
+            </div>
+          </div>
+
           <!-- Summary cards -->
           <div class="grid grid-cols-1 md:grid-cols-4 gap-4 mb-6">
             <div class="card p-4 flex items-center gap-3">
@@ -1493,11 +1802,12 @@
     </div>
   </main>
 
-  <script src="js/data-engine.js"></script>
-  <script src="js/ml-engine.js"></script>
-  <script src="js/mock-data.js"></script>
-  <script src="js/charts.js"></script>
-  <script src="js/api.js"></script>
-  <script src="js/app.js"></script>
+  <!-- ?v= 是 cache-busting:改 JS 後把版本號 +1,瀏覽器就會強制重抓,不用手動硬重整 -->
+  <script src="js/data-engine.js?v=4"></script>
+  <script src="js/ml-engine.js?v=4"></script>
+  <script src="js/mock-data.js?v=4"></script>
+  <script src="js/charts.js?v=4"></script>
+  <script src="js/api.js?v=4"></script>
+  <script src="js/app.js?v=4"></script>
 </body>
 </html>

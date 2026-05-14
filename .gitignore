@@ -1,3 +1,8 @@
 openml_cc18_data/
 Dataset/
 ucr_ts_80(時序資料)/
+visualization/dataset/
+visualization/plots/
+
+I2AI_FinalProject_AutoML-feat-preprocessing/
+I2AI_FinalProject_AutoML-feat-visualization/
