@@ -8,7 +8,17 @@
       "Bash(grep -n \"renderExperimentResults\\(models, data\\)\\\\|訓練完成\\\\|addLog\\(\\\\`錯誤\\\\|models.length === 0\" js/app.js)",
       "Bash(node -c js/app.js)",
       "Bash(python -c \"import ast; ast.parse\\(open\\('api/main.py',encoding='utf-8'\\).read\\(\\)\\); print\\('main.py OK'\\)\")",
-      "Bash(python -c \"import ast; ast.parse\\(open\\('api/preprocess/processors/text_processor.py',encoding='utf-8'\\).read\\(\\)\\); print\\('text_processor.py OK'\\)\")"
+      "Bash(python -c \"import ast; ast.parse\\(open\\('api/preprocess/processors/text_processor.py',encoding='utf-8'\\).read\\(\\)\\); print\\('text_processor.py OK'\\)\")",
+      "Bash(git -C \"/c/Users/user/Documents/清大/大四下/人工智慧概論/I2AI_FinalProject_AutoML\" log --oneline -3)",
+      "Bash(git -C /c/Users/user/Documents/清大/大四下/人工智慧概論/I2AI_FinalProject_AutoML commit -m ' *)",
+      "Bash(git -C \"/c/Users/user/Documents/清大/大四下/人工智慧概論/I2AI_FinalProject_AutoML\" push origin feature/python-api)",
+      "Bash(python -c \"import ast; ast.parse\\(open\\(r'c:\\\\Users\\\\user\\\\Documents\\\\清大\\\\大四下\\\\人工智慧概論\\\\I2AI_FinalProject_AutoML\\\\api\\\\train\\\\train.py', encoding='utf-8'\\).read\\(\\)\\); print\\('OK'\\)\")",
+      "Bash(node --check \"c:\\\\Users\\\\user\\\\Documents\\\\清大\\\\大四下\\\\人工智慧概論\\\\I2AI_FinalProject_AutoML\\\\js\\\\ml-engine.js\")",
+      "Bash(node --check \"c:\\\\Users\\\\user\\\\Documents\\\\清大\\\\大四下\\\\人工智慧概論\\\\I2AI_FinalProject_AutoML\\\\js\\\\app.js\")",
+      "Bash(PYTHONIOENCODING=utf-8 python -c ' *)",
+      "Bash(python -c ' *)",
+      "Bash(node --check \"c:/Users/user/Documents/清大/大四下/人工智慧概論/I2AI_FinalProject_AutoML/js/app.js\")",
+      "Bash(git add *)"
     ]
   }
 }

@@ -16,6 +16,7 @@ document.addEventListener('DOMContentLoaded', () => {
   initSettings();
   initApiKeepAlive();
   initNotifications();
+  loadTrainingHistory();
   // Show demo data on first load
   showDemoDataset();
   setTimeout(() => renderPageCharts('dashboard'), 100);
@@ -34,11 +35,149 @@ function initApiKeepAlive() {
 }
 
 // ===== NOTIFICATIONS (右上角鈴鐺) =====
-let _notifications = [];   // { title, message, type, time, read }
+// ===== GLOBAL STATUS INDICATOR (header dot + text) =====
+// state: 'idle' | 'running' | 'success' | 'error' | 'warning'
+const _STATUS_COLORS = {
+  idle:    { ping: 'bg-dark-400',    dot: 'bg-dark-500',    animate: false },
+  running: { ping: 'bg-primary-400', dot: 'bg-primary-500', animate: true  },
+  success: { ping: 'bg-success-400', dot: 'bg-success-500', animate: true  },
+  error:   { ping: 'bg-danger-400',  dot: 'bg-danger-500',  animate: false },
+  warning: { ping: 'bg-warning-400', dot: 'bg-warning-500', animate: true  },
+};
 
-function notify(title, message, type = 'info') {
+function setGlobalStatus(state, message) {
+  const dotWrap = document.getElementById('global-status-dot');
+  const text = document.getElementById('global-status-text');
+  if (!dotWrap || !text) return;
+  const c = _STATUS_COLORS[state] || _STATUS_COLORS.idle;
+  // 重組兩層 dot:外層 ping (動畫光暈)、內層 solid
+  dotWrap.innerHTML = `
+    <span class="${c.animate ? 'animate-ping' : ''} absolute inline-flex h-full w-full rounded-full ${c.ping} opacity-75"></span>
+    <span class="relative inline-flex rounded-full h-2 w-2 ${c.dot}"></span>
+  `;
+  if (message) text.textContent = message;
+}
+
+// ===== TRAINING HISTORY (localStorage 持久化,最近 5 筆) =====
+// 每筆: { id, timestamp, datasetId, datasetName, target, taskType,
+//        sources, modelCount, bestModel: {name, score}, metric, options, models[] }
+// 重新整理後還在;quota 用爆時自動丟最舊的;再爆就拋棄重型欄位 (testTrue/testPred)。
+const _HISTORY_KEY = 'automl_training_history';
+const _HISTORY_LIMIT = 5;
+let _trainingHistory = [];
+
+function loadTrainingHistory() {
+  try {
+    const raw = localStorage.getItem(_HISTORY_KEY);
+    _trainingHistory = raw ? JSON.parse(raw) : [];
+  } catch (e) {
+    _trainingHistory = [];
+  }
+}
+
+function _persistTrainingHistory() {
+  // 嘗試完整存,quota 爆掉時逐步降級
+  const trySave = (data) => {
+    try { localStorage.setItem(_HISTORY_KEY, JSON.stringify(data)); return true; }
+    catch (e) { return false; }
+  };
+  if (trySave(_trainingHistory)) return;
+  // Level 1: 砍最舊的直到只剩 1 筆
+  while (_trainingHistory.length > 1) {
+    _trainingHistory.pop();
+    if (trySave(_trainingHistory)) return;
+  }
+  // Level 2: 拋棄重型欄位 (testTrue/testPred/featureStats)
+  const slim = _trainingHistory.map(h => ({
+    ...h,
+    models: (h.models || []).map(m => ({
+      ...m,
+      testTrue: undefined, testPred: undefined,
+      featureStats: undefined, means: undefined, stds: undefined,
+    })),
+  }));
+  if (trySave(slim)) { _trainingHistory = slim; return; }
+  // Level 3: 投降,清空 localStorage
+  try { localStorage.removeItem(_HISTORY_KEY); } catch (e) {}
+}
+
+function pushTrainingHistory(entry) {
+  entry.id = `run_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+  _trainingHistory.unshift(entry);
+  if (_trainingHistory.length > _HISTORY_LIMIT) _trainingHistory = _trainingHistory.slice(0, _HISTORY_LIMIT);
+  _persistTrainingHistory();
+  _activeHistoryRunId = entry.id; // 新訓練即「現在」
+}
+
+// 排行榜 / 洞察頁顯示中的歷史 runId — 切換選單時更新
+let _activeHistoryRunId = null;
+
+// 填充歷史下拉選單。
+// 重要:不要用 cloneNode(true) — HTML form element 的 selected/value 屬性
+// 不會被 cloneNode 保留,會導致「切換後 dropdown 顯示舊選項、但資料已經換」的同步 bug。
+// 改用 instance flag 確保 change listener 只綁一次。
+function populateHistorySelect(selectEl) {
+  if (!selectEl) return;
+  if (_trainingHistory.length === 0) {
+    selectEl.innerHTML = '<option>無歷史紀錄</option>';
+    selectEl.disabled = true;
+    return;
+  }
+  selectEl.disabled = false;
+  selectEl.innerHTML = '';
+  _trainingHistory.forEach((h) => {
+    const opt = document.createElement('option');
+    opt.value = h.id;
+    const ts = new Date(h.timestamp);
+    const tsStr = `${String(ts.getMonth()+1).padStart(2,'0')}/${String(ts.getDate()).padStart(2,'0')} ${String(ts.getHours()).padStart(2,'0')}:${String(ts.getMinutes()).padStart(2,'0')}`;
+    const score = h.taskType === 'regression'
+      ? `R²=${h.bestModel.score.toFixed(4)}`
+      : `Acc=${(h.bestModel.score * 100).toFixed(1)}%`;
+    opt.textContent = `${tsStr} · ${h.datasetName} · ${h.modelCount} 模型 · ${score}`;
+    selectEl.appendChild(opt);
+  });
+  // active 不存在 (例如重整後第一次 render) → 預設用最新
+  if (!_activeHistoryRunId || !_trainingHistory.find(h => h.id === _activeHistoryRunId)) {
+    _activeHistoryRunId = _trainingHistory[0].id;
+  }
+  // 用 select.value 指定選中項 — 這個會在每次 render 都生效
+  selectEl.value = _activeHistoryRunId;
+  // 只綁一次 listener
+  if (!selectEl.__historyListenerAttached) {
+    selectEl.addEventListener('change', e => applyHistoricalRun(e.target.value));
+    selectEl.__historyListenerAttached = true;
+  }
+}
+
+function clearTrainingHistory() {
+  _trainingHistory = [];
+  try { localStorage.removeItem(_HISTORY_KEY); } catch (e) {}
+}
+
+// 把指定的歷史紀錄套用到 MLEngine.trainedModels,並重新渲染目前頁面相關區塊
+function applyHistoricalRun(runId) {
+  const run = _trainingHistory.find(h => h.id === runId);
+  if (!run) return;
+  _activeHistoryRunId = runId;
+  MLEngine.trainedModels = run.models || [];
+  // 重新渲染當前頁面
+  const visiblePage = document.querySelector('.page-section:not(.hidden)');
+  if (visiblePage) {
+    const pageId = visiblePage.id.replace('page-', '');
+    if (pageId === 'leaderboard') renderRealLeaderboard();
+    else if (pageId === 'insights') renderRealInsights();
+    else if (pageId === 'dashboard') {
+      renderPerformanceTrend(); renderTaskDistribution(); updateDashboardRealMetrics();
+    }
+  }
+  notify('已載入歷史訓練', `${run.datasetName || 'Dataset'} — ${run.modelCount} 模型`, 'info');
+}
+
+let _notifications = [];   // { title, message, type, time, read, details? }
+
+function notify(title, message, type = 'info', details = null) {
   _notifications.unshift({
-    title, message, type,
+    title, message, type, details,
     time: new Date(),
     read: false,
   });
@@ -72,21 +211,133 @@ function renderNotifications() {
     warning: '<span class="text-warning-400">⚠</span>',
     info: '<span class="text-primary-400">ℹ</span>',
   };
-  list.innerHTML = _notifications.map(n => {
+  list.innerHTML = _notifications.map((n, idx) => {
     const t = n.time;
     const ts = `${String(t.getHours()).padStart(2,'0')}:${String(t.getMinutes()).padStart(2,'0')}`;
+    const infoBtn = n.details
+      ? `<button class="notif-info-btn shrink-0 ml-1 w-5 h-5 rounded-full bg-dark-700 hover:bg-primary-500/20 text-dark-400 hover:text-primary-300 text-[11px] flex items-center justify-center transition-colors" data-notif-idx="${idx}" title="查看詳情">ⓘ</button>`
+      : '';
     return `
       <div class="px-4 py-3 border-b border-dark-800/50 ${n.read ? 'opacity-60' : 'bg-dark-800/30'}">
         <div class="flex items-start gap-2">
           <span class="text-sm mt-0.5">${iconMap[n.type] || iconMap.info}</span>
           <div class="flex-1 min-w-0">
-            <p class="text-xs font-semibold text-dark-100">${escapeHtml(n.title)}</p>
+            <div class="flex items-start justify-between gap-1">
+              <p class="text-xs font-semibold text-dark-100">${escapeHtml(n.title)}</p>
+              ${infoBtn}
+            </div>
             <p class="text-[11px] text-dark-400 mt-0.5">${escapeHtml(n.message)}</p>
             <p class="text-[10px] text-dark-600 mt-1">${ts}</p>
           </div>
         </div>
       </div>`;
   }).join('');
+
+  // 綁定 ⓘ 按鈕 hover handler
+  list.querySelectorAll('.notif-info-btn').forEach(btn => {
+    btn.addEventListener('mouseenter', e => showNotificationDetail(e.currentTarget));
+    btn.addEventListener('mouseleave', () => scheduleHideNotificationDetail());
+  });
+}
+
+// ===== 通知詳情 Popover =====
+let _notifDetailHideTimer = null;
+
+function showNotificationDetail(btnEl) {
+  const popover = document.getElementById('notification-detail-popover');
+  if (!popover) return;
+  const idx = parseInt(btnEl.dataset.notifIdx, 10);
+  const notif = _notifications[idx];
+  if (!notif || !notif.details) return;
+
+  // 取消任何待執行的隱藏
+  if (_notifDetailHideTimer) { clearTimeout(_notifDetailHideTimer); _notifDetailHideTimer = null; }
+
+  popover.innerHTML = renderNotificationDetailContent(notif.details);
+  popover.classList.remove('hidden');
+
+  // 定位:盡量放在按鈕左側,空間不夠時放右側、放下方
+  const rect = btnEl.getBoundingClientRect();
+  const popRect = popover.getBoundingClientRect();
+  const margin = 8;
+  // 預設往左 (因為通知 panel 在右上,左邊有空間)
+  let left = rect.left - popRect.width - margin;
+  let top  = rect.top;
+  if (left < margin) {
+    // 左側空間不夠 → 改放右側
+    left = rect.right + margin;
+  }
+  // 防止超出底邊
+  if (top + popRect.height > window.innerHeight - margin) {
+    top = Math.max(margin, window.innerHeight - popRect.height - margin);
+  }
+  popover.style.left = `${left}px`;
+  popover.style.top = `${top}px`;
+
+  // popover 自己也要可 hover,游標移上去不會被隱藏
+  popover.onmouseenter = () => { if (_notifDetailHideTimer) { clearTimeout(_notifDetailHideTimer); _notifDetailHideTimer = null; } };
+  popover.onmouseleave = () => scheduleHideNotificationDetail();
+}
+
+function scheduleHideNotificationDetail() {
+  // 給 150ms 緩衝,讓游標從按鈕移到 popover 的瞬間不會被立即關閉
+  if (_notifDetailHideTimer) clearTimeout(_notifDetailHideTimer);
+  _notifDetailHideTimer = setTimeout(() => {
+    const popover = document.getElementById('notification-detail-popover');
+    if (popover) popover.classList.add('hidden');
+    _notifDetailHideTimer = null;
+  }, 150);
+}
+
+function renderNotificationDetailContent(details) {
+  if (!details || details.type !== 'training') return '';
+
+  const taskLabel = details.taskType === 'regression' ? '迴歸' : '分類';
+  const sourcesLabel = (details.sources || []).map(s =>
+    s === 'raw' ? '原始' : s === 'preprocessed' ? '預處理' : s
+  ).join(' + ') || '—';
+  const totalSec = ((details.totalTime || 0) / 1000).toFixed(1);
+
+  const topRows = (details.topModels || []).map((m, i) => {
+    const scoreStr = details.metric === 'R²'
+      ? m.score.toFixed(4)
+      : (m.score * 100).toFixed(2) + '%';
+    const srcBadge = m.source === '預處理'
+      ? '<span class="text-[9px] px-1 py-0.5 rounded bg-accent-500/15 text-accent-400 border border-accent-500/20">預處理</span>'
+      : '<span class="text-[9px] px-1 py-0.5 rounded bg-primary-500/15 text-primary-400 border border-primary-500/20">原始</span>';
+    const rankIcon = i === 0
+      ? '<span class="text-warning-400">🏆</span>'
+      : `<span class="text-dark-500">${i + 1}</span>`;
+    return `
+      <tr class="border-b border-dark-800/40">
+        <td class="py-1 pr-2 text-center w-6">${rankIcon}</td>
+        <td class="py-1 pr-2">${srcBadge}</td>
+        <td class="py-1 px-1 font-mono text-dark-200 text-[11px] truncate" style="max-width:140px" title="${escapeHtml(m.name)}">${escapeHtml(m.name)}</td>
+        <td class="py-1 px-1 text-right font-mono text-success-400 text-[11px]">${scoreStr}</td>
+        <td class="py-1 pl-2 text-right text-[10px] text-dark-500">${m.trainTime.toFixed(0)}ms</td>
+      </tr>
+    `;
+  }).join('');
+
+  return `
+    <div class="text-[11px] space-y-2">
+      <div class="flex items-center gap-2 pb-2 border-b border-dark-800">
+        <span class="text-success-400">✓</span>
+        <span class="font-semibold text-dark-100">訓練詳情</span>
+      </div>
+      <div class="grid grid-cols-2 gap-x-3 gap-y-1.5">
+        <div><span class="text-dark-500">資料集</span><br><span class="font-mono text-dark-100">${escapeHtml(details.dataset || '—')}</span></div>
+        <div><span class="text-dark-500">目標欄位</span><br><span class="font-mono text-dark-100">${escapeHtml(details.target || '—')}</span></div>
+        <div><span class="text-dark-500">任務型別</span><br><span class="text-dark-100">${taskLabel}</span></div>
+        <div><span class="text-dark-500">總訓練時間</span><br><span class="font-mono text-dark-100">${totalSec} 秒</span></div>
+        <div class="col-span-2"><span class="text-dark-500">資料來源</span><br><span class="text-dark-100">${sourcesLabel}</span></div>
+      </div>
+      <div class="border-t border-dark-800 pt-2">
+        <p class="text-[10px] text-dark-500 mb-1">Top ${(details.topModels || []).length} / 共 ${details.modelCount} 個模型 (${details.metric})</p>
+        <table class="w-full">${topRows}</table>
+      </div>
+    </div>
+  `;
 }
 
 function initNotifications() {
@@ -1639,8 +1890,7 @@ function initTrainingButton() {
         btn.classList.add('bg-success-600');
         document.querySelectorAll('.pipeline-node').forEach(n => n.classList.add('completed'));
         document.querySelectorAll('.pipeline-connector').forEach(c => { c.classList.add('completed'); c.classList.remove('active'); });
-        const status = document.getElementById('global-status');
-        if (status) { const txt = document.getElementById('global-status-text'); if (txt) txt.textContent = '訓練完成'; }
+        setGlobalStatus('success', '訓練完成 (Demo)');
         const log = document.getElementById('training-log');
         if (log) { log.innerHTML += '<p class="text-success-400">[10:35:00] ✓ 所有模型訓練完成！最佳模型: LightGBM (F1=0.942)</p>'; log.scrollTop = log.scrollHeight; }
       }
@@ -1712,8 +1962,10 @@ function ppSetStatus(visible, text) {
   if (visible) {
     wrap.classList.remove('hidden');
     txt.textContent = text || '處理中...';
+    setGlobalStatus('running', text || '處理中...');
   } else {
     wrap.classList.add('hidden');
+    // 不主動清空 global,讓接下來的 success/error 設定接手
   }
 }
 
@@ -1737,7 +1989,9 @@ async function runPreprocessAudit() {
     renderFeatureGroups(res.featureGroups);
     document.getElementById('pp-audit-section').classList.remove('hidden');
     document.getElementById('pp-groups-section').classList.remove('hidden');
+    setGlobalStatus('success', `健檢完成 — ${ds.fileName || 'Dataset'}`);
   } catch (e) {
+    setGlobalStatus('error', '健檢失敗');
     alert(`健檢失敗: ${e.message}`);
   } finally {
     ppSetStatus(false);
@@ -1773,7 +2027,9 @@ async function runPreprocessTransform() {
     document.getElementById('pp-groups-section').classList.remove('hidden');
     document.getElementById('pp-result-section').classList.remove('hidden');
     document.getElementById('pp-inference-section').classList.remove('hidden');
+    setGlobalStatus('success', `預處理完成 — ${ds.fileName || 'Dataset'}`);
   } catch (e) {
+    setGlobalStatus('error', '預處理失敗');
     alert(`預處理失敗: ${e.message}`);
   } finally {
     ppSetStatus(false);
@@ -1827,21 +2083,212 @@ function renderAuditReport(audit) {
       tbody.appendChild(tr);
     });
   }
+
+  // v2 audit 擴充欄位 — info / outliers / target_info / leakage
+  renderAuditInfoMessages(audit.info || []);
+  renderAuditOutliers(audit.outlier_summary || []);
+  renderAuditTargetInfo(audit.target_info || {});
+  renderAuditLeakage(audit.leakage_candidates || []);
+
+  // 切 extras-section 顯示狀態:任一張子卡可見就秀
+  const extras = document.getElementById('pp-extras-section');
+  if (extras) {
+    const hasTarget = audit.target_info && Object.keys(audit.target_info).length > 0;
+    const hasOutliers = (audit.outlier_summary || []).length > 0;
+    extras.classList.toggle('hidden', !(hasTarget || hasOutliers));
+  }
+}
+
+function renderAuditInfoMessages(infos) {
+  const list = document.getElementById('pp-info-list');
+  if (!list) return;
+  list.innerHTML = '';
+  if (!infos || infos.length === 0) {
+    list.classList.add('hidden');
+    return;
+  }
+  list.classList.remove('hidden');
+  infos.forEach(msg => {
+    const div = document.createElement('div');
+    div.className = 'text-xs px-3 py-2 bg-success-500/10 border-l-2 border-success-500 rounded-r text-success-300';
+    div.textContent = msg;
+    list.appendChild(div);
+  });
+}
+
+function renderAuditOutliers(outliers) {
+  const card = document.getElementById('pp-outliers-card');
+  const tbody = document.getElementById('pp-outliers-table');
+  const countEl = document.getElementById('pp-outliers-count');
+  if (!card || !tbody || !countEl) return;
+  if (!outliers || outliers.length === 0) {
+    card.classList.add('hidden');
+    return;
+  }
+  card.classList.remove('hidden');
+  countEl.textContent = `${outliers.length} 欄`;
+  tbody.innerHTML = '';
+  outliers.forEach(o => {
+    const tr = document.createElement('tr');
+    tr.className = 'border-b border-dark-800/50';
+    const pct = (o.outlier_ratio * 100).toFixed(1);
+    const pctColor = o.outlier_ratio > 0.1 ? 'text-danger-400' : 'text-warning-400';
+    tr.innerHTML = `
+      <td class="py-1.5 px-3 font-mono">${escapeHtml(o.column)}</td>
+      <td class="py-1.5 px-3 text-right text-dark-300">${o.outlier_count.toLocaleString()}</td>
+      <td class="py-1.5 px-3 text-right font-mono ${pctColor}">${pct}%</td>
+      <td class="py-1.5 px-3 text-right font-mono text-dark-400">${o.lower_bound}</td>
+      <td class="py-1.5 px-3 text-right font-mono text-dark-400">${o.upper_bound}</td>
+    `;
+    tbody.appendChild(tr);
+  });
+}
+
+function renderAuditLeakage(candidates) {
+  const card = document.getElementById('pp-leakage-card');
+  const tbody = document.getElementById('pp-leakage-table');
+  const highEl = document.getElementById('pp-leakage-high-count');
+  const medEl = document.getElementById('pp-leakage-med-count');
+  if (!card || !tbody) return;
+  if (!candidates || candidates.length === 0) {
+    card.classList.add('hidden');
+    return;
+  }
+  card.classList.remove('hidden');
+
+  // 風險分桶 + 排序:高風險在前,內部按相關性遞減
+  const highs = candidates.filter(c => c.risk === 'high').sort((a, b) => b.correlation - a.correlation);
+  const meds  = candidates.filter(c => c.risk !== 'high').sort((a, b) => b.correlation - a.correlation);
+
+  if (highs.length > 0) {
+    highEl.textContent = `${highs.length} 高風險`;
+    highEl.classList.remove('hidden');
+  } else {
+    highEl.classList.add('hidden');
+  }
+  if (meds.length > 0) {
+    medEl.textContent = `${meds.length} 中風險`;
+    medEl.classList.remove('hidden');
+  } else {
+    medEl.classList.add('hidden');
+  }
+
+  tbody.innerHTML = '';
+  [...highs, ...meds].forEach(c => {
+    const isHigh = c.risk === 'high';
+    const tr = document.createElement('tr');
+    tr.className = 'border-b border-dark-800/50';
+    const corrPct = (c.correlation * 100).toFixed(1);
+    const corrColor = isHigh ? 'text-danger-400' : 'text-warning-400';
+    const riskBadge = isHigh
+      ? '<span class="text-[10px] px-2 py-0.5 rounded border border-danger-500/30 bg-danger-500/10 text-danger-400">🚨 高風險</span>'
+      : '<span class="text-[10px] px-2 py-0.5 rounded border border-warning-500/30 bg-warning-500/10 text-warning-400">ℹ️ 中風險</span>';
+    const methodLabel = c.method === 'Pearson'
+      ? '<span class="text-[10px] px-1.5 py-0.5 rounded bg-blue-500/15 text-blue-300 font-mono">Pearson</span>'
+      : `<span class="text-[10px] px-1.5 py-0.5 rounded bg-purple-500/15 text-purple-300 font-mono">${escapeHtml(c.method)}</span>`;
+    tr.innerHTML = `
+      <td class="py-2 px-3 font-mono">${escapeHtml(c.column)}</td>
+      <td class="py-2 px-3 text-right">
+        <div class="flex items-center justify-end gap-2">
+          <div class="w-20 bg-dark-800 rounded-full h-1.5 overflow-hidden">
+            <div class="h-full ${isHigh ? 'bg-danger-500' : 'bg-warning-500'}" style="width:${corrPct}%"></div>
+          </div>
+          <span class="font-mono ${corrColor} w-12 text-right">${c.correlation.toFixed(3)}</span>
+        </div>
+      </td>
+      <td class="py-2 px-3 text-center">${methodLabel}</td>
+      <td class="py-2 px-3 text-center">${riskBadge}</td>
+    `;
+    tbody.appendChild(tr);
+  });
+}
+
+function renderAuditTargetInfo(target) {
+  const card = document.getElementById('pp-target-card');
+  if (!card) return;
+  if (!target || !target.column) {
+    card.classList.add('hidden');
+    return;
+  }
+  card.classList.remove('hidden');
+  document.getElementById('pp-target-col').textContent = target.column;
+  document.getElementById('pp-target-dtype').textContent = target.dtype || '—';
+  document.getElementById('pp-target-unique').textContent = target.unique_values ?? '—';
+  document.getElementById('pp-target-missing').textContent = target.missing_count ?? 0;
+
+  const badge = document.getElementById('pp-target-task-badge');
+  const isClf = target.task_type === 'classification';
+  badge.textContent = isClf ? '分類' : '迴歸';
+  badge.className = 'text-[10px] px-2 py-0.5 rounded border ' + (isClf
+    ? 'border-amber-500/30 text-amber-400 bg-amber-500/10'
+    : 'border-blue-500/30 text-blue-400 bg-blue-500/10');
+
+  // 詳細區:分類顯示類別分布,迴歸顯示數值統計
+  const detail = document.getElementById('pp-target-detail');
+  detail.innerHTML = '';
+  if (isClf && target.class_distribution) {
+    const entries = Object.entries(target.class_distribution);
+    const wrap = document.createElement('div');
+    wrap.className = 'space-y-1';
+    entries.forEach(([cls, ratio]) => {
+      const pct = (ratio * 100).toFixed(1);
+      const row = document.createElement('div');
+      row.className = 'flex items-center gap-2';
+      row.innerHTML = `
+        <span class="text-[11px] font-mono text-dark-300 w-20 truncate" title="${escapeHtml(cls)}">${escapeHtml(cls)}</span>
+        <div class="flex-1 bg-dark-800 rounded-full h-1.5 overflow-hidden">
+          <div class="h-full bg-primary-500" style="width:${pct}%"></div>
+        </div>
+        <span class="text-[11px] font-mono text-dark-400 w-12 text-right">${pct}%</span>
+      `;
+      wrap.appendChild(row);
+    });
+    detail.appendChild(wrap);
+  } else if (!isClf && target.numeric_stats) {
+    const s = target.numeric_stats;
+    detail.innerHTML = `
+      <div class="grid grid-cols-5 gap-2 text-[11px]">
+        <div class="text-center bg-dark-800/50 rounded p-1.5">
+          <p class="text-dark-500 mb-0.5">min</p>
+          <p class="font-mono text-dark-200">${s.min}</p>
+        </div>
+        <div class="text-center bg-dark-800/50 rounded p-1.5">
+          <p class="text-dark-500 mb-0.5">median</p>
+          <p class="font-mono text-dark-200">${s.median}</p>
+        </div>
+        <div class="text-center bg-dark-800/50 rounded p-1.5">
+          <p class="text-dark-500 mb-0.5">mean</p>
+          <p class="font-mono text-dark-200">${s.mean}</p>
+        </div>
+        <div class="text-center bg-dark-800/50 rounded p-1.5">
+          <p class="text-dark-500 mb-0.5">max</p>
+          <p class="font-mono text-dark-200">${s.max}</p>
+        </div>
+        <div class="text-center bg-dark-800/50 rounded p-1.5">
+          <p class="text-dark-500 mb-0.5">std</p>
+          <p class="font-mono text-dark-200">${s.std}</p>
+        </div>
+      </div>
+    `;
+  }
 }
 
 function renderFeatureGroups(groups) {
   if (!groups || groups.error) return;
-  const types = ['numeric', 'categorical', 'text', 'datetime'];
+  const types = ['numeric', 'categorical', 'high_cardinality', 'text', 'datetime'];
   const chipColors = {
     numeric: 'bg-blue-500/15 text-blue-300 border-blue-500/30',
     categorical: 'bg-amber-500/15 text-amber-300 border-amber-500/30',
+    high_cardinality: 'bg-rose-500/15 text-rose-300 border-rose-500/30',
     text: 'bg-purple-500/15 text-purple-300 border-purple-500/30',
     datetime: 'bg-green-500/15 text-green-300 border-green-500/30',
   };
   types.forEach(t => {
     const cols = groups[t] || [];
-    document.getElementById(`pp-group-${t}-count`).textContent = cols.length;
+    const countEl = document.getElementById(`pp-group-${t}-count`);
     const wrap = document.getElementById(`pp-group-${t}`);
+    if (!countEl || !wrap) return;
+    countEl.textContent = cols.length;
     wrap.innerHTML = '';
     if (cols.length === 0) {
       wrap.innerHTML = '<span class="text-[10px] text-dark-600">(無)</span>';
@@ -1855,6 +2302,26 @@ function renderFeatureGroups(groups) {
       });
     }
   });
+
+  // dropped 群組 — 顯示被 router 自動剔除的欄位 (常數欄、ID 欄、缺失過高、inf 等)
+  const droppedSection = document.getElementById('pp-dropped-section');
+  const droppedWrap = document.getElementById('pp-dropped-chips');
+  if (droppedSection && droppedWrap) {
+    const dropped = groups.dropped || [];
+    if (dropped.length === 0) {
+      droppedSection.classList.add('hidden');
+    } else {
+      droppedSection.classList.remove('hidden');
+      droppedWrap.innerHTML = '';
+      dropped.forEach(c => {
+        const chip = document.createElement('span');
+        chip.className = 'text-[10px] px-1.5 py-0.5 rounded border border-dark-600 bg-dark-800 text-dark-400 line-through font-mono';
+        chip.textContent = c;
+        chip.title = `${c} (已剔除)`;
+        droppedWrap.appendChild(chip);
+      });
+    }
+  }
 }
 
 function renderTransformResult(res) {
@@ -2059,6 +2526,31 @@ function renderRealExperimentsPage() {
 
   // Dataset badge
   document.getElementById('exp-dataset-badge').textContent = ds.fileName || 'Dataset';
+
+  // Dataset picker — 列出已上傳的所有 CSV,選了就 switchDataset + 重新建立 form
+  const dsSelect = document.getElementById('exp-dataset-select');
+  const dsInfo = document.getElementById('exp-dataset-info');
+  if (dsSelect) {
+    dsSelect.innerHTML = '';
+    DataEngine.datasets.forEach(d => {
+      const opt = document.createElement('option');
+      opt.value = d.id;
+      opt.textContent = d.fileName;
+      if (d.id === ds.id) opt.selected = true;
+      dsSelect.appendChild(opt);
+    });
+    if (dsInfo) dsInfo.textContent = `${ds.rowCount.toLocaleString()} 筆 × ${ds.colCount} 欄`;
+    // 換 listener (clone 避免重複疊加)
+    const newDsSelect = dsSelect.cloneNode(true);
+    dsSelect.parentNode.replaceChild(newDsSelect, dsSelect);
+    newDsSelect.addEventListener('change', e => {
+      const newId = e.target.value;
+      if (newId !== ds.id) {
+        DataEngine.switchDataset(newId);
+        renderRealExperimentsPage(); // 重新建構整個表單
+      }
+    });
+  }
 
   // Populate target select with all numeric columns
   const targetSel = document.getElementById('exp-target-select');
@@ -2269,10 +2761,13 @@ function renderRealExperimentsPage() {
   if (!srcPp.disabled) srcPp.checked = _settings.srcPp;
   ppSelect.disabled = !srcPp.checked;
 
-  // Train button
+  // Train button — 用 cloneNode 重置 click handler。複製完後同步當下訓練狀態,
+  // 避免切頁回來看到的是舊狀態 (cloneNode 雖會複製 innerHTML/disabled,但訓練中途
+  // 完成時舊參考已被孤立、寫不到新 btn,所以這裡顯式 set 一次最安全)
   const btn = document.getElementById('btn-real-train');
   const newBtn = btn.cloneNode(true);
   btn.parentNode.replaceChild(newBtn, btn);
+  setTrainBtnState(_trainingState);
   newBtn.addEventListener('click', () => {
     // Collect options from UI
     const selectedFeatures = [...featBox.querySelectorAll('.exp-feat-cb:checked')].map(cb => cb.value);
@@ -2316,10 +2811,40 @@ function renderRealExperimentsPage() {
   }
 }
 
-async function startRealTraining(ds, targetCol, options = {}) {
+// 訓練按鈕狀態機 — 用單一函式集中管理,避免切頁時 cloneNode 把舊參考孤立掉
+let _trainingState = 'idle'; // 'idle' | 'training' | 'completed' | 'failed'
+
+function setTrainBtnState(state) {
+  _trainingState = state;
   const btn = document.getElementById('btn-real-train');
-  btn.disabled = true;
-  btn.innerHTML = '<div class="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin inline-block mr-2"></div>訓練中...';
+  if (!btn) return;
+  const spinner = '<div class="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin inline-block mr-2"></div>';
+  switch (state) {
+    case 'training':
+      btn.innerHTML = spinner + '訓練中...';
+      btn.disabled = true;
+      btn.classList.add('opacity-75');
+      break;
+    case 'completed':
+      btn.innerHTML = '重新訓練';
+      btn.disabled = false;
+      btn.classList.remove('opacity-75');
+      break;
+    case 'failed':
+      btn.innerHTML = '重試訓練';
+      btn.disabled = false;
+      btn.classList.remove('opacity-75');
+      break;
+    default: // 'idle'
+      btn.innerHTML = '開始訓練';
+      btn.disabled = false;
+      btn.classList.remove('opacity-75');
+  }
+}
+
+async function startRealTraining(ds, targetCol, options = {}) {
+  setTrainBtnState('training');
+  setGlobalStatus('running', `訓練中 — ${ds.fileName || 'Dataset'}`);
 
   const progressCard = document.getElementById('exp-training-progress');
   const resultsCard = document.getElementById('exp-results');
@@ -2386,8 +2911,8 @@ async function startRealTraining(ds, targetCol, options = {}) {
 
     if (models.length === 0) {
       addLog('所有演算法均訓練失敗，請檢查資料或調整設定', 'error');
-      btn.innerHTML = '重試訓練';
-      btn.disabled = false;
+      setTrainBtnState('failed');
+      setGlobalStatus('error', '訓練失敗');
       notify('訓練失敗', '所有演算法均訓練失敗,請檢查資料或設定', 'error');
       return;
     }
@@ -2396,26 +2921,63 @@ async function startRealTraining(ds, targetCol, options = {}) {
     resultsCard.classList.remove('hidden');
     renderExperimentResults(models, data);
 
-    btn.innerHTML = '重新訓練';
-    btn.disabled = false;
-    btn.classList.remove('opacity-75');
+    setTrainBtnState('completed');
+    setGlobalStatus('success', `訓練完成 — ${ds.fileName || 'Dataset'} (${models.length} 模型)`);
 
-    // Update global status
-    const txt = document.getElementById('global-status-text');
-    if (txt) txt.textContent = '訓練完成';
+    // 推進歷史 (localStorage 持久化最近 5 筆)
+    const _isRegForHist = (data.taskType === 'regression');
+    const _bestM = models[0];
+    pushTrainingHistory({
+      timestamp: Date.now(),
+      datasetId: ds.id,
+      datasetName: ds.fileName || 'Dataset',
+      target: targetCol,
+      taskType: data.taskType,
+      sources: options.sources || ['raw'],
+      modelCount: models.length,
+      metric: _isRegForHist ? 'R²' : 'Accuracy',
+      bestModel: {
+        name: _bestM.name,
+        score: _isRegForHist ? _bestM.metrics.testR2 : _bestM.metrics.testAccuracy,
+      },
+      options: { features: options.features, algorithms: options.algorithms },
+      models, // 完整模型陣列;localStorage 爆 quota 時 _persistTrainingHistory 會自動降級
+    });
 
     // 訓練完成通知 — 右上角鈴鐺
     const best = models[0];
     const isReg = (data.taskType === 'regression');
+    const metricKey = isReg ? 'R²' : 'Accuracy';
     const scoreStr = isReg
-      ? `R²=${best.metrics.testR2.toFixed(4)}`
+      ? `${metricKey}=${best.metrics.testR2.toFixed(4)}`
       : `Acc=${(best.metrics.testAccuracy * 100).toFixed(2)}%`;
-    notify('訓練完成 ✓', `${models.length} 個模型完成,最佳: ${best.name} (${scoreStr})`, 'success');
+    const datasetName = ds.fileName || 'Dataset';
+    notify(
+      '訓練完成 ✓',
+      `${datasetName} → ${models.length} 個模型,最佳: ${best.name} (${scoreStr})`,
+      'success',
+      {
+        type: 'training',
+        dataset: datasetName,
+        target: targetCol,
+        taskType: data.taskType,
+        sources: options.sources || ['raw'],
+        modelCount: models.length,
+        metric: metricKey,
+        topModels: models.slice(0, 5).map(m => ({
+          name: m.name.replace(/^\[(原始|預處理)\]\s*/, ''),
+          source: m.dataSource === 'preprocessed' ? '預處理' : '原始',
+          score: isReg ? m.metrics.testR2 : m.metrics.testAccuracy,
+          trainTime: m.trainTime || 0,
+        })),
+        totalTime: models.reduce((sum, m) => sum + (m.trainTime || 0), 0),
+      }
+    );
 
   } catch (err) {
     addLog(`錯誤: ${err.message}`, 'error');
-    btn.innerHTML = '重試訓練';
-    btn.disabled = false;
+    setTrainBtnState('failed');
+    setGlobalStatus('error', '訓練發生錯誤');
     notify('訓練發生錯誤', err.message, 'error');
   }
 }
@@ -2575,6 +3137,7 @@ function initBatchPredict(models) {
     btn.innerHTML = '<div class="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin inline-block mr-2"></div>預測中...';
     statusEl.textContent = '處理中...';
     statusEl.className = infoCls;
+    setGlobalStatus('running', `批次預測中 — ${file.name}`);
     try {
       const blob = await ApiClient.predictBatch(modelId, file, sampleFile);
       // 有給範本 → submission.csv;沒給 → {原檔名}_predicted.csv
@@ -2590,10 +3153,12 @@ function initBatchPredict(models) {
       const note = sampleFile ? '(已套用範本 submission 格式)' : '(新增 prediction 欄)';
       statusEl.textContent = `✓ 預測完成,已下載 ${outName} ${note}`;
       statusEl.className = okCls;
+      setGlobalStatus('success', `預測完成 — ${outName}`);
       notify('批次預測完成 ✓', `${file.name} → ${outName}`, 'success');
     } catch (e) {
       statusEl.textContent = `✗ ${e.message}`;
       statusEl.className = errCls;
+      setGlobalStatus('error', '預測失敗');
       notify('批次預測失敗', e.message, 'error');
     } finally {
       btn.disabled = false;
@@ -2688,11 +3253,10 @@ function renderRealLeaderboard() {
 
   const isReg = models[0].taskType === 'regression';
 
-  // Update dataset dropdown
+  // Update dataset dropdown — 列出 [現在] + 歷史紀錄,可切換查看
   const lbSelect = document.getElementById('lb-dataset-select');
   if (lbSelect) {
-    const dsName = DataEngine.currentDataset ? DataEngine.currentDataset.fileName : '當前數據集';
-    lbSelect.innerHTML = `<option>${escapeHtml(dsName)}</option>`;
+    populateHistorySelect(lbSelect, 'leaderboard');
   }
 
   // Update column headers
@@ -2894,6 +3458,9 @@ function renderRealCompareCharts(models, isReg) {
 function renderRealInsights() {
   const models = MLEngine.trainedModels;
   if (models.length === 0) return;
+
+  // 歷史訓練選擇器
+  populateHistorySelect(document.getElementById('insights-history-select'));
 
   const best = models[0];
   const isReg = best.taskType === 'regression';
@@ -3374,9 +3941,12 @@ const DEFAULT_SETTINGS = {
   srcRaw: true,
   srcPp: false,
   // 預設啟用的演算法 key (對應 MLEngine.ALGORITHMS) — 預設全開
-  activeAlgos: ['linear_regression', 'ridge', 'lasso', 'knn_3', 'knn_5', 'knn_7',
-                'decision_tree', 'random_forest', 'gradient_boosting', 'xgboost',
-                'naive_bayes', 'logistic', 'svr'],
+  activeAlgos: ['linear_regression', 'ridge', 'lasso', 'elastic_net',
+                'knn_3', 'knn_5', 'knn_7',
+                'decision_tree', 'random_forest', 'gradient_boosting',
+                'hist_gradient_boosting', 'xgboost', 'lightgbm', 'catboost',
+                'naive_bayes', 'logistic', 'svr', 'svc',
+                'voting', 'stacking'],
   shapSamples: 200,
 };
 

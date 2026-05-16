@@ -4,8 +4,10 @@ pandas>=2.0.0
 numpy>=1.24.0
 scikit-learn>=1.3.0
 xgboost>=2.0.0
+lightgbm>=4.0.0
+catboost>=1.2.0
 python-multipart>=0.0.9
-# 隊友 visualization 模組依賴 (SHAP 計算 + Plotly figure JSON)
-# 我們走 Plotly JSON → 前端 Plotly.newPlot 渲染,不寫 PNG,所以不需要 kaleido
+# Visualization deps (SHAP + Plotly figure JSON).
+# Plotly JSON is rendered by frontend Plotly.newPlot, so kaleido is not needed.
 shap>=0.44.0
 plotly>=5.18.0

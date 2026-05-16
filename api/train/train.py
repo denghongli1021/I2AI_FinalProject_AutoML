@@ -29,17 +29,20 @@ import numpy as np
 import pandas as pd
 from sklearn.ensemble import (
     GradientBoostingClassifier, GradientBoostingRegressor,
+    HistGradientBoostingClassifier, HistGradientBoostingRegressor,
     RandomForestClassifier, RandomForestRegressor,
+    StackingClassifier, StackingRegressor,
+    VotingClassifier, VotingRegressor,
 )
 from sklearn.inspection import permutation_importance
 from sklearn.linear_model import (
-    LinearRegression, LogisticRegression, Ridge, Lasso,
+    ElasticNet, LinearRegression, LogisticRegression, Ridge, Lasso,
 )
 from sklearn.model_selection import train_test_split
 from sklearn.naive_bayes import GaussianNB
 from sklearn.neighbors import KNeighborsClassifier, KNeighborsRegressor
-from sklearn.preprocessing import StandardScaler
-from sklearn.svm import SVR
+from sklearn.preprocessing import LabelEncoder, StandardScaler
+from sklearn.svm import SVC, SVR
 from sklearn.tree import DecisionTreeClassifier, DecisionTreeRegressor
 
 try:
@@ -47,6 +50,18 @@ try:
     _HAS_XGB = True
 except Exception:
     _HAS_XGB = False
+
+try:
+    from lightgbm import LGBMClassifier, LGBMRegressor
+    _HAS_LGBM = True
+except Exception:
+    _HAS_LGBM = False
+
+try:
+    from catboost import CatBoostClassifier, CatBoostRegressor
+    _HAS_CATBOOST = True
+except Exception:
+    _HAS_CATBOOST = False
 
 
 # ============================================================
@@ -57,6 +72,7 @@ def _algo_factory(key: str, task_type: str, random_state: int = 42):
     if key == "linear_regression": return LinearRegression()
     if key == "ridge":              return Ridge(alpha=1.0)
     if key == "lasso":              return Lasso(alpha=0.1, max_iter=2000)
+    if key == "elastic_net":        return ElasticNet(alpha=0.1, l1_ratio=0.5, max_iter=2000, random_state=random_state)
     if key == "logistic":           return LogisticRegression(max_iter=300, random_state=random_state)
     if key == "naive_bayes":        return GaussianNB()
     if key == "knn_3":  return KNeighborsClassifier(3) if task_type == "classification" else KNeighborsRegressor(3)
@@ -68,21 +84,82 @@ def _algo_factory(key: str, task_type: str, random_state: int = 42):
         return RandomForestClassifier(n_estimators=20, max_depth=5, n_jobs=-1, random_state=random_state) if task_type == "classification" else RandomForestRegressor(n_estimators=20, max_depth=5, n_jobs=-1, random_state=random_state)
     if key == "gradient_boosting":
         return GradientBoostingClassifier(n_estimators=30, max_depth=3, random_state=random_state) if task_type == "classification" else GradientBoostingRegressor(n_estimators=30, max_depth=3, random_state=random_state)
+    if key == "hist_gradient_boosting":
+        return HistGradientBoostingClassifier(max_iter=80, max_depth=6, learning_rate=0.1, random_state=random_state) if task_type == "classification" else HistGradientBoostingRegressor(max_iter=80, max_depth=6, learning_rate=0.1, random_state=random_state)
     if key == "xgboost":
         if not _HAS_XGB:
             raise RuntimeError("xgboost 套件未安裝,請執行 pip install xgboost")
         return XGBClassifier(n_estimators=40, max_depth=4, learning_rate=0.1, eval_metric="logloss", verbosity=0, random_state=random_state) if task_type == "classification" else XGBRegressor(n_estimators=40, max_depth=4, learning_rate=0.1, verbosity=0, random_state=random_state)
+    if key == "lightgbm":
+        if not _HAS_LGBM:
+            raise RuntimeError("lightgbm 套件未安裝,請執行 pip install lightgbm")
+        return LGBMClassifier(n_estimators=80, max_depth=-1, num_leaves=31, learning_rate=0.1, n_jobs=-1, verbose=-1, random_state=random_state) if task_type == "classification" else LGBMRegressor(n_estimators=80, max_depth=-1, num_leaves=31, learning_rate=0.1, n_jobs=-1, verbose=-1, random_state=random_state)
+    if key == "catboost":
+        if not _HAS_CATBOOST:
+            raise RuntimeError("catboost 套件未安裝,請執行 pip install catboost")
+        return CatBoostClassifier(iterations=80, depth=6, learning_rate=0.1, verbose=False, random_state=random_state, allow_writing_files=False) if task_type == "classification" else CatBoostRegressor(iterations=80, depth=6, learning_rate=0.1, verbose=False, random_state=random_state, allow_writing_files=False)
     if key == "svr":
         if task_type != "regression":
             raise RuntimeError("SVR 僅支援回歸任務")
         return SVR(kernel="rbf", C=1.0, epsilon=0.1)
+    if key == "svc":
+        if task_type != "classification":
+            raise RuntimeError("SVC 僅支援分類任務")
+        return SVC(kernel="rbf", C=1.0, probability=True, random_state=random_state)
+    if key == "voting":
+        return _build_voting(task_type, random_state)
+    if key == "stacking":
+        return _build_stacking(task_type, random_state)
     raise ValueError(f"未知演算法: {key}")
+
+
+def _build_voting(task_type: str, random_state: int):
+    """簡單投票 / 平均 — 用三個輕量 base learner 組合."""
+    if task_type == "classification":
+        estimators = [
+            ("logistic", LogisticRegression(max_iter=300, random_state=random_state)),
+            ("rf", RandomForestClassifier(n_estimators=20, max_depth=5, n_jobs=-1, random_state=random_state)),
+            ("knn", KNeighborsClassifier(5)),
+        ]
+        return VotingClassifier(estimators=estimators, voting="soft", n_jobs=-1)
+    estimators = [
+        ("ridge", Ridge(alpha=1.0)),
+        ("rf", RandomForestRegressor(n_estimators=20, max_depth=5, n_jobs=-1, random_state=random_state)),
+        ("knn", KNeighborsRegressor(5)),
+    ]
+    return VotingRegressor(estimators=estimators, n_jobs=-1)
+
+
+def _build_stacking(task_type: str, random_state: int):
+    """Stacking — 用樹模型 + KNN 當 base,線性模型當 meta-learner."""
+    if task_type == "classification":
+        estimators = [
+            ("rf", RandomForestClassifier(n_estimators=20, max_depth=5, n_jobs=-1, random_state=random_state)),
+            ("gb", GradientBoostingClassifier(n_estimators=30, max_depth=3, random_state=random_state)),
+            ("knn", KNeighborsClassifier(5)),
+        ]
+        return StackingClassifier(
+            estimators=estimators,
+            final_estimator=LogisticRegression(max_iter=300, random_state=random_state),
+            n_jobs=-1, passthrough=False,
+        )
+    estimators = [
+        ("rf", RandomForestRegressor(n_estimators=20, max_depth=5, n_jobs=-1, random_state=random_state)),
+        ("gb", GradientBoostingRegressor(n_estimators=30, max_depth=3, random_state=random_state)),
+        ("knn", KNeighborsRegressor(5)),
+    ]
+    return StackingRegressor(
+        estimators=estimators,
+        final_estimator=Ridge(alpha=1.0),
+        n_jobs=-1, passthrough=False,
+    )
 
 
 _ALGO_LABELS = {
     "linear_regression": "Linear Regression",
     "ridge": "Ridge Regression",
     "lasso": "Lasso Regression",
+    "elastic_net": "ElasticNet",
     "logistic": "Logistic Regression",
     "naive_bayes": "Naive Bayes",
     "knn_3": "KNN (k=3)",
@@ -91,12 +168,25 @@ _ALGO_LABELS = {
     "decision_tree": "Decision Tree",
     "random_forest": "Random Forest (20 trees)",
     "gradient_boosting": "Gradient Boosting",
+    "hist_gradient_boosting": "HistGradientBoosting",
     "xgboost": "XGBoost",
+    "lightgbm": "LightGBM",
+    "catboost": "CatBoost",
     "svr": "SVR",
+    "svc": "SVC",
+    "voting": "Voting Ensemble",
+    "stacking": "Stacking Ensemble",
 }
 
-_REGRESSION_ONLY = {"linear_regression", "ridge", "lasso", "svr"}
-_CLASSIFICATION_ONLY = {"logistic", "naive_bayes"}
+_REGRESSION_ONLY = {"linear_regression", "ridge", "lasso", "elastic_net", "svr"}
+_CLASSIFICATION_ONLY = {"logistic", "naive_bayes", "svc"}
+
+# 依賴外部套件的演算法 → (旗標, 套件名)。沒裝就跳過,不報錯。
+_OPTIONAL_DEPS = {
+    "xgboost":  (_HAS_XGB,      "xgboost"),
+    "lightgbm": (_HAS_LGBM,     "lightgbm"),
+    "catboost": (_HAS_CATBOOST, "catboost"),
+}
 
 
 # ============================================================
@@ -263,13 +353,25 @@ def _train_all(
         for j in range(X_all.shape[1])
     ]
 
-    # 7. Train each algorithm
-    valid_algos = [
-        k for k in algorithms
-        if k in _ALGO_LABELS
-        and not (task_type == "regression" and k in _CLASSIFICATION_ONLY)
-        and not (task_type == "classification" and k in _REGRESSION_ONLY)
-    ]
+    # 7. Train each algorithm — 先過濾掉:
+    #    (a) 任務型別不符的
+    #    (b) 依賴套件沒裝的 (xgboost/lightgbm/catboost) → log 警告後跳過
+    valid_algos: list[str] = []
+    for k in algorithms:
+        if k not in _ALGO_LABELS:
+            continue
+        if task_type == "regression" and k in _CLASSIFICATION_ONLY:
+            continue
+        if task_type == "classification" and k in _REGRESSION_ONLY:
+            continue
+        if k in _OPTIONAL_DEPS:
+            has_pkg, pkg_name = _OPTIONAL_DEPS[k]
+            if not has_pkg:
+                _emit({"type": "log",
+                       "msg": f"{_ALGO_LABELS[k]} 已跳過 — {pkg_name} 套件未安裝 (pip install {pkg_name})",
+                       "level": "warning"})
+                continue
+        valid_algos.append(k)
 
     # X_test 標準化後 DataFrame — 給 SHAP visualizer 用 (跟所有模型共用)
     X_test_df = pd.DataFrame(X_test_norm, columns=feature_names)
@@ -319,7 +421,16 @@ def _train_one(
 ) -> tuple[dict[str, Any], Any]:
     t0 = time.perf_counter()
     estimator = _algo_factory(key, task_type, random_state)
-    estimator.fit(X_train, y_train)
+
+    # XGBoost 分類器要求標籤是 0..n-1 連續整數,其他分類器內部會自處理。
+    # 用 LabelEncoder 包一層:訓練時編碼、預測時還原。
+    label_encoder: LabelEncoder | None = None
+    y_train_fit = y_train
+    if key == "xgboost" and task_type == "classification":
+        label_encoder = LabelEncoder()
+        y_train_fit = label_encoder.fit_transform(y_train)
+
+    estimator.fit(X_train, y_train_fit)
 
     train_pred = estimator.predict(X_train)
     # 量測測試集推論時間 → 換算每筆樣本的平均延遲 (ms)
@@ -328,6 +439,11 @@ def _train_one(
     pred_elapsed_ms = (time.perf_counter() - t_pred) * 1000
     train_time_ms = (time.perf_counter() - t0) * 1000
     infer_latency_ms = pred_elapsed_ms / max(len(X_test), 1)
+
+    # XGBoost 預測值是編碼空間,decode 回原始標籤,後續 metrics / bundle 才能對齊 y_train / y_test
+    if label_encoder is not None:
+        train_pred = label_encoder.inverse_transform(train_pred)
+        test_pred = label_encoder.inverse_transform(test_pred)
 
     metrics = (
         _regression_metrics(y_test, test_pred, y_train, train_pred)

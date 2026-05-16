@@ -5,20 +5,28 @@ const MLEngine = {
   trainingHistory: [],
 
   // All available algorithms
+  // apiOnly: true 表示僅 Python 後端支援(JS-only 模式會跳過並警告)
   ALGORITHMS: {
-    linear_regression: { name: 'Linear Regression', type: 'regression', label: '線性回歸' },
-    ridge:             { name: 'Ridge Regression', type: 'regression', label: '嶺回歸 (Ridge)' },
-    lasso:             { name: 'Lasso Regression', type: 'regression', label: 'Lasso 回歸' },
-    knn_3:             { name: 'KNN (k=3)', type: 'both', label: 'KNN (k=3)' },
-    knn_5:             { name: 'KNN (k=5)', type: 'both', label: 'KNN (k=5)' },
-    knn_7:             { name: 'KNN (k=7)', type: 'both', label: 'KNN (k=7)' },
-    decision_tree:     { name: 'Decision Tree', type: 'both', label: '決策樹' },
-    random_forest:     { name: 'Random Forest', type: 'both', label: '隨機森林' },
-    gradient_boosting: { name: 'Gradient Boosting', type: 'both', label: '梯度提升 (GBDT)' },
-    xgboost:           { name: 'XGBoost', type: 'both', label: 'XGBoost' },
-    naive_bayes:       { name: 'Naive Bayes', type: 'classification', label: '樸素貝葉斯' },
-    logistic:          { name: 'Logistic Regression', type: 'classification', label: '邏輯回歸' },
-    svr:               { name: 'SVR', type: 'regression', label: '支持向量回歸 (SVR)' },
+    linear_regression:       { name: 'Linear Regression', type: 'regression', label: '線性回歸' },
+    ridge:                   { name: 'Ridge Regression', type: 'regression', label: '嶺回歸 (Ridge)' },
+    lasso:                   { name: 'Lasso Regression', type: 'regression', label: 'Lasso 回歸' },
+    elastic_net:             { name: 'ElasticNet', type: 'regression', label: 'ElasticNet 回歸', apiOnly: true },
+    knn_3:                   { name: 'KNN (k=3)', type: 'both', label: 'KNN (k=3)' },
+    knn_5:                   { name: 'KNN (k=5)', type: 'both', label: 'KNN (k=5)' },
+    knn_7:                   { name: 'KNN (k=7)', type: 'both', label: 'KNN (k=7)' },
+    decision_tree:           { name: 'Decision Tree', type: 'both', label: '決策樹' },
+    random_forest:           { name: 'Random Forest', type: 'both', label: '隨機森林' },
+    gradient_boosting:       { name: 'Gradient Boosting', type: 'both', label: '梯度提升 (GBDT)' },
+    hist_gradient_boosting:  { name: 'HistGradientBoosting', type: 'both', label: 'HistGradientBoosting', apiOnly: true },
+    xgboost:                 { name: 'XGBoost', type: 'both', label: 'XGBoost' },
+    lightgbm:                { name: 'LightGBM', type: 'both', label: 'LightGBM', apiOnly: true },
+    catboost:                { name: 'CatBoost', type: 'both', label: 'CatBoost', apiOnly: true },
+    naive_bayes:             { name: 'Naive Bayes', type: 'classification', label: '樸素貝葉斯' },
+    logistic:                { name: 'Logistic Regression', type: 'classification', label: '邏輯回歸' },
+    svr:                     { name: 'SVR', type: 'regression', label: '支持向量回歸 (SVR)' },
+    svc:                     { name: 'SVC', type: 'classification', label: '支持向量分類 (SVC)', apiOnly: true },
+    voting:                  { name: 'Voting Ensemble', type: 'both', label: '投票集成 (Voting)', apiOnly: true },
+    stacking:                { name: 'Stacking Ensemble', type: 'both', label: '堆疊集成 (Stacking)', apiOnly: true },
   },
 
   // ===== DATE FEATURE EXTRACTION =====
@@ -780,12 +788,15 @@ const MLEngine = {
 
     let algoKeys;
     if (selectedAlgos && selectedAlgos.length > 0) {
+      // 警告使用者哪些演算法在 JS-only 模式不支援(需開啟 Python API)
+      const skipped = selectedAlgos.filter(k => this.ALGORITHMS[k]?.apiOnly && !algoRegistry[k]);
+      skipped.forEach(k => log(`${this.ALGORITHMS[k].name} 僅支援 Python 後端模式,JS-only 模式已跳過`, 'warning'));
       algoKeys = selectedAlgos.filter(k => algoRegistry[k]);
     } else {
-      // Auto: pick all compatible
+      // Auto: pick all compatible 且有 JS 實作的
       algoKeys = Object.keys(this.ALGORITHMS).filter(k => {
         const a = this.ALGORITHMS[k];
-        return a.type === 'both' || a.type === data.taskType;
+        return (a.type === 'both' || a.type === data.taskType) && !!algoRegistry[k];
       });
     }
 

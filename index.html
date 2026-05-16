@@ -120,7 +120,10 @@
         <div class="flex items-center gap-4">
           <!-- Global Pipeline Status -->
           <div id="global-status" class="flex items-center gap-2 bg-dark-800 rounded-lg px-3 py-1.5 text-xs whitespace-nowrap">
-            <span class="relative flex h-2 w-2 flex-shrink-0"><span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-success-400 opacity-75"></span><span class="relative inline-flex rounded-full h-2 w-2 bg-success-500"></span></span>
+            <span id="global-status-dot" class="relative flex h-2 w-2 flex-shrink-0">
+              <span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-dark-400 opacity-75"></span>
+              <span class="relative inline-flex rounded-full h-2 w-2 bg-dark-500"></span>
+            </span>
             <span id="global-status-text" class="text-dark-300">系統就緒</span>
           </div>
           <!-- Notification -->
@@ -140,6 +143,8 @@
               </div>
             </div>
           </div>
+          <!-- 通知詳情 Popover — 由 JS 用 fixed positioning 動態定位,避免被 notification-list 的 overflow 切掉 -->
+          <div id="notification-detail-popover" class="hidden fixed z-[60] w-96 max-h-[70vh] overflow-y-auto bg-dark-900 border border-dark-700 rounded-xl shadow-2xl p-3"></div>
         </div>
       </div>
     </header>
@@ -617,6 +622,7 @@
               </div>
               <div class="px-4 pb-4 space-y-3">
                 <div id="pp-warnings-list" class="space-y-2 max-h-32 overflow-y-auto"></div>
+                <div id="pp-info-list" class="space-y-2 max-h-24 overflow-y-auto hidden"></div>
                 <div class="overflow-x-auto" style="max-height:180px">
                   <table class="w-full text-sm">
                     <thead class="sticky top-0 bg-dark-900 z-10">
@@ -633,13 +639,105 @@
             </div>
           </div>
 
+          <!-- v2 extended: target_info + outliers -->
+          <div id="pp-extras-section" class="grid grid-cols-1 lg:grid-cols-2 gap-4 mb-6 hidden">
+            <!-- 目標欄位資訊 -->
+            <div id="pp-target-card" class="card hidden">
+              <div class="card-header">
+                <h3 class="card-title">目標欄位分析</h3>
+                <span id="pp-target-task-badge" class="text-[10px] px-2 py-0.5 rounded border"></span>
+              </div>
+              <div class="px-4 pb-4 space-y-3">
+                <div class="grid grid-cols-2 gap-2 text-xs">
+                  <div class="bg-dark-800/50 rounded p-2">
+                    <p class="text-dark-500 mb-0.5">欄位</p>
+                    <p class="font-mono text-dark-100" id="pp-target-col">—</p>
+                  </div>
+                  <div class="bg-dark-800/50 rounded p-2">
+                    <p class="text-dark-500 mb-0.5">資料型別</p>
+                    <p class="font-mono text-dark-100" id="pp-target-dtype">—</p>
+                  </div>
+                  <div class="bg-dark-800/50 rounded p-2">
+                    <p class="text-dark-500 mb-0.5">唯一值數</p>
+                    <p class="font-mono text-dark-100" id="pp-target-unique">—</p>
+                  </div>
+                  <div class="bg-dark-800/50 rounded p-2">
+                    <p class="text-dark-500 mb-0.5">缺失</p>
+                    <p class="font-mono text-dark-100" id="pp-target-missing">—</p>
+                  </div>
+                </div>
+                <!-- 分類:類別分布 / 迴歸:數值統計 -->
+                <div id="pp-target-detail" class="text-xs text-dark-300"></div>
+              </div>
+            </div>
+
+            <!-- 離群值摘要 -->
+            <div id="pp-outliers-card" class="card hidden">
+              <div class="card-header">
+                <h3 class="card-title">離群值掃描 (3×IQR)</h3>
+                <span id="pp-outliers-count" class="text-[10px] px-2 py-0.5 rounded border border-warning-500/30 text-warning-400">0 欄</span>
+              </div>
+              <div class="px-4 pb-4">
+                <div class="overflow-x-auto" style="max-height:220px">
+                  <table class="w-full text-sm">
+                    <thead class="sticky top-0 bg-dark-900 z-10">
+                      <tr class="text-dark-400 text-xs border-b border-dark-700/50">
+                        <th class="text-left py-2 px-3 font-medium">欄位</th>
+                        <th class="text-right py-2 px-3 font-medium">離群數</th>
+                        <th class="text-right py-2 px-3 font-medium">比例</th>
+                        <th class="text-right py-2 px-3 font-medium">下界</th>
+                        <th class="text-right py-2 px-3 font-medium">上界</th>
+                      </tr>
+                    </thead>
+                    <tbody id="pp-outliers-table"></tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- 目標洩漏候選 (Target Leakage Candidates) — 整列獨立顯示 -->
+          <div id="pp-leakage-card" class="card mb-6 hidden">
+            <div class="card-header">
+              <h3 class="card-title flex items-center gap-2">
+                <svg class="w-4 h-4 text-danger-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"/>
+                </svg>
+                目標洩漏候選
+              </h3>
+              <div class="flex items-center gap-2">
+                <span id="pp-leakage-high-count" class="text-[10px] px-2 py-0.5 rounded border border-danger-500/30 text-danger-400 bg-danger-500/10 hidden">0 高風險</span>
+                <span id="pp-leakage-med-count" class="text-[10px] px-2 py-0.5 rounded border border-warning-500/30 text-warning-400 bg-warning-500/10 hidden">0 中風險</span>
+              </div>
+            </div>
+            <div class="px-4 pb-4 space-y-3">
+              <p class="text-[11px] text-dark-400 leading-relaxed">
+                這些欄位與目標欄相關性異常高（&gt;0.8），可能是「答案的另一種呈現」（如時間欄、預先計算欄、行 ID 順序）。
+                建議從特徵清單剔除，否則模型在開發時看似完美，上線後會崩盤。
+              </p>
+              <div class="overflow-x-auto" style="max-height:240px">
+                <table class="w-full text-sm">
+                  <thead class="sticky top-0 bg-dark-900 z-10">
+                    <tr class="text-dark-400 text-xs border-b border-dark-700/50">
+                      <th class="text-left py-2 px-3 font-medium">欄位</th>
+                      <th class="text-right py-2 px-3 font-medium">相關性</th>
+                      <th class="text-center py-2 px-3 font-medium">偵測方法</th>
+                      <th class="text-center py-2 px-3 font-medium">風險等級</th>
+                    </tr>
+                  </thead>
+                  <tbody id="pp-leakage-table"></tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+
           <!-- Feature Groups (Router output) -->
           <div id="pp-groups-section" class="card mb-6 hidden">
             <div class="card-header">
               <h3 class="card-title">欄位自動分類 (AutoRouter)</h3>
               <span class="text-xs text-dark-400">每個欄位自動指派對應的處理管線</span>
             </div>
-            <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-3 px-4 pb-4">
+            <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5 gap-3 px-4 pb-4">
               <div class="bg-dark-800/50 rounded-lg p-3 border border-blue-500/20">
                 <div class="flex items-center justify-between mb-2">
                   <span class="text-xs font-semibold text-blue-400">Numeric</span>
@@ -656,12 +754,20 @@
                 <p class="text-[10px] text-dark-500 mb-2">眾數填補 → OneHotEncoder</p>
                 <div id="pp-group-categorical" class="flex flex-wrap gap-1 max-h-28 overflow-y-auto pr-1"></div>
               </div>
+              <div class="bg-dark-800/50 rounded-lg p-3 border border-rose-500/20">
+                <div class="flex items-center justify-between mb-2">
+                  <span class="text-xs font-semibold text-rose-400">High-Cardinality</span>
+                  <span class="text-xs text-dark-500" id="pp-group-high_cardinality-count">0</span>
+                </div>
+                <p class="text-[10px] text-dark-500 mb-2">眾數填補 → OrdinalEncoder (防 OHE 爆炸)</p>
+                <div id="pp-group-high_cardinality" class="flex flex-wrap gap-1 max-h-28 overflow-y-auto pr-1"></div>
+              </div>
               <div class="bg-dark-800/50 rounded-lg p-3 border border-purple-500/20">
                 <div class="flex items-center justify-between mb-2">
                   <span class="text-xs font-semibold text-purple-400">Text (NLP)</span>
                   <span class="text-xs text-dark-500" id="pp-group-text-count">0</span>
                 </div>
-                <p class="text-[10px] text-dark-500 mb-2">TF-IDF (1000 維) → SVD 50 維</p>
+                <p class="text-[10px] text-dark-500 mb-2">char_wb TF-IDF (支援中文) → SVD 50 維</p>
                 <div id="pp-group-text" class="flex flex-wrap gap-1 max-h-28 overflow-y-auto pr-1"></div>
               </div>
               <div class="bg-dark-800/50 rounded-lg p-3 border border-green-500/20">
@@ -671,6 +777,16 @@
                 </div>
                 <p class="text-[10px] text-dark-500 mb-2">拆 year / month / day / weekday</p>
                 <div id="pp-group-datetime" class="flex flex-wrap gap-1 max-h-28 overflow-y-auto pr-1"></div>
+              </div>
+            </div>
+            <!-- Dropped columns (constant / ID / inf) -->
+            <div class="px-4 pb-4">
+              <div id="pp-dropped-section" class="bg-dark-800/30 rounded-lg p-3 border border-dark-700 hidden">
+                <div class="flex items-center justify-between mb-2">
+                  <span class="text-xs font-semibold text-dark-400">已自動剔除 / 標記</span>
+                  <span class="text-[10px] text-dark-500">這些欄位不會進入模型</span>
+                </div>
+                <div id="pp-dropped-chips" class="flex flex-wrap gap-1"></div>
               </div>
             </div>
           </div>
@@ -779,7 +895,15 @@
                 <h3 class="card-title">建立新實驗</h3>
                 <span id="exp-dataset-badge" class="badge badge-primary"></span>
               </div>
-              <div class="grid grid-cols-1 md:grid-cols-2 gap-6 px-4 pb-4 pt-2">
+              <!-- Dataset Picker (from all uploaded CSV) -->
+              <div class="px-4 pt-2 pb-3 border-b border-dark-700/30">
+                <div class="flex items-center gap-3">
+                  <label class="text-sm text-dark-300 shrink-0">資料集</label>
+                  <select id="exp-dataset-select" class="flex-1 bg-dark-800 border border-dark-600 rounded-lg px-3 py-2 text-sm focus:border-primary-500 outline-none"></select>
+                  <span class="text-xs text-dark-500" id="exp-dataset-info">—</span>
+                </div>
+              </div>
+              <div class="grid grid-cols-1 md:grid-cols-2 gap-6 px-4 pb-4 pt-4">
                 <!-- Target Variable -->
                 <div>
                   <label class="block text-sm font-medium text-dark-300 mb-2">目標變數 (Target Variable)</label>
@@ -1251,6 +1375,13 @@
         </div>
         <!-- Real insights content (shown after training) -->
         <div id="insights-real-content" class="hidden">
+          <!-- 歷史訓練選擇器 -->
+          <div class="card mb-4">
+            <div class="px-4 py-3 flex items-center gap-3">
+              <label class="text-sm text-dark-300 shrink-0">查看訓練</label>
+              <select id="insights-history-select" class="flex-1 bg-dark-800 border border-dark-600 rounded-lg px-3 py-2 text-sm focus:border-primary-500 outline-none"></select>
+            </div>
+          </div>
           <!-- ===== SHAP 解釋 (隊友 AutoMLVisualizer,Plotly 渲染) ===== -->
           <div id="shap-section" class="card mb-6">
             <div class="card-header">
