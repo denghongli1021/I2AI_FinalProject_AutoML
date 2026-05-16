@@ -1,0 +1,3 @@
+dataset,task,accuracy,f1_score,elapsed_s
+1049_pc4,tabular,0.9075,0.7598,706.7
+CLS_ACSF1,timeseries,,,619.8

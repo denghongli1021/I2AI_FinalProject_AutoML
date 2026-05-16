@@ -17,13 +17,36 @@ from scipy.optimize import minimize
 from scipy.special import softmax
 from sklearn.model_selection import StratifiedKFold
 from sklearn.metrics import f1_score
+from .metrics import calculate_score, get_metric_name
 import optuna
 from tqdm import tqdm
 
-from .config import SEED, N_SPLITS
+from .config import SEED
 
 optuna.logging.set_verbosity(optuna.logging.WARNING)
 warnings.filterwarnings("ignore")
+
+
+# ── 二元分類閾值搜尋 ─────────────────────────────────────────────────────────
+
+def _find_best_threshold(
+    proba: np.ndarray, y: np.ndarray, metric: str
+) -> tuple:
+    """
+    二元分類專用：在 OOF 機率上搜尋正類閾值使指標最大。
+    回傳 (best_threshold, best_score)。
+    若類別數 != 2 則直接回傳 (0.5, nan)。
+    """
+    if proba.shape[1] != 2:
+        return 0.5, float("nan")
+    best_t, best_score = 0.5, -np.inf
+    for t in np.linspace(0.10, 0.90, 81):
+        preds = (proba[:, 1] >= t).astype(int)
+        score = calculate_score(y, preds, metric=metric)
+        if score > best_score:
+            best_score = score
+            best_t = float(t)
+    return best_t, best_score
 
 
 # ── 幾何平均融合工具 ─────────────────────────────────────────────────────────
@@ -49,8 +72,9 @@ class NelderMeadBlender:
     目標函數：OOF Macro F1（最大化 = minimize negative F1）。
     """
 
-    def __init__(self, n_restarts: int = 3):
+    def __init__(self, n_restarts: int = 3, metric: str = "f1"):
         self.n_restarts = n_restarts
+        self.metric = metric
         self.weights_: np.ndarray = None
 
     def fit(self, oof_list: list, y: np.ndarray) -> "NelderMeadBlender":
@@ -62,34 +86,48 @@ class NelderMeadBlender:
         """
         n_models = len(oof_list)
 
-        def neg_f1(logit_w):
+        def score_func(logit_w):
             w = softmax(logit_w)
             blended = _geometric_blend(oof_list, w)
             preds = blended.argmax(axis=1)
-            return -f1_score(y, preds, average="macro", zero_division=0)
+            # 最大化指標 = 最小化負指標
+            return -calculate_score(y, preds, metric=self.metric)
 
         best_val, best_x = np.inf, np.zeros(n_models)
 
         print(f"  [Blend] Nelder-Mead search ({self.n_restarts} restarts, {n_models} models) ...")
         for restart in tqdm(range(self.n_restarts), desc="  Blend restarts", ncols=70):
             x0 = np.random.default_rng(SEED + restart).normal(0, 0.5, n_models)
-            res = minimize(neg_f1, x0, method="Nelder-Mead",
+            res = minimize(score_func, x0, method="Nelder-Mead",
                            options={"maxiter": 5000, "xatol": 1e-5, "fatol": 1e-5})
             if res.fun < best_val:
                 best_val = res.fun
                 best_x = res.x
 
         self.weights_ = softmax(best_x)
-        oof_f1 = -best_val
-        print(f"  [Blend] Best OOF Macro F1 = {oof_f1:.4f}")
+        oof_score = -best_val
+        print(f"  [Blend] Best OOF {get_metric_name(self.metric)} = {oof_score:.4f}")
         print(f"  [Blend] Weights: {np.round(self.weights_, 3).tolist()}")
+
+        # 二元分類 + 非 accuracy 指標：在 OOF 機率上搜尋最佳決策閾值
+        self._threshold = 0.5
+        if self.metric != "accuracy":
+            oof_proba = self.predict_proba(oof_list)
+            self._threshold, thresh_score = _find_best_threshold(oof_proba, y, self.metric)
+            if oof_proba.shape[1] == 2:
+                print(f"  [Blend] Threshold={self._threshold:.2f}  "
+                      f"OOF {get_metric_name(self.metric)} {oof_score:.4f}→{thresh_score:.4f}")
         return self
 
     def predict_proba(self, test_list: list) -> np.ndarray:
         return _geometric_blend(test_list, self.weights_)
 
     def predict(self, test_list: list) -> np.ndarray:
-        return self.predict_proba(test_list).argmax(axis=1)
+        proba = self.predict_proba(test_list)
+        t = getattr(self, "_threshold", 0.5)
+        if proba.shape[1] == 2 and t != 0.5:
+            return (proba[:, 1] >= t).astype(int)
+        return proba.argmax(axis=1)
 
 
 # ── Ensemble B：Meta-Learner Stacking ────────────────────────────────────────
@@ -97,27 +135,48 @@ class NelderMeadBlender:
 class MetaLearnerStacker:
     """
     L1 OOF 預測 → meta-features → L2 Meta-Learner（HPO 選擇 LGBM 或 LogReg）。
+
+    若傳入 X_orig（原始特徵），採用 Concatenated Stacking：
+    meta-input = [OOF_predictions | original_features]，讓 Meta-Learner 能學習
+    「在哪種特徵條件下該信任哪個基模型」的條件上下文。
     """
 
-    def __init__(self, n_meta_trials: int = 30, n_folds: int = N_SPLITS):
+    def __init__(
+        self, n_meta_trials: int = 30, n_folds: int = 5,
+        metric: str = "f1", n_samples: int = 10_000,
+    ):
         self.n_meta_trials = n_meta_trials
         self.n_folds = n_folds
+        self.metric = metric
+        self.n_samples = n_samples
         self.meta_model_ = None
         self.meta_name_: str = None
+        self._x_scaler = None  # 用於縮放拼入的原始特徵
 
-    def _build_meta_features(self, oof_list: list) -> np.ndarray:
-        """把所有模型的 OOF 機率橫向拼接成 meta-feature 矩陣。"""
-        return np.hstack(oof_list)  # [N, M*C]
+    def _build_meta_features(self, oof_list: list, X_orig: np.ndarray = None) -> np.ndarray:
+        """把所有模型的 OOF 機率拼接；若有 X_orig 則一併拼入（Concatenated Stacking）。"""
+        meta = np.hstack(oof_list)  # [N, M*C]
+        if X_orig is not None:
+            meta = np.hstack([meta, X_orig])
+        return meta  # [N, M*C + F]
 
     def _hpo_meta(self, X_meta: np.ndarray, y: np.ndarray) -> tuple:
+        # X_meta 已包含 OOF + 可選的原始特徵（均由呼叫方縮放）
         """用 Optuna TPE 搜尋 meta-learner 類型 + 超參數，回傳 (best_name, best_params, best_score)。"""
         import lightgbm as lgb
         from sklearn.linear_model import LogisticRegression
 
         cv = StratifiedKFold(n_splits=self.n_folds, shuffle=True, random_state=SEED)
 
+        # 小樣本強制使用 LogReg：LGBM/XGB 在 <2000 筆 meta-features 上容易過擬合
+        if self.n_samples < 2000:
+            _meta_candidates = ["logreg"]
+            print(f"  [Stack] n_samples={self.n_samples}<2000 → 強制使用 LogReg meta-learner")
+        else:
+            _meta_candidates = ["lgbm", "logreg", "xgb"]
+
         def objective(trial):
-            meta_type = trial.suggest_categorical("meta_type", ["lgbm", "logreg"])
+            meta_type = trial.suggest_categorical("meta_type", _meta_candidates)
             if meta_type == "lgbm":
                 params = {
                     "num_leaves": trial.suggest_int("num_leaves", 8, 64),
@@ -128,12 +187,25 @@ class MetaLearnerStacker:
                 model_fn = lambda p: lgb.LGBMClassifier(
                     **p, random_state=SEED, n_jobs=-1, verbose=-1
                 )
+            elif meta_type == "xgb":
+                import xgboost as _xgb_meta
+                params = {
+                    "n_estimators": trial.suggest_int("xgb_n_est", 50, 400),
+                    "max_depth": trial.suggest_int("xgb_depth", 2, 6),
+                    "learning_rate": trial.suggest_float("xgb_lr", 0.01, 0.3, log=True),
+                    "reg_lambda": trial.suggest_float("xgb_lambda", 1e-4, 10.0, log=True),
+                    "subsample": trial.suggest_float("xgb_sub", 0.6, 1.0),
+                }
+                model_fn = lambda p: _xgb_meta.XGBClassifier(
+                    **p, random_state=SEED, verbosity=0, n_jobs=-1,
+                    use_label_encoder=False,
+                )
             else:
                 params = {
                     "C": trial.suggest_float("C", 1e-3, 10.0, log=True),
                 }
                 model_fn = lambda p: LogisticRegression(
-                    **p, max_iter=2000, random_state=SEED, n_jobs=-1
+                    **p, max_iter=2000, random_state=SEED, n_jobs=1
                 )
 
             scores = []
@@ -141,7 +213,7 @@ class MetaLearnerStacker:
                 m = model_fn(params)
                 m.fit(X_meta[tr_i], y[tr_i])
                 y_hat = m.predict(X_meta[val_i])
-                scores.append(f1_score(y[val_i], y_hat, average="macro", zero_division=0))
+                scores.append(calculate_score(y[val_i], y_hat, metric=self.metric))
 
             trial.set_user_attr("meta_type", meta_type)
             trial.set_user_attr("params", params)
@@ -154,7 +226,7 @@ class MetaLearnerStacker:
             def _cb(study, trial, _pbar=pbar):
                 _pbar.update(1)
                 if study.best_trial:
-                    _pbar.set_postfix({"best_f1": f"{study.best_value:.4f}"})
+                    _pbar.set_postfix({f"best_{self.metric}": f"{study.best_value:.4f}"})
             study.optimize(objective, n_trials=self.n_meta_trials, callbacks=[_cb])
 
         best_t = study.best_trial
@@ -164,33 +236,92 @@ class MetaLearnerStacker:
             best_t.value,
         )
 
-    def fit(self, oof_list: list, y: np.ndarray) -> "MetaLearnerStacker":
+    def fit(
+        self,
+        oof_list: list,
+        y: np.ndarray,
+        X_orig: np.ndarray = None,
+        is_timeseries: bool = False,
+    ) -> "MetaLearnerStacker":
+        """
+        Parameters
+        ----------
+        oof_list       : list of [N, C] OOF 預測機率陣列
+        y              : [N] 真實標籤
+        X_orig         : [N, F] 原始特徵（Concatenated Stacking 用）
+        is_timeseries  : 若為 True，對訓練樣本套用時間衰減權重
+                         （越接近測試集時間點的樣本獲得越高的損失權重）
+        """
         import lightgbm as lgb
         from sklearn.linear_model import LogisticRegression
+        from sklearn.preprocessing import StandardScaler
 
-        X_meta = self._build_meta_features(oof_list)
+        # 若傳入原始特徵，先標準化再拼入（避免高維 raw 特徵淹沒 OOF 機率）
+        X_orig_scaled = None
+        if X_orig is not None:
+            self._x_scaler = StandardScaler()
+            X_orig_scaled = self._x_scaler.fit_transform(X_orig)
 
-        print(f"  [Stack] Meta-feature shape: {X_meta.shape}")
-        meta_name, meta_params, meta_f1 = self._hpo_meta(X_meta, y)
-        print(f"  [Stack] Best meta-learner = {meta_name}  OOF F1 = {meta_f1:.4f}")
+        X_meta = self._build_meta_features(oof_list, X_orig_scaled)
+
+        mode = "OOF+RawFeatures" if X_orig is not None else "OOF only"
+        print(f"  [Stack] Meta-feature shape: {X_meta.shape}  ({mode})")
+        meta_name, meta_params, meta_score = self._hpo_meta(X_meta, y)
+        print(f"  [Stack] Best meta-learner = {meta_name}  OOF {get_metric_name(self.metric)} = {meta_score:.4f}")
 
         if meta_name == "lgbm":
             self.meta_model_ = lgb.LGBMClassifier(
                 **meta_params, random_state=SEED, n_jobs=-1, verbose=-1
             )
+        elif meta_name == "xgb":
+            import xgboost as _xgb_meta
+            self.meta_model_ = _xgb_meta.XGBClassifier(
+                **meta_params, random_state=SEED, verbosity=0, n_jobs=-1,
+                use_label_encoder=False,
+            )
         else:
             self.meta_model_ = LogisticRegression(
-                **meta_params, max_iter=2000, random_state=SEED, n_jobs=-1
+                **meta_params, max_iter=2000, random_state=SEED, n_jobs=1
             )
 
-        self.meta_model_.fit(X_meta, y)
+        # 時間衰減權重：越靠近測試集時間點（索引越大）的樣本權重越高
+        sample_weight = None
+        if is_timeseries:
+            n = len(y)
+            sample_weight = np.linspace(0.3, 1.0, n)
+            print(f"  [Stack] 時間衰減權重已啟用（min=0.30, max=1.00，共 {n} 個樣本）")
+
+        if sample_weight is not None:
+            self.meta_model_.fit(X_meta, y, sample_weight=sample_weight)
+        else:
+            self.meta_model_.fit(X_meta, y)
+
         self.meta_name_ = meta_name
+
+        # 二元分類 + 非 accuracy 指標：在 OOF meta-features 上搜尋最佳決策閾值
+        self._threshold = 0.5
+        if self.metric != "accuracy":
+            oof_proba = self.meta_model_.predict_proba(X_meta)
+            self._threshold, thresh_score = _find_best_threshold(oof_proba, y, self.metric)
+            if oof_proba.shape[1] == 2:
+                print(f"  [Stack] Threshold={self._threshold:.2f}  "
+                      f"OOF {get_metric_name(self.metric)} {meta_score:.4f}→{thresh_score:.4f}")
         return self
 
-    def predict_proba(self, test_list: list) -> np.ndarray:
-        X_meta = self._build_meta_features(test_list)
+    def predict_proba(self, test_list: list, X_orig: np.ndarray = None) -> np.ndarray:
+        X_orig_scaled = None
+        if X_orig is not None and self._x_scaler is not None:
+            X_orig_scaled = self._x_scaler.transform(X_orig)
+        X_meta = self._build_meta_features(test_list, X_orig_scaled)
         return self.meta_model_.predict_proba(X_meta)
 
-    def predict(self, test_list: list) -> np.ndarray:
-        X_meta = self._build_meta_features(test_list)
-        return self.meta_model_.predict(X_meta)
+    def predict(self, test_list: list, X_orig: np.ndarray = None) -> np.ndarray:
+        X_orig_scaled = None
+        if X_orig is not None and self._x_scaler is not None:
+            X_orig_scaled = self._x_scaler.transform(X_orig)
+        X_meta = self._build_meta_features(test_list, X_orig_scaled)
+        proba = self.meta_model_.predict_proba(X_meta)
+        t = getattr(self, "_threshold", 0.5)
+        if proba.shape[1] == 2 and t != 0.5:
+            return (proba[:, 1] >= t).astype(int)
+        return proba.argmax(axis=1)

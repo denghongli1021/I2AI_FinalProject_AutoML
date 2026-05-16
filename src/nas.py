@@ -131,17 +131,17 @@ class MLPNASSearcher:
 
     def __init__(
         self,
-        max_depth: int = 6,
+        max_depth: int = 4,
         hidden_dim_choices: list = None,
-        n_supernet_epochs: int = 30,
+        n_supernet_epochs: int = 20,
         supernet_lr: float = 1e-3,
         supernet_wd: float = 1e-4,
-        n_candidates: int = 30,
-        n_evolution_rounds: int = 5,
+        n_candidates: int = 15,
+        n_evolution_rounds: int = 3,
         device: str = None,
     ):
         self.max_depth = max_depth
-        self.hidden_dim_choices = hidden_dim_choices or [64, 128, 256, 512]
+        self.hidden_dim_choices = hidden_dim_choices or [64, 128, 256]
         self.n_supernet_epochs = n_supernet_epochs
         self.supernet_lr = supernet_lr
         self.supernet_wd = supernet_wd

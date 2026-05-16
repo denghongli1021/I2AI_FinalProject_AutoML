@@ -10,23 +10,91 @@
 import warnings
 import numpy as np
 import optuna
-from sklearn.model_selection import StratifiedKFold
-from sklearn.metrics import f1_score
+from sklearn.model_selection import StratifiedKFold, train_test_split
+from .metrics import calculate_score, get_metric_name
 from tqdm import tqdm
 
-from .config import SEED, N_SPLITS
+from .config import SEED
+from .data import get_ts_folds
 from .preprocess import (
     FeatureBuilder,
     TABULAR_FEATURE_SETS,
+    CATBOOST_FEATURE_SETS,
     LINEAR_FEATURE_SETS,
     MLP_FEATURE_SETS,
     CNN_FEATURE_SETS,
     TRANSFORMER_FEATURE_SETS,
+    TS_TABULAR_FEATURE_SETS,
+    TS_DL_FEATURE_SETS,
 )
 from .models.tabular import build_tabular_model
 
 optuna.logging.set_verbosity(optuna.logging.WARNING)
 warnings.filterwarnings("ignore")
+
+
+# ── Scout Phase 經驗預設值（各模型合理起點，確保第一個 trial 不隨機浪費）──────────
+_SCOUT_DEFAULTS: dict = {
+    "lgbm": {
+        "feature_set": "raw",
+        "num_leaves": 64,
+        "learning_rate": 0.05,
+        "n_estimators": 500,
+        "min_child_samples": 20,
+        "subsample": 0.8,
+        "colsample_bytree": 0.8,
+        "reg_alpha": 0.1,
+        "reg_lambda": 1.0,
+    },
+    "xgb": {
+        "feature_set": "raw",
+        "max_depth": 6,
+        "learning_rate": 0.1,
+        "n_estimators": 500,
+        "subsample": 0.8,
+        "colsample_bytree": 0.8,
+        "min_child_weight": 3,
+        "reg_alpha": 0.1,
+        "reg_lambda": 1.0,
+    },
+    "catboost": {
+        "feature_set": "raw",
+        "depth": 6,
+        "learning_rate": 0.05,
+        "iterations": 150,
+        "l2_leaf_reg": 3.0,
+        "bagging_temperature": 0.5,
+    },
+    "rf": {
+        "feature_set": "raw",
+        "n_estimators": 200,
+        "max_depth": 10,
+        "min_samples_leaf": 2,
+        "max_features": "sqrt",
+    },
+    "logreg": {
+        "feature_set": "pca64",
+        "C": 1.0,
+        "solver": "lbfgs",
+    },
+    "svm": {
+        "feature_set": "pca64",
+        "C": 1.0,
+        "gamma": 0.01,
+    },
+    "extra_trees": {
+        "feature_set": "raw",
+        "n_estimators": 200,
+        "min_samples_leaf": 1,
+        "max_features": "sqrt",
+    },
+    "knn": {
+        "feature_set": "pca64",
+        "n_neighbors": 7,
+        "weights": "distance",
+        "metric": "euclidean",
+    },
+}
 
 
 # ── 各模型的超參數搜尋空間 ─────────────────────────────────────────────────────
@@ -40,7 +108,7 @@ def _tabular_space(name: str, trial: optuna.Trial, feat_sets: list) -> dict:
         params.update({
             "num_leaves": trial.suggest_int("num_leaves", 16, 512, log=True),
             "learning_rate": trial.suggest_float("learning_rate", 1e-3, 0.3, log=True),
-            "n_estimators": trial.suggest_int("n_estimators", 100, 500),
+            "n_estimators": trial.suggest_int("n_estimators", 200, 2000),
             "min_child_samples": trial.suggest_int("min_child_samples", 5, 100),
             "subsample": trial.suggest_float("subsample", 0.5, 1.0),
             "colsample_bytree": trial.suggest_float("colsample_bytree", 0.5, 1.0),
@@ -51,7 +119,7 @@ def _tabular_space(name: str, trial: optuna.Trial, feat_sets: list) -> dict:
         params.update({
             "max_depth": trial.suggest_int("max_depth", 3, 12),
             "learning_rate": trial.suggest_float("learning_rate", 1e-3, 0.3, log=True),
-            "n_estimators": trial.suggest_int("n_estimators", 100, 500),
+            "n_estimators": trial.suggest_int("n_estimators", 200, 2000),
             "subsample": trial.suggest_float("subsample", 0.5, 1.0),
             "colsample_bytree": trial.suggest_float("colsample_bytree", 0.5, 1.0),
             "min_child_weight": trial.suggest_int("min_child_weight", 1, 30),
@@ -60,9 +128,9 @@ def _tabular_space(name: str, trial: optuna.Trial, feat_sets: list) -> dict:
         })
     elif name == "catboost":
         params.update({
-            "depth": trial.suggest_int("depth", 4, 8),
+            "depth": trial.suggest_int("depth", 4, 6),
             "learning_rate": trial.suggest_float("learning_rate", 5e-3, 0.3, log=True),
-            "iterations": trial.suggest_int("iterations", 100, 300),
+            "iterations": trial.suggest_int("iterations", 100, 200),
             "l2_leaf_reg": trial.suggest_float("l2_leaf_reg", 1e-8, 10.0, log=True),
             "bagging_temperature": trial.suggest_float("bagging_temperature", 0.0, 1.0),
         })
@@ -83,16 +151,29 @@ def _tabular_space(name: str, trial: optuna.Trial, feat_sets: list) -> dict:
             ),
             "penalty": "l2",
         })
-        feat_sets = LINEAR_FEATURE_SETS
-        params["feature_set"] = trial.suggest_categorical("feature_set", feat_sets)
     elif name == "svm":
         params.update({
             "C": trial.suggest_float("C", 1e-3, 100.0, log=True),
             "gamma": trial.suggest_float("gamma", 1e-5, 10.0, log=True),
             "kernel": "rbf",
         })
-        feat_sets = LINEAR_FEATURE_SETS
-        params["feature_set"] = trial.suggest_categorical("feature_set", feat_sets)
+    elif name == "extra_trees":
+        # ExtraTrees：決策邊界與 RF/Boosting 不同，提供正交視角
+        params.update({
+            "n_estimators": trial.suggest_int("n_estimators", 50, 500),
+            "max_depth": trial.suggest_int("max_depth", 3, 30),
+            "min_samples_leaf": trial.suggest_int("min_samples_leaf", 1, 20),
+            "max_features": trial.suggest_categorical(
+                "max_features", ["sqrt", "log2", 0.3, 0.5, 0.7]
+            ),
+        })
+    elif name == "knn":
+        # KNN：非參數化，與樹模型決策邊界完全不同
+        params.update({
+            "n_neighbors": trial.suggest_int("n_neighbors", 3, 30),
+            "weights": trial.suggest_categorical("weights", ["uniform", "distance"]),
+            "metric": trial.suggest_categorical("metric", ["euclidean", "manhattan", "chebyshev"]),
+        })
 
     return params
 
@@ -106,9 +187,9 @@ def _dl_train_space(trial: optuna.Trial) -> dict:
         "label_smoothing": trial.suggest_float("label_smoothing", 0.0, 0.2),
         "mixup_alpha": trial.suggest_float("mixup_alpha", 0.0, 0.5),
         "mixup_prob": trial.suggest_float("mixup_prob", 0.0, 1.0),
-        "t_max": trial.suggest_int("t_max", 5, 50),
-        "n_epochs": trial.suggest_int("n_epochs", 20, 100),
-        "patience": trial.suggest_int("patience", 5, 20),
+        "t_max": trial.suggest_int("t_max", 5, 30),
+        "n_epochs": trial.suggest_int("n_epochs", 20, 50),
+        "patience": trial.suggest_int("patience", 5, 10),
     }
 
 
@@ -124,21 +205,43 @@ def _cnn_arch_space(trial: optuna.Trial) -> dict:
 
 def _transformer_arch_space(trial: optuna.Trial, in_features: int) -> dict:
     """SignalTransformer 架構搜尋空間。"""
-    # d_model 必須能被 n_heads 整除
-    d_model = trial.suggest_categorical("d_model", [64, 128, 256])
-    n_heads_choices = [h for h in [2, 4, 8] if d_model % h == 0]
-    n_heads = trial.suggest_categorical("n_heads", n_heads_choices)
-    # patch_size 不超過 in_features
-    ps_choices = [p for p in [8, 16, 32, 64] if p <= in_features]
-    if not ps_choices:
-        ps_choices = [in_features]
+    # 固定候選集：d_model∈{64,128,256} 永遠整除 [2,4,8]，無需動態過濾
+    # patch_size 固定候選集，事後 clamp 到 in_features，避免動態 value space 錯誤
+    d_model    = trial.suggest_categorical("d_model", [64, 128, 256])
+    n_heads    = trial.suggest_categorical("n_heads", [2, 4, 8])
+    patch_size = trial.suggest_categorical("patch_size", [8, 16, 32, 64])
     return {
-        "patch_size": trial.suggest_categorical("patch_size", ps_choices),
+        "patch_size": min(patch_size, max(1, in_features)),
         "d_model": d_model,
         "n_heads": n_heads,
         "depth": trial.suggest_int("depth", 1, 8),
         "ff_dim": trial.suggest_categorical("ff_dim", [64, 128, 256, 512]),
         "dropout": trial.suggest_float("dropout", 0.0, 0.5),
+    }
+
+
+def _tcn_arch_space(trial: optuna.Trial) -> dict:
+    """TCN 架構搜尋空間（因果擴張卷積，不含未來資訊）。"""
+    return {
+        "n_blocks": trial.suggest_int("n_blocks", 2, 6),
+        "channels": trial.suggest_categorical("channels", [32, 64, 128, 256]),
+        "kernel_size": trial.suggest_categorical("kernel_size", [3, 5, 7]),
+        "dropout": trial.suggest_float("dropout", 0.0, 0.4),
+    }
+
+
+def _patchtst_arch_space(trial: optuna.Trial, in_features: int) -> dict:
+    """PatchTST 架構搜尋空間（Mean-Pooling，無 CLS Token 過擬合問題）。"""
+    d_model    = trial.suggest_categorical("d_model", [64, 128, 256])
+    n_heads    = trial.suggest_categorical("n_heads", [2, 4, 8])
+    patch_size = trial.suggest_categorical("patch_size", [4, 8, 16, 32])
+    return {
+        "patch_size": min(patch_size, max(1, in_features)),
+        "d_model": d_model,
+        "n_heads": n_heads,
+        "depth": trial.suggest_int("depth", 1, 6),
+        "ff_dim": trial.suggest_categorical("ff_dim", [64, 128, 256, 512]),
+        "dropout": trial.suggest_float("dropout", 0.0, 0.4),
     }
 
 
@@ -154,22 +257,74 @@ class TabularHPO:
         self,
         model_names: list = None,
         n_trials: int = 50,
-        n_folds: int = N_SPLITS,
+        n_folds: int = 5,
         top_k: int = 3,
         per_model_trials: dict = None,
+        per_model_timeout: dict = None,
         device: str = None,
+        metric: str = "f1",
     ):
         self.model_names = model_names or ["lgbm", "xgb", "catboost", "rf", "logreg", "svm"]
         self.n_trials = n_trials
         self.n_folds = n_folds
         self.top_k = top_k
         self.per_model_trials = per_model_trials or {}
+        self.per_model_timeout = per_model_timeout or {}
+        self.metric = metric
         from .config import DEVICE as _DEVICE
         self.device = device or _DEVICE
 
-    def run(self, X: np.ndarray, y: np.ndarray) -> list:
-        """回傳 list of config dict，每個 dict 含 model_name / feature_set / params / score。"""
-        cv = StratifiedKFold(n_splits=self.n_folds, shuffle=True, random_state=SEED)
+    def run(self, X: np.ndarray, y: np.ndarray, global_cfg: dict = None,
+            warm_start: dict = None, locked_feature_sets: dict = None) -> list:
+        """
+        回傳 list of config dict，每個 dict 含 model_name / feature_set / params / score。
+
+        warm_start : {model_name: params_dict}
+            由 scout() 回傳的 best_params，注入為 Trial 0，讓 TPE 從強基線出發。
+        locked_feature_sets : {model_name: feature_set_str}
+            固定每個模型使用 Scout 找到的最佳 feature_set，不再重新搜尋。
+            可讓有限 trial 數集中在超參數空間，顯著提升 HPO 效率。
+        """
+        global_cfg = global_cfg or {}
+        warm_start = warm_start or {}
+        locked_feature_sets = locked_feature_sets or {}
+        n_repeats = global_cfg.get("n_repeats", 1)
+        is_ts = global_cfg.get("is_timeseries", False)
+
+        from sklearn.model_selection import StratifiedKFold, RepeatedStratifiedKFold
+        if is_ts:
+            folds = get_ts_folds(len(X), n_splits=self.n_folds)
+        elif n_repeats > 1:
+            cv = RepeatedStratifiedKFold(n_splits=self.n_folds, n_repeats=n_repeats, random_state=SEED)
+            folds = list(cv.split(X, y))
+        else:
+            cv = StratifiedKFold(n_splits=self.n_folds, shuffle=True, random_state=SEED)
+            folds = list(cv.split(X, y))
+
+        # === 預先計算所有 feature_set × fold 組合，消除 objective 內的重複 FeatureBuilder ===
+        _all_fs: set = set()
+        for _n in self.model_names:
+            _nt = int(self.per_model_trials.get(_n, self.n_trials))
+            if _nt <= 0:
+                continue
+            _lk = locked_feature_sets.get(_n)
+            if _lk:
+                _all_fs.add(_lk)
+            elif is_ts:
+                _all_fs.update(TS_TABULAR_FEATURE_SETS)
+            elif _n in ("logreg", "svm", "knn"):
+                _all_fs.update(LINEAR_FEATURE_SETS)
+            elif _n == "catboost":
+                _all_fs.update(CATBOOST_FEATURE_SETS)
+            else:
+                _all_fs.update(TABULAR_FEATURE_SETS)
+        print(f"  [HPO] Pre-computing {len(_all_fs)} feature set(s) × {len(folds)} folds ...")
+        _feat_cache: dict = {}
+        for _fs in sorted(_all_fs):
+            for _fi, (_tr, _vl) in enumerate(folds):
+                _fb = FeatureBuilder(feature_set=_fs, global_cfg=global_cfg)
+                _feat_cache[(_fs, _fi)] = (_fb.fit_transform(X[_tr]), _fb.transform(X[_vl]))
+
         all_configs = []
 
         for name in self.model_names:
@@ -177,25 +332,46 @@ class TabularHPO:
             if n_trials <= 0:
                 continue
 
-            fs_candidates = (
-                LINEAR_FEATURE_SETS if name in ("logreg", "svm") else TABULAR_FEATURE_SETS
-            )
+            if is_ts:
+                fs_candidates = TS_TABULAR_FEATURE_SETS
+            elif name in ("logreg", "svm", "knn"):
+                fs_candidates = LINEAR_FEATURE_SETS
+            elif name == "catboost":
+                fs_candidates = CATBOOST_FEATURE_SETS
+            else:
+                fs_candidates = TABULAR_FEATURE_SETS
             trial_records = []
+            # 若 Scout 已找到最佳 feature_set，固定使用（不再佔用 trial 搜尋維度）
+            _locked_fs = locked_feature_sets.get(name)
 
-            def objective(trial, _name=name, _fs=fs_candidates, _device=self.device):
-                merged = _tabular_space(_name, trial, _fs)
+            _cw = "balanced" if self.metric != "accuracy" else None
+
+            def objective(trial, _name=name, _fs=fs_candidates, _device=self.device,
+                          _locked=_locked_fs, _cw=_cw):
+                if _locked:
+                    # 固定 feature_set，讓 TPE 專注在超參數空間
+                    merged = _tabular_space(_name, trial, [_locked])
+                else:
+                    merged = _tabular_space(_name, trial, _fs)
                 fs = merged.pop("feature_set")
                 model_params = merged
 
                 scores = []
-                for tr_idx, val_idx in cv.split(X, y):
-                    fb = FeatureBuilder(feature_set=fs)
-                    X_tr = fb.fit_transform(X[tr_idx])
-                    X_val = fb.transform(X[val_idx])
-                    m = build_tabular_model(_name, model_params, device=_device)
-                    m.fit(X_tr, y[tr_idx])
+                for _fi, (tr_idx, val_idx) in enumerate(folds):
+                    X_tr, X_val = _feat_cache[(fs, _fi)]
+                    m = build_tabular_model(_name, model_params, device=_device, class_weight=_cw)
+                    if _name == "lgbm":
+                        import lightgbm as _lgb
+                        m.fit(X_tr, y[tr_idx],
+                              eval_set=[(X_val, y[val_idx])],
+                              callbacks=[_lgb.early_stopping(50, verbose=False),
+                                         _lgb.log_evaluation(-1)])
+                    elif hasattr(m, "early_stopping_rounds") and m.early_stopping_rounds:
+                        m.fit(X_tr, y[tr_idx], eval_set=[(X_val, y[val_idx])], verbose=False)
+                    else:
+                        m.fit(X_tr, y[tr_idx])
                     y_hat = m.predict(X_val)
-                    scores.append(f1_score(y[val_idx], y_hat, average="macro", zero_division=0))
+                    scores.append(calculate_score(y[val_idx], y_hat, metric=self.metric))
 
                 score = float(np.mean(scores))
                 trial.set_user_attr("feature_set", fs)
@@ -208,13 +384,22 @@ class TabularHPO:
                 direction="maximize", sampler=sampler, pruner=pruner
             )
 
+            # 暖啟動：注入 scout 找到的最佳參數作為 Trial 0，TPE 立即從強基線出發
+            if name in warm_start:
+                study.enqueue_trial(warm_start[name])
+
+            model_timeout = self.per_model_timeout.get(name)
             with tqdm(total=n_trials, desc=f"HPO {name.upper():8s}", unit="trial", ncols=80) as pbar:
                 def _cb(study, trial, _pbar=pbar):
                     _pbar.update(1)
-                    if study.best_trial:
-                        _pbar.set_postfix({"best_f1": f"{study.best_value:.4f}"})
+                    try:
+                        _pbar.set_postfix({f"best_{self.metric}": f"{study.best_value:.4f}"})
+                    except ValueError:
+                        # 尚無成功完成的 trial（例如全部 OOM/失敗）
+                        pass
 
-                study.optimize(objective, n_trials=n_trials, callbacks=[_cb])
+                study.optimize(objective, n_trials=n_trials, timeout=model_timeout,
+                               callbacks=[_cb], catch=(Exception,))
 
             for t in study.trials:
                 if t.value is not None:
@@ -229,10 +414,137 @@ class TabularHPO:
             top = trial_records[: self.top_k]
             all_configs.extend(top)
             best = top[0]["score"] if top else float("nan")
-            print(f"  [HPO] {name.upper()} best Macro F1 = {best:.4f}  "
+            print(f"  [HPO] {name.upper()} best {get_metric_name(self.metric)} = {best:.4f}  "
                   f"feature_set = {top[0]['feature_set'] if top else '-'}")
 
         return all_configs
+
+    def scout(
+        self,
+        X: np.ndarray,
+        y: np.ndarray,
+        scout_trials: int = 5,
+        val_size: float = 0.2,
+        global_cfg: dict = None,
+        scout_cv_folds: int = 3,
+    ) -> tuple:
+        """
+        Phase 1 快速篩選：3-Fold mini-CV + 輕量化 HPO。
+
+        使用 3-Fold CV（而非單次 holdout）確保 Scout 分數與 Full HPO 5-Fold 分數
+        在同一度量體系下，讓淘汰閾值有意義。小型 CV 雖然慢約 3×，但有效消除
+        lucky split 偏差，避免誤留弱模型或誤淘汰強模型。
+
+        策略：
+          - Trial 0：注入 _SCOUT_DEFAULTS（經驗預設值），保證不浪費在隨機差點
+          - Trial 1+：RandomSampler 隨機探索
+        回傳 ({model_name: best_f1}, {model_name: best_params})。
+        """
+        global_cfg = global_cfg or {}
+        is_ts = global_cfg.get("is_timeseries", False)
+
+        # 建立 Scout 用的 CV folds（分數體系與 Full HPO 一致）
+        if is_ts:
+            scout_folds = get_ts_folds(len(X), n_splits=scout_cv_folds)
+        else:
+            cv = StratifiedKFold(n_splits=scout_cv_folds, shuffle=True, random_state=SEED)
+            scout_folds = list(cv.split(X, y))
+
+        # === 預先計算 Scout 所有 feature_set × fold 組合 ===
+        _scout_fs: set = set()
+        for _n in self.model_names:
+            if is_ts:
+                _scout_fs.update(TS_TABULAR_FEATURE_SETS)
+            elif _n in ("logreg", "svm", "knn"):
+                _scout_fs.update(LINEAR_FEATURE_SETS)
+            elif _n == "catboost":
+                _scout_fs.update(CATBOOST_FEATURE_SETS)
+            else:
+                _scout_fs.update(TABULAR_FEATURE_SETS)
+        _scout_cache: dict = {}
+        for _fs in sorted(_scout_fs):
+            for _fi, (_tr, _vl) in enumerate(scout_folds):
+                _fb = FeatureBuilder(feature_set=_fs, global_cfg=global_cfg)
+                _scout_cache[(_fs, _fi)] = (_fb.fit_transform(X[_tr]), _fb.transform(X[_vl]))
+
+        scores = {}
+        best_params = {}
+
+        for name in self.model_names:
+            if is_ts:
+                fs_candidates = TS_TABULAR_FEATURE_SETS
+            elif name in ("logreg", "svm", "knn"):
+                fs_candidates = LINEAR_FEATURE_SETS
+            elif name == "catboost":
+                fs_candidates = CATBOOST_FEATURE_SETS
+            else:
+                fs_candidates = TABULAR_FEATURE_SETS
+
+            _scout_cw = "balanced" if self.metric != "accuracy" else None
+
+            def objective(trial, _name=name, _fs=fs_candidates, _scout_cw=_scout_cw):
+                merged = _tabular_space(_name, trial, _fs)
+                fs = merged.pop("feature_set")
+                fold_scores = []
+                for _fi, (tr_idx, val_idx) in enumerate(scout_folds):
+                    X_t, X_v = _scout_cache[(fs, _fi)]
+                    m = build_tabular_model(_name, merged, device=self.device, class_weight=_scout_cw)
+                    if _name == "lgbm":
+                        import lightgbm as _lgb
+                        m.fit(X_t, y[tr_idx],
+                              eval_set=[(X_v, y[val_idx])],
+                              callbacks=[_lgb.early_stopping(30, verbose=False),
+                                         _lgb.log_evaluation(-1)])
+                    elif hasattr(m, "early_stopping_rounds") and m.early_stopping_rounds:
+                        m.fit(X_t, y[tr_idx], eval_set=[(X_v, y[val_idx])], verbose=False)
+                    else:
+                        m.fit(X_t, y[tr_idx])
+                    y_hat = m.predict(X_v)
+                    fold_scores.append(calculate_score(y[val_idx], y_hat, metric=self.metric))
+                score = float(np.mean(fold_scores))
+                trial.set_user_attr("feature_set", fs)
+                return score
+
+            # RandomSampler：少量 trial 下比 TPE 更穩定，不需要熱身期
+            sampler = optuna.samplers.RandomSampler(seed=SEED)
+            study = optuna.create_study(direction="maximize", sampler=sampler)
+
+            # 注入經驗預設值作為 Trial 0，確保至少評估一組合理起點
+            # 若預設的 feature_set 不在當前候選集（如 TS 模式只有 "raw"），改用候選集第一個
+            if name in _SCOUT_DEFAULTS:
+                default = dict(_SCOUT_DEFAULTS[name])
+                if default.get("feature_set") not in fs_candidates:
+                    default["feature_set"] = fs_candidates[0]
+                study.enqueue_trial(default)
+
+            with tqdm(total=scout_trials, desc=f"Scout {name.upper():8s}", unit="trial", ncols=80) as pbar:
+                def _cb(study, trial, _pbar=pbar):
+                    _pbar.update(1)
+                    try:
+                        _pbar.set_postfix({f"best_{self.metric}": f"{study.best_value:.4f}"})
+                    except ValueError:
+                        pass
+                study.optimize(objective, n_trials=scout_trials, callbacks=[_cb],
+                               catch=(Exception,))
+
+            try:
+                best_trial = study.best_trial
+                best_val = study.best_value
+            except ValueError:
+                best_trial = None
+                best_val = float("nan")
+            scores[name] = best_val
+            if best_trial is not None:
+                p = dict(best_trial.params)
+                # feature_set 可能不在 params（被 merged.pop 取走），從 user_attrs 補回
+                if "feature_set" not in p:
+                    fs_val = best_trial.user_attrs.get("feature_set")
+                    if fs_val:
+                        p["feature_set"] = fs_val
+                best_params[name] = p
+            print(f"  [Scout] {name.upper():8s} {scout_cv_folds}-Fold CV {get_metric_name(self.metric)} = {best_val:.4f}")
+
+        return scores, best_params
 
 
 # ── DL HPO（CNN1D & Transformer）───────────────────────────────────────────────
@@ -250,15 +562,21 @@ class DLHPO:
         top_k: int = 2,
         n_classes: int = None,
         device: str = None,
+        metric: str = "f1",
     ):
-        assert model_name in ("cnn1d", "transformer"), f"Unsupported DL model: {model_name}"
+        _valid = {"cnn1d", "resnet1d", "transformer", "tcn", "patchtst"}
+        assert model_name in _valid, f"Unsupported DL model: {model_name}"
         self.model_name = model_name
         self.n_trials = n_trials
         self.top_k = top_k
         self.n_classes = n_classes
         self.device = device
+        self.metric = metric
 
-    def run(self, X: np.ndarray, y: np.ndarray) -> list:
+    def run(self, X: np.ndarray, y: np.ndarray, global_cfg: dict = None) -> list:
+        global_cfg = global_cfg or {}
+        is_ts = global_cfg.get("is_timeseries", False)
+
         from .config import DEVICE
         from .train import train_dl_single_fold
 
@@ -266,27 +584,39 @@ class DLHPO:
         n_classes = self.n_classes or len(np.unique(y))
         in_features = X.shape[1]
 
-        fs_candidates = (
-            CNN_FEATURE_SETS if self.model_name == "cnn1d" else TRANSFORMER_FEATURE_SETS
-        )
+        # 時序模式下 DL 直接用 raw/signal（lag/rolling 已預先計算到 X）
+        if is_ts:
+            fs_candidates = TS_DL_FEATURE_SETS
+        elif self.model_name in ("cnn1d", "resnet1d", "tcn"):
+            fs_candidates = CNN_FEATURE_SETS
+        else:
+            fs_candidates = TRANSFORMER_FEATURE_SETS
 
-        cv = StratifiedKFold(n_splits=N_SPLITS, shuffle=True, random_state=SEED)
-        fold_splits = list(cv.split(X, y))
-        tr_idx, val_idx = fold_splits[0]  # 快速評估用 fold-0
+        # 快速 HPO 評估：使用第一個 fold（時序模式則用時序切割）
+        if is_ts:
+            fold_splits = get_ts_folds(len(X), n_splits=5)
+        else:
+            cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=SEED)
+            fold_splits = list(cv.split(X, y))
+        tr_idx, val_idx = fold_splits[0]
 
         trial_records = []
 
         def objective(trial):
             fs = trial.suggest_categorical("feature_set", fs_candidates)
-            fb = FeatureBuilder(feature_set=fs)
+            fb = FeatureBuilder(feature_set=fs, global_cfg=global_cfg)
             X_tr = fb.fit_transform(X[tr_idx])
             X_val = fb.transform(X[val_idx])
             cur_in = X_tr.shape[1]
 
             train_p = _dl_train_space(trial)
 
-            if self.model_name == "cnn1d":
+            if self.model_name in ("cnn1d", "resnet1d"):
                 arch_p = _cnn_arch_space(trial)
+            elif self.model_name == "tcn":
+                arch_p = _tcn_arch_space(trial)
+            elif self.model_name == "patchtst":
+                arch_p = _patchtst_arch_space(trial, cur_in)
             else:
                 arch_p = _transformer_arch_space(trial, cur_in)
 
@@ -300,6 +630,7 @@ class DLHPO:
                 y_val=y[val_idx],
                 n_classes=n_classes,
                 device=device,
+                global_cfg=global_cfg,
             )
             trial.set_user_attr("feature_set", fs)
             trial.set_user_attr("arch_params", arch_p)
@@ -316,10 +647,13 @@ class DLHPO:
         with tqdm(total=self.n_trials, desc=f"HPO {name_label:11s}", unit="trial", ncols=80) as pbar:
             def _cb(study, trial, _pbar=pbar):
                 _pbar.update(1)
-                if study.best_trial:
-                    _pbar.set_postfix({"best_f1": f"{study.best_value:.4f}"})
+                try:
+                    _pbar.set_postfix({f"best_{self.metric}": f"{study.best_value:.4f}"})
+                except ValueError:
+                    pass
 
-            study.optimize(objective, n_trials=self.n_trials, callbacks=[_cb])
+            study.optimize(objective, n_trials=self.n_trials, callbacks=[_cb],
+                           catch=(Exception,))
 
         for t in study.trials:
             if t.value is not None:
@@ -334,7 +668,7 @@ class DLHPO:
         trial_records.sort(key=lambda x: x["score"], reverse=True)
         top = trial_records[: self.top_k]
         best = top[0]["score"] if top else float("nan")
-        print(f"  [HPO] {name_label} best Macro F1 = {best:.4f}  "
+        print(f"  [HPO] {name_label} best {get_metric_name(self.metric)} = {best:.4f}  "
               f"feature_set = {top[0]['feature_set'] if top else '-'}")
         return top
 
@@ -344,41 +678,67 @@ class DLHPO:
 class MLPTrainHPO:
     """在 NAS 搜尋出最佳架構後，對訓練超參數 + feature_set 做 TPE 搜尋。"""
 
-    def __init__(self, arch_params: dict, n_trials: int = 30, top_k: int = 2, device: str = None):
+    def __init__(self, arch_params: dict, n_trials: int = 30, top_k: int = 2, device: str = None, metric: str = "f1"):
         self.arch_params = arch_params
         self.n_trials = n_trials
         self.top_k = top_k
         self.device = device
+        self.metric = metric
 
-    def run(self, X: np.ndarray, y: np.ndarray, n_classes: int) -> list:
+    def run(self, X: np.ndarray, y: np.ndarray, n_classes: int, global_cfg: dict = None) -> list:
+        global_cfg = global_cfg or {}
         from .config import DEVICE
         from .train import train_dl_single_fold
 
         device = self.device or DEVICE
-        cv = StratifiedKFold(n_splits=N_SPLITS, shuffle=True, random_state=SEED)
+        cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=SEED)
         fold_splits = list(cv.split(X, y))
         tr_idx, val_idx = fold_splits[0]
 
         trial_records = []
 
         def objective(trial):
+            import torch
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+
             fs = trial.suggest_categorical("feature_set", MLP_FEATURE_SETS)
-            fb = FeatureBuilder(feature_set=fs)
+            fb = FeatureBuilder(feature_set=fs, global_cfg=global_cfg)
             X_tr = fb.fit_transform(X[tr_idx])
             X_val = fb.transform(X[val_idx])
             train_p = _dl_train_space(trial)
 
-            score = train_dl_single_fold(
-                model_name="mlp",
-                arch_params=self.arch_params,
-                train_params=train_p,
-                X_tr=X_tr,
-                y_tr=y[tr_idx],
-                X_val=X_val,
-                y_val=y[val_idx],
-                n_classes=n_classes,
-                device=device,
-            )
+            _device = device
+            try:
+                score = train_dl_single_fold(
+                    model_name="mlp",
+                    arch_params=self.arch_params,
+                    train_params=train_p,
+                    X_tr=X_tr,
+                    y_tr=y[tr_idx],
+                    X_val=X_val,
+                    y_val=y[val_idx],
+                    n_classes=n_classes,
+                    device=_device,
+                    global_cfg=global_cfg,
+                )
+            except (RuntimeError, torch.cuda.OutOfMemoryError) as e:
+                if "CUDA" in str(e) or "out of memory" in str(e).lower():
+                    torch.cuda.empty_cache()
+                    score = train_dl_single_fold(
+                        model_name="mlp",
+                        arch_params=self.arch_params,
+                        train_params=train_p,
+                        X_tr=X_tr,
+                        y_tr=y[tr_idx],
+                        X_val=X_val,
+                        y_val=y[val_idx],
+                        n_classes=n_classes,
+                        device="cpu",
+                        global_cfg=global_cfg,
+                    )
+                else:
+                    raise
             trial.set_user_attr("feature_set", fs)
             trial.set_user_attr("train_params", train_p)
             return score
@@ -389,10 +749,14 @@ class MLPTrainHPO:
         with tqdm(total=self.n_trials, desc="HPO MLP-train  ", unit="trial", ncols=80) as pbar:
             def _cb(study, trial, _pbar=pbar):
                 _pbar.update(1)
-                if study.best_trial:
-                    _pbar.set_postfix({"best_f1": f"{study.best_value:.4f}"})
+                try:
+                    if study.best_trial:
+                        _pbar.set_postfix({f"best_{self.metric}": f"{study.best_value:.4f}"})
+                except ValueError:
+                    pass
 
-            study.optimize(objective, n_trials=self.n_trials, callbacks=[_cb])
+            study.optimize(objective, n_trials=self.n_trials, callbacks=[_cb],
+                           catch=(Exception,))
 
         for t in study.trials:
             if t.value is not None:
@@ -407,6 +771,6 @@ class MLPTrainHPO:
         trial_records.sort(key=lambda x: x["score"], reverse=True)
         top = trial_records[: self.top_k]
         best = top[0]["score"] if top else float("nan")
-        print(f"  [HPO] MLP-train best Macro F1 = {best:.4f}  "
+        print(f"  [HPO] MLP-train best {get_metric_name(self.metric)} = {best:.4f}  "
               f"feature_set = {top[0]['feature_set'] if top else '-'}")
         return top

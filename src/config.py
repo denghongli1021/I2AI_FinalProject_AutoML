@@ -3,7 +3,6 @@ import os
 import torch
 
 SEED = 42
-N_SPLITS = 5
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 HERE = os.path.dirname(os.path.abspath(__file__))

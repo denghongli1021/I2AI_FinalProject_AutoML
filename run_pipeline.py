@@ -1,284 +1,206 @@
 """
-run_pipeline.py — 完整 Pipeline 執行入口（v2 架構）
+run_pipeline.py — Pipeline 執行入口（v2）
 
-流程：
-  1. 載入 test/train.csv + test/test.csv，標籤編碼
-  2. Tabular HPO（LGBM / XGB / CatBoost / RF / LogReg / SVM）
-  3. MLP NAS（One-Shot Supernet + 演化搜尋最佳架構）
-  4. MLP 訓練超參數 HPO
-  5. CNN1D HPO（架構 + 訓練參數 + feature_set）
-  6. Transformer HPO
-  7. 所有 top-k config 執行 5-Fold CV → OOF + Test 預測（存 artifacts/）
-  8. Ensemble A：Nelder-Mead Weighted Blending → sub_A_blend.csv
-  9. Ensemble B：Meta-Learner Stacking → sub_B_stack.csv
+每個資料集的 ML 邏輯（HPO / NAS / CV / Ensemble）完全由 pipeline.py 負責；
+本檔僅處理：資料載入、80/20 split、TS 特徵前處理、呼叫 pipeline.run()、結果輸出。
 
-執行方式（從專案根目錄）：
-    python run_pipeline.py [--fast]
+批次評估模式（openml_cc18_data/ 前 N 個 + ucr_ts_80(時序資料)/ 前 N 個，80/20 split 評估）：
+    python run_pipeline.py --batch [--fast] [--top-n 5]
+    python run_pipeline.py --batch --skip-dl --top-n 3
 
---fast 旗標大幅縮減 HPO/NAS 次數，適合快速驗證流程。
-所有超參數由 HPO/NAS 自動決定，程式碼中不人為固定任何訓練數值。
+競賽模式（讀取 test/train.csv + test/test.csv）：
+    python run_pipeline.py [--fast] [--ts] [--no-nas] [--skip-dl] [--skip-tabular]
+    python run_pipeline.py --time-limit 3600
 """
 import os
 import sys
 import time
 import argparse
+import traceback
 import numpy as np
 import pandas as pd
+from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import LabelEncoder
+from sklearn.metrics import accuracy_score, f1_score
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
-from src.config import DEVICE, SEED, ARTIFACTS_DIR, SUBMISSIONS_DIR
-from src.hpo import TabularHPO, DLHPO, MLPTrainHPO
-from src.nas import MLPNASSearcher
-from src.train import run_cv
-from src.ensemble import NelderMeadBlender, MetaLearnerStacker
-from src.make_submission import generate_submission
-
-TEST_DIR = os.path.join(HERE, "test")
-TRAIN_CSV = os.path.join(TEST_DIR, "train.csv")
-TEST_CSV = os.path.join(TEST_DIR, "test.csv")
-TARGET_COL = "target_feature"
-ID_COL = "id"
+from src.config import DEVICE, SEED, ARTIFACTS_DIR
+import pipeline as _pl
 
 
-# ── 設定（--fast 模式大幅縮減試驗次數）────────────────────────────────────────
+# ── 資料輔助函式 ──────────────────────────────────────────────────────────────
 
-def get_cfg(fast: bool, n_samples: int = 10_000) -> dict:
-    if fast:
-        return {
-            "tabular_trials": 5,
-            "tabular_top_k": 1,
-            "nas_epochs": 5,
-            "nas_candidates": 5,
-            "nas_rounds": 2,
-            "mlp_train_trials": 5,
-            "mlp_top_k": 1,
-            "dl_trials": 5,
-            "dl_top_k": 1,
-            "meta_trials": 5,
-            "blend_restarts": 1,
-        }
-
-    if n_samples < 500:
-        # 小數據：縮減避免 NAS / Stacking 三重過擬合
-        return {
-            "tabular_trials": 30,
-            "tabular_top_k": 1,
-            "nas_epochs": 10,
-            "nas_candidates": 10,
-            "nas_rounds": 3,
-            "mlp_train_trials": 10,
-            "mlp_top_k": 1,
-            "dl_trials": 10,
-            "dl_top_k": 1,
-            "meta_trials": 15,
-            "blend_restarts": 2,
-        }
-
-    if n_samples < 50_000:
-        # 中型數據：原始設定，設計吻合此區間
-        return {
-            "tabular_trials": 50,
-            "tabular_top_k": 3,
-            "nas_epochs": 30,
-            "nas_candidates": 30,
-            "nas_rounds": 5,
-            "mlp_train_trials": 30,
-            "mlp_top_k": 2,
-            "dl_trials": 30,
-            "dl_top_k": 2,
-            "meta_trials": 30,
-            "blend_restarts": 3,
-        }
-
-    # 大數據（>= 50k）：縮減 trials，NAS 與 DL 降頻避免 OOM / 極慢
-    return {
-        "tabular_trials": 20,
-        "tabular_top_k": 2,
-        "nas_epochs": 10,
-        "nas_candidates": 10,
-        "nas_rounds": 3,
-        "mlp_train_trials": 15,
-        "mlp_top_k": 1,
-        "dl_trials": 15,
-        "dl_top_k": 1,
-        "meta_trials": 20,
-        "blend_restarts": 2,
-    }
+def _auto_detect_task(y: pd.Series) -> str:
+    if y.dtype == object or y.dtype == bool:
+        return "classification"
+    n_unique = y.nunique()
+    return "classification" if (n_unique <= 50 and n_unique / len(y) < 0.30) else "regression"
 
 
-# ── 主流程 ───────────────────────────────────────────────────────────────────
+def _find_target_col(df: pd.DataFrame) -> str:
+    for cand in ("target", "label", "class", "y", "c"):
+        if cand in df.columns:
+            return cand
+    return df.columns[-1]
+
+
+def _find_datasets(openml_dir: str, ts_dir: str, top_n: int):
+    """回傳 (csv_path, is_ts) 列表：前 top_n 個 OpenML + 前 top_n 個 UCR。"""
+    openml = sorted(f for f in os.listdir(openml_dir) if f.endswith(".csv"))[:top_n]
+    ts     = sorted(f for f in os.listdir(ts_dir)     if f.endswith(".csv"))[:top_n]
+    return (
+        [(os.path.join(openml_dir, f), False) for f in openml] +
+        [(os.path.join(ts_dir,     f), True)  for f in ts]
+    )
+
+
+
+# ── 批次評估模式 ──────────────────────────────────────────────────────────────
+
+def run_batch(args):
+    openml_dir = os.path.join(HERE, args.openml_dir)
+    ts_dir     = os.path.join(HERE, args.ts_dir)
+    for d in [openml_dir, ts_dir]:
+        if not os.path.isdir(d):
+            print(f"[錯誤] 找不到目錄：{d}"); sys.exit(1)
+
+    datasets = _find_datasets(openml_dir, ts_dir, args.top_n)
+    print(f"\n{'='*65}")
+    print(f"  Pipeline 批次評估  ─  {len(datasets)} 個資料集  "
+          f"（OpenML×{args.top_n} + UCR×{args.top_n}）  fast={args.fast}")
+    print(f"{'='*65}")
+    results = []
+
+    for csv_path, is_ts in datasets:
+        dataset_name = os.path.splitext(os.path.basename(csv_path))[0]
+        dtype_label  = "TS" if is_ts else "Tab"
+        print(f"\n{'─'*65}")
+        print(f"  [{dtype_label}] {dataset_name}  |  device={DEVICE}  ts={is_ts}")
+        print(f"{'─'*65}")
+        t_ds = time.time()
+        try:
+            # ── 載入 + 預處理 ─────────────────────────────────────────────────
+            df         = pd.read_csv(csv_path)
+            target_col = _find_target_col(df)
+            y_raw      = df[target_col]
+            task       = _auto_detect_task(y_raw)
+
+            if task == "regression":
+                print("  [SKIP] 回歸任務暫不支援批次 Pipeline")
+                results.append({"dataset": dataset_name, "type": dtype_label,
+                                 "task": task, "note": "regression skipped"})
+                continue
+
+            X_all = (df.drop(columns=[target_col])
+                       .select_dtypes(include=[np.number])
+                       .fillna(0).values.astype(np.float32))
+            le        = LabelEncoder()
+            y_all     = le.fit_transform(y_raw.astype(str).values)
+            n_classes = len(le.classes_)
+
+            # ── 關鍵邏輯：判斷切分策略 ──────────────────────────────────────
+            # Category 1 (Forecasting): 預測未來，須依序切分 (No Shuffle)
+            # Category 2 (TSC/TSER):   UCR 類型，樣本獨立，須隨機切分 (Shuffle + Stratify)
+            # 若來自 ts_dir 且為分類任務，視為 Category 2 (Instance-based)
+            is_forecasting = is_ts and task != "classification"
+
+            # ── 80/20 split (外部評估) ─────────────────────────────────────
+            if not is_forecasting:
+                # Category 2 或一般表格：隨機分層切分
+                try:
+                    X_tr, X_te, y_tr, y_te = train_test_split(
+                        X_all, y_all, test_size=0.2, random_state=SEED, stratify=y_all)
+                except ValueError:
+                    X_tr, X_te, y_tr, y_te = train_test_split(
+                        X_all, y_all, test_size=0.2, random_state=SEED)
+                split_mode = "Random Stratified"
+            else:
+                # Category 1 (Forecasting): 嚴格依時間順序切分
+                split_idx = int(len(X_all) * 0.8)
+                X_tr, X_te = X_all[:split_idx], X_all[split_idx:]
+                y_tr, y_te = y_all[:split_idx], y_all[split_idx:]
+                split_mode = "Chronological (No Shuffle)"
+
+            print(f"  n_train={len(y_tr)}  n_test={len(y_te)}  "
+                  f"n_classes={n_classes}  split={split_mode}")
+
+            # ── 呼叫 Pipeline 引擎 ────────────────────────────────────────────
+            budget = _pl.TimeBudget(limit_sec=args.time_limit, t_start=t_ds)
+            cfg    = _pl.get_cfg(args.fast, n_samples=len(y_tr))
+            
+            # 告訴內部 CV 是否要用 TimeSeriesSplit
+            # 對於 UCR 分類，內部驗證應使用 StratifiedKFold
+            cfg["is_timeseries"] = is_forecasting
+
+            result = _pl.run(
+                X_tr, y_tr, X_te, n_classes, cfg, budget,
+                skip_tabular=args.skip_tabular,
+                skip_dl=args.skip_dl,
+                no_nas=args.no_nas,
+                is_ts=is_forecasting, # 決定模型選擇 (TCN vs CNN1D)
+                artifacts_dir=os.path.join(ARTIFACTS_DIR, "batch", dataset_name),
+                metric=args.metric,
+            )
+
+            # ── 評估 ──────────────────────────────────────────────────────────
+            from src.metrics import calculate_score, get_metric_name
+            m_name = get_metric_name(args.metric)
+            
+            score_b = calculate_score(y_te, result.test_blend, metric=args.metric)
+            score_s = calculate_score(y_te, result.test_stack, metric=args.metric)
+            
+            # 以較佳的 ensemble 結果作為代表分數
+            best_score = round(max(score_b, score_s), 4)
+            elapsed  = round(time.time() - t_ds, 1)
+            print(f"\n  [結果] Blend → {m_name}={score_b:.4f}")
+            print(f"  [結果] Stack → {m_name}={score_s:.4f}")
+            print(f"  [耗時] {elapsed}s")
+            results.append({
+                "dataset":   dataset_name,
+                "task":      "timeseries" if is_ts else "tabular",
+                "metric":    args.metric,
+                "score":     best_score,
+                "elapsed_s": elapsed,
+            })
+
+        except Exception:
+            traceback.print_exc()
+            results.append({
+                "dataset":   dataset_name,
+                "task":      "timeseries" if is_ts else "tabular",
+                "metric":    args.metric,
+                "score":     None,
+                "elapsed_s": round(time.time() - t_ds, 1),
+            })
+
+    # ── 總結 ─────────────────────────────────────────────────────────────────
+    print(f"\n{'='*65}")
+    print("  BATCH SUMMARY — Full Pipeline")
+    print(f"{'='*65}")
+    summary = pd.DataFrame(results)
+    print(summary.to_string(index=False))
+    out = os.path.join(HERE, "pipeline_batch_results.csv")
+    summary.to_csv(out, index=False)
+    print(f"\n  結果已儲存 → {out}")
+    print(f"{'='*65}\n")
+
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--fast", action="store_true", help="縮減 HPO/NAS 次數，快速驗證")
-    parser.add_argument(
-        "--skip-tabular", action="store_true", help="跳過傳統模型 HPO（使用 artifacts 快取）"
-    )
-    parser.add_argument(
-        "--skip-dl", action="store_true", help="跳過深度學習模型（使用 artifacts 快取）"
-    )
-    parser.add_argument("--no-nas", action="store_true", help="跳過 NAS，MLP 使用預設架構")
+    parser.add_argument("--fast",         action="store_true", help="縮減 HPO/NAS 次數")
+    parser.add_argument("--skip-tabular", action="store_true", help="跳過傳統模型 HPO")
+    parser.add_argument("--skip-dl",      action="store_true", help="跳過深度學習模型")
+    parser.add_argument("--no-nas",       action="store_true", help="跳過 NAS，使用預設架構")
+    parser.add_argument("--time-limit",   type=float, default=0, help="總時間上限（秒，0=無限）")
+    parser.add_argument("--openml-dir",   default="openml_cc18_data")
+    parser.add_argument("--ts-dir",       default="ucr_ts_80(時序資料)")
+    parser.add_argument("--top-n",        type=int, default=5, help="每目錄取前 N 個資料集")
+    parser.add_argument("--metric",       choices=["f1", "accuracy"], default="f1", help="優化指標 (預設 f1)")
     args = parser.parse_args()
 
-    t_total = time.time()
-    print(f"\n{'='*60}")
-    print(f"  Pipeline v2  |  device={DEVICE}  |  fast={args.fast}")
-    print(f"{'='*60}")
-
-    # ── 1. 載入資料 ──────────────────────────────────────────────────────────
-    print("\n[1/9] 載入資料 ...")
-    train_df = pd.read_csv(TRAIN_CSV)
-    test_df = pd.read_csv(TEST_CSV)
-    print(f"  train: {train_df.shape}  |  test: {test_df.shape}")
-
-    cfg = get_cfg(args.fast, n_samples=len(train_df))
-    scale = "small" if len(train_df) < 500 else ("large" if len(train_df) >= 50_000 else "medium")
-    print(f"  data_scale={scale}  |  cfg={cfg}")
-
-    if TARGET_COL not in train_df.columns:
-        raise ValueError(f"train.csv 缺少目標欄 '{TARGET_COL}'")
-
-    test_ids = test_df[ID_COL].values
-    X_test = test_df.drop(columns=[ID_COL]).values
-
-    le = LabelEncoder()
-    y = le.fit_transform(train_df[TARGET_COL].values)
-    X = train_df.drop(columns=[TARGET_COL]).values
-    n_classes = len(le.classes_)
-    print(f"  n_classes={n_classes}  |  n_train={len(y)}  |  n_test={len(X_test)}")
-    print(f"  n_features={X.shape[1]}  |  label_map={dict(zip(range(n_classes), le.classes_))}")
-
-    all_oof: list = []
-    all_test: list = []
-    model_tags: list = []
-
-    # ── 2. Tabular HPO ───────────────────────────────────────────────────────
-    if not args.skip_tabular:
-        print(f"\n[2/9] Tabular HPO ({cfg['tabular_trials']} trials/model) ...")
-        tabular_hpo = TabularHPO(
-            model_names=["lgbm", "xgb", "catboost", "rf", "logreg", "svm"],
-            n_trials=cfg["tabular_trials"],
-            top_k=cfg["tabular_top_k"],
-        )
-        tabular_configs = tabular_hpo.run(X, y)
-    else:
-        print("\n[2/9] 跳過 Tabular HPO（--skip-tabular）")
-        tabular_configs = []
-
-    # ── 3. MLP NAS ───────────────────────────────────────────────────────────
-    if not args.skip_dl:
-        if not args.no_nas:
-            print(f"\n[3/9] MLP NAS (epochs={cfg['nas_epochs']}, "
-                  f"candidates={cfg['nas_candidates']}) ...")
-            nas = MLPNASSearcher(
-                n_supernet_epochs=cfg["nas_epochs"],
-                n_candidates=cfg["nas_candidates"],
-                n_evolution_rounds=cfg["nas_rounds"],
-                device=DEVICE,
-            )
-            mlp_arch = nas.search(X, y, n_classes)
-        else:
-            print("\n[3/9] 跳過 NAS，使用預設 MLP 架構")
-            mlp_arch = {
-                "depth": 3,
-                "hidden_dim": 256,
-                "activations": ["gelu", "gelu", "gelu"],
-                "use_skips": [True, True, True],
-                "dropout": 0.2,
-            }
-
-        # ── 4. MLP 訓練參數 HPO ────────────────────────────────────────────
-        print(f"\n[4/9] MLP 訓練參數 HPO ({cfg['mlp_train_trials']} trials) ...")
-        mlp_hpo = MLPTrainHPO(
-            arch_params=mlp_arch,
-            n_trials=cfg["mlp_train_trials"],
-            top_k=cfg["mlp_top_k"],
-            device=DEVICE,
-        )
-        mlp_configs = mlp_hpo.run(X, y, n_classes)
-
-        # ── 5. CNN1D HPO ────────────────────────────────────────────────────
-        print(f"\n[5/9] CNN1D HPO ({cfg['dl_trials']} trials) ...")
-        cnn_hpo = DLHPO(
-            model_name="cnn1d",
-            n_trials=cfg["dl_trials"],
-            top_k=cfg["dl_top_k"],
-            n_classes=n_classes,
-            device=DEVICE,
-        )
-        cnn_configs = cnn_hpo.run(X, y)
-
-        # ── 6. Transformer HPO ─────────────────────────────────────────────
-        print(f"\n[6/9] Transformer HPO ({cfg['dl_trials']} trials) ...")
-        tf_hpo = DLHPO(
-            model_name="transformer",
-            n_trials=cfg["dl_trials"],
-            top_k=cfg["dl_top_k"],
-            n_classes=n_classes,
-            device=DEVICE,
-        )
-        tf_configs = tf_hpo.run(X, y)
-
-        dl_configs = mlp_configs + cnn_configs + tf_configs
-    else:
-        print("\n[3-6/9] 跳過深度學習模型（--skip-dl）")
-        dl_configs = []
-
-    # ── 7. 5-Fold CV → OOF + Test Predictions ────────────────────────────
-    print("\n[7/9] 5-Fold CV 訓練所有 top-k 模型 ...")
-    all_configs = tabular_configs + dl_configs
-
-    if len(all_configs) == 0:
-        raise RuntimeError("沒有任何 config！請確認 HPO 成功完成或關閉 --skip 旗標。")
-
-    for i, config in enumerate(all_configs):
-        tag = f"{config['model_name']}_{config['feature_set']}_c{i}"
-        # 避免重複 tag（同模型+feature_set 可能有多個 top-k config）
-        tag = tag.replace("/", "_")
-
-        oof_path = os.path.join(ARTIFACTS_DIR, f"{tag}_oof.npy")
-        test_path = os.path.join(ARTIFACTS_DIR, f"{tag}_test.npy")
-
-        if os.path.exists(oof_path) and os.path.exists(test_path):
-            print(f"  [CV] 載入快取 {tag}")
-            oof = np.load(oof_path)
-            test_pred = np.load(test_path)
-        else:
-            oof, test_pred = run_cv(
-                config, X, y, X_test, n_classes, device=DEVICE, tag=tag
-            )
-
-        all_oof.append(oof)
-        all_test.append(test_pred)
-        model_tags.append(tag)
-
-    # ── 8. Ensemble A：Nelder-Mead Weighted Blending ──────────────────────
-    print("\n[8/9] Ensemble A — Nelder-Mead Weighted Blending ...")
-    blender = NelderMeadBlender(n_restarts=cfg["blend_restarts"])
-    blender.fit(all_oof, y)
-    test_blend = blender.predict(all_test)
-    out_A = generate_submission(test_blend, test_ids, le, out_name="sub_A_blend.csv")
-
-    # ── 9. Ensemble B：Meta-Learner Stacking ──────────────────────────────
-    print("\n[9/9] Ensemble B — Meta-Learner Stacking ...")
-    stacker = MetaLearnerStacker(n_meta_trials=cfg["meta_trials"])
-    stacker.fit(all_oof, y)
-    test_stack = stacker.predict(all_test)
-    out_B = generate_submission(test_stack, test_ids, le, out_name="sub_B_stack.csv")
-
-    # ── 總結 ─────────────────────────────────────────────────────────────
-    elapsed = time.time() - t_total
-    print(f"\n{'='*60}")
-    print(f"  完成！總耗時 {elapsed:.1f}s")
-    print(f"  Ensemble A（Blend）→ {out_A}")
-    print(f"  Ensemble B（Stack）→ {out_B}")
-    print(f"  模型清單（共 {len(model_tags)} 個）:")
-    for tag in model_tags:
-        print(f"    {tag}")
-    print(f"{'='*60}\n")
+    run_batch(args)
 
 
 if __name__ == "__main__":

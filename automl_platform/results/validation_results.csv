@@ -1,3 +1,0 @@
-﻿dataset,type,task,n_train,n_test,n_features_raw,pipeline_elapsed_sec,pipeline_accuracy,pipeline_f1_macro,baseline_elapsed_sec,baseline_accuracy,baseline_f1_macro
-1049_pc4,tabular,classification,1166,292,37,50.1,0.90411,0.739949,53.7,0.893836,0.751476
-CLS_ACSF1,timeseries,classification,160,40,1460,30.3,0.8,0.768997,32.4,0.825,0.824711

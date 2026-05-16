@@ -2,9 +2,13 @@
 run_baseline.py  ─  對照組：AutoGluon TabularPredictor
 
 用法：
+  # 批次模式（openml_cc18_data/ 前 N 個 + ucr_ts_80(時序資料)/ 前 N 個）
+  python run_baseline.py --batch
+  python run_baseline.py --batch --top-n 5 --time-budget 120 --presets medium_quality
+
+  # 單一資料集
   python run_baseline.py --csv openml_cc18_data/22_mfeat-zernike.csv
   python run_baseline.py --csv openml_cc18_data/22_mfeat-zernike.csv --time-budget 120
-  python run_baseline.py --csv openml_cc18_data/22_mfeat-zernike.csv --compare --trials 20
 """
 import argparse
 import os
@@ -58,29 +62,193 @@ def print_metrics(task: str, y_true, y_pred, label: str = ""):
         print(f"{prefix} R2       : {r2_score(y_true, y_pred):.4f}")
 
 
+def get_metrics(task: str, y_true, y_pred) -> dict:
+    if task == "classification":
+        le = LabelEncoder()
+        yt = le.fit_transform(pd.Series(y_true).astype(str))
+        try:
+            yp = le.transform(pd.Series(y_pred).astype(str))
+        except ValueError:
+            yp = np.zeros_like(yt)
+        return {
+            "accuracy": round(accuracy_score(yt, yp), 4),
+            "f1_macro": round(f1_score(yt, yp, average="macro", zero_division=0), 4),
+        }
+    else:
+        rmse = float(np.sqrt(mean_squared_error(y_true, y_pred)))
+        r2 = float(r2_score(y_true, y_pred))
+        return {"rmse": round(rmse, 4), "r2": round(r2, 4)}
+
+
+def _find_datasets(openml_dir: str, ts_dir: str, top_n: int):
+    """回傳 (csv_path, is_ts) 的列表：前 top_n 個 OpenML + 前 top_n 個 UCR。"""
+    openml_files = sorted(f for f in os.listdir(openml_dir) if f.endswith(".csv"))[:top_n]
+    ts_files = sorted(f for f in os.listdir(ts_dir) if f.endswith(".csv"))[:top_n]
+    return (
+        [(os.path.join(openml_dir, f), False) for f in openml_files] +
+        [(os.path.join(ts_dir, f), True) for f in ts_files]
+    )
+
+
+# ── 批次模式 ──────────────────────────────────────────────────────────────────
+
+def run_batch(args):
+    openml_dir = os.path.join(HERE, args.openml_dir)
+    ts_dir = os.path.join(HERE, args.ts_dir)
+
+    if not os.path.isdir(openml_dir):
+        print(f"[錯誤] 找不到 OpenML 目錄：{openml_dir}")
+        sys.exit(1)
+    if not os.path.isdir(ts_dir):
+        print(f"[錯誤] 找不到 UCR 目錄：{ts_dir}")
+        sys.exit(1)
+
+    datasets = _find_datasets(openml_dir, ts_dir, args.top_n)
+    print(f"\n{'='*65}")
+    print(f"  AutoGluon 批次基準  ─  {len(datasets)} 個資料集  "
+          f"（OpenML×{args.top_n} + UCR×{args.top_n}）")
+    print(f"{'='*65}")
+
+    results = []
+
+    for csv_path, is_ts in datasets:
+        dataset_name = os.path.splitext(os.path.basename(csv_path))[0]
+        dtype_label = "TS" if is_ts else "Tab"
+        print(f"\n[{dtype_label}] {dataset_name}")
+
+        t0 = time.time()
+        try:
+            df = pd.read_csv(csv_path)
+            target_col = find_target_col(df)
+            y = df[target_col]
+            X = df.drop(columns=[target_col]).dropna(axis=1, how="all")
+            task = auto_detect_task(y)
+
+            ag_task = (
+                ("multiclass" if y.nunique() > 2 else "binary")
+                if task == "classification" else task
+            )
+
+            stratify = y if task == "classification" else None
+            try:
+                X_tr, X_te, y_tr, y_te = train_test_split(
+                    X, y, test_size=args.test_size, random_state=args.seed, stratify=stratify
+                )
+            except ValueError:
+                X_tr, X_te, y_tr, y_te = train_test_split(
+                    X, y, test_size=args.test_size, random_state=args.seed
+                )
+
+            train_df = X_tr.copy()
+            train_df[target_col] = y_tr.values
+            test_df = X_te.copy()
+            test_with_label = test_df.copy()
+            test_with_label[target_col] = y_te.values
+
+            ag_dir = os.path.join(HERE, "autogluon_models", dataset_name)
+            if os.path.exists(ag_dir):
+                shutil.rmtree(ag_dir, ignore_errors=True)
+
+            predictor = TabularPredictor(
+                label=target_col,
+                problem_type=ag_task,
+                path=ag_dir,
+                verbosity=0,
+            ).fit(
+                train_df,
+                time_limit=args.time_budget,
+                presets=args.presets,
+                dynamic_stacking=False,
+                excluded_model_types=["FASTAI", "NeuralNetTorch"],
+                ag_args_ensemble={"fold_fitting_strategy": "sequential_local"},
+            )
+
+            y_pred = predictor.predict(test_df).values
+            metrics = get_metrics(task, y_te.values, y_pred)
+            elapsed = round(time.time() - t0, 1)
+
+            row = {
+                "dataset": dataset_name,
+                "type": dtype_label,
+                "task": task,
+                "n_train": len(X_tr),
+                "n_test": len(X_te),
+                **metrics,
+                "elapsed_s": elapsed,
+            }
+            results.append(row)
+
+            if task == "classification":
+                print(f"  Accuracy={metrics['accuracy']:.4f}  "
+                      f"F1={metrics['f1_macro']:.4f}  ({elapsed}s)")
+            else:
+                print(f"  RMSE={metrics.get('rmse', '?'):.4f}  "
+                      f"R2={metrics.get('r2', '?'):.4f}  ({elapsed}s)")
+
+        except Exception as exc:
+            elapsed = round(time.time() - t0, 1)
+            print(f"  [ERROR] {exc}")
+            results.append({
+                "dataset": dataset_name,
+                "type": dtype_label,
+                "task": "?",
+                "n_train": 0,
+                "n_test": 0,
+                "error": str(exc)[:80],
+                "elapsed_s": elapsed,
+            })
+
+    # ── 總結 ─────────────────────────────────────────────────────────────────
+    print(f"\n{'='*65}")
+    print("  BATCH SUMMARY — AutoGluon Baseline")
+    print(f"{'='*65}")
+    summary = pd.DataFrame(results)
+    print(summary.to_string(index=False))
+
+    out_path = os.path.join(HERE, "baseline_batch_results.csv")
+    summary.to_csv(out_path, index=False)
+    print(f"\n  結果已儲存 → {out_path}")
+    print(f"{'='*65}\n")
+
+
 # ── 主程式 ───────────────────────────────────────────────────────────────────
 
 def main():
     parser = argparse.ArgumentParser(
         description="對照組：AutoGluon TabularPredictor"
     )
-    parser.add_argument("--csv",         required=True,  help="CSV 檔案路徑")
+    parser.add_argument("--csv",         default=None,   help="CSV 檔案路徑（單一模式）")
     parser.add_argument("--target",      default=None,   help="目標欄位名稱（預設自動偵測）")
     parser.add_argument("--task",        default=None,   choices=["classification", "regression"])
-    parser.add_argument("--time-budget", type=int, default=120, help="訓練時間上限（秒，預設 120）")
+    parser.add_argument("--time-budget", type=int, default=1000, help="訓練時間上限（秒，預設 120）")
     parser.add_argument("--presets",     default="medium_quality",
                         choices=["medium_quality", "good_quality", "best_quality"],
                         help="AutoGluon presets（預設 medium_quality）")
     parser.add_argument("--test-size",   type=float, default=0.2)
     parser.add_argument("--seed",        type=int,   default=42)
-    parser.add_argument("--output-dir",  default="autogluon_models", help="AutoGluon 模型儲存目錄")
-    parser.add_argument("--compare",     action="store_true",
-                        help="同時執行自製 Pipeline 進行對比")
-    parser.add_argument("--trials",      type=int, default=20,
-                        help="自製 Pipeline HPO 試驗次數（--compare 時有效）")
+    parser.add_argument("--output-dir",  default="autogluon_models", help="AutoGluon 模型儲存目錄（單一模式）")
+
+    # ── 批次模式 ──────────────────────────────────────────────────────────────
+    parser.add_argument("--batch",      action="store_true",
+                        help="批次模式：自動跑前 top-n 個 OpenML + UCR 資料集")
+    parser.add_argument("--openml-dir", default="openml_cc18_data",
+                        help="OpenML CSV 目錄（預設 openml_cc18_data）")
+    parser.add_argument("--ts-dir",     default="ucr_ts_80(時序資料)",
+                        help="UCR 時序 CSV 目錄")
+    parser.add_argument("--top-n",      type=int, default=1,
+                        help="每個目錄取前幾個資料集（預設 5）")
+    
     args = parser.parse_args()
 
-    # 載入資料
+    # ── 批次模式 ──────────────────────────────────────────────────────────────
+    if args.batch:
+        run_batch(args)
+        return
+
+    # ── 單一 CSV 模式 ─────────────────────────────────────────────────────────
+    if not args.csv:
+        parser.error("單一模式需指定 --csv，或使用 --batch 執行批次模式")
+
     csv_path = os.path.abspath(args.csv)
     if not os.path.exists(csv_path):
         print(f"[錯誤] 找不到檔案：{csv_path}")
@@ -103,7 +271,6 @@ def main():
     print(f"  目標欄  : {target_col}  |  任務 : {task}")
     print(f"  Presets : {args.presets}  |  時間上限 : {args.time_budget}s")
 
-    # 切割
     stratify = y if task == "classification" else None
     try:
         X_train, X_test, y_train, y_test = train_test_split(
@@ -116,15 +283,12 @@ def main():
 
     print(f"  訓練集  : {len(X_train)}  |  測試集 : {len(X_test)}\n")
 
-    # ── AutoGluon ────────────────────────────────────────────────────────────
     train_df = X_train.copy()
     train_df[target_col] = y_train.values
-
     test_df = X_test.copy()
 
-    ag_task = "multiclass" if (task == "classification" and y.nunique() > 2) else task
+    ag_task = ("multiclass" if y.nunique() > 2 else "binary") if task == "classification" else task
 
-    # 清理舊的模型目錄，避免覆寫警告與殘留狀態
     if os.path.exists(args.output_dir):
         shutil.rmtree(args.output_dir, ignore_errors=True)
 
@@ -155,55 +319,6 @@ def main():
     print(f"\n  --- AutoGluon 模型排行榜 ---")
     leaderboard = predictor.leaderboard(test_df.assign(**{target_col: y_test.values}), silent=True)
     print(leaderboard[["model", "score_test", "score_val", "fit_time"]].to_string(index=False))
-
-    # ── 自製 Pipeline（可選）────────────────────────────────────────────────
-    if args.compare:
-        print(f"\n{'='*60}")
-        print(f"  自製 AutoML Pipeline  （HPO trials={args.trials}）")
-        print(f"{'='*60}")
-        try:
-            from automl_platform.pipeline import AutoMLPipeline
-            t0 = time.time()
-            pipeline = AutoMLPipeline(
-                task=task,
-                n_hpo_trials=args.trials,
-                n_folds=5,
-                top_k_hpo=5,
-                use_nas=True,
-                mi_k=50,
-                poly_max_cols=10,
-                use_shap_pruning=True,
-            )
-            pipeline.fit(X_train, y_train)
-            y_pred_custom = pipeline.predict(X_test)
-            custom_elapsed = time.time() - t0
-
-            print(f"\n  自製 Pipeline 測試集結果  （耗時 {custom_elapsed:.1f}s）")
-            print_metrics(task, y_test.values, y_pred_custom, "CustomPipeline")
-
-            # 差異摘要
-            metric_key = "Accuracy" if task == "classification" else "R2"
-            le = LabelEncoder()
-            yt = le.fit_transform(pd.Series(y_test).astype(str))
-            try:
-                yp_ag  = le.transform(pd.Series(y_pred_ag).astype(str))
-                yp_cus = le.transform(pd.Series(y_pred_custom).astype(str))
-            except ValueError:
-                yp_ag = yp_cus = np.zeros_like(yt)
-
-            if task == "classification":
-                ag_score  = accuracy_score(yt, yp_ag)
-                cus_score = accuracy_score(yt, yp_cus)
-            else:
-                ag_score  = r2_score(y_test, y_pred_ag)
-                cus_score = r2_score(y_test, y_pred_custom)
-
-            delta = cus_score - ag_score
-            sign  = "+" if delta >= 0 else ""
-            print(f"\n  {metric_key} 差異：自製 {cus_score:.4f}  vs  AutoGluon {ag_score:.4f}  ({sign}{delta:.4f})")
-
-        except Exception as e:
-            print(f"  [CustomPipeline] 執行失敗：{e}")
 
     print(f"\n{'='*60}\n")
 

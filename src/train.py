@@ -21,9 +21,10 @@ from sklearn.metrics import f1_score
 from tqdm import tqdm
 
 from .config import SEED, DEVICE, ARTIFACTS_DIR
-from .data import get_folds, make_loader
+from .data import get_folds, get_ts_folds, make_loader
 from .preprocess import FeatureBuilder
 from .models.tabular import build_tabular_model
+from .metrics import calculate_score, get_metric_name
 
 
 # ── Mixup ────────────────────────────────────────────────────────────────────
@@ -38,6 +39,29 @@ def _mixup_batch(x: torch.Tensor, y: torch.Tensor, alpha: float, device: str):
 
 def _mixup_loss(criterion, logits, y_a, y_b, lam):
     return lam * criterion(logits, y_a) + (1 - lam) * criterion(logits, y_b)
+
+
+def _aug_1d(x: torch.Tensor, device: str) -> torch.Tensor:
+    """Random reverse, Gaussian noise, Random Shift for 1D signals."""
+    is_2d = x.ndim == 2
+    if is_2d:
+        x = x.unsqueeze(1)
+    
+    B, C, F = x.shape
+    if np.random.rand() < 0.5:
+        x = x + torch.randn_like(x) * 0.01
+    if np.random.rand() < 0.5:
+        x = x.flip(dims=[-1])
+    if np.random.rand() < 0.5:
+        shift = np.random.randint(-int(F * 0.05), int(F * 0.05))
+        if shift > 0:
+            x = torch.cat([torch.zeros((B, C, shift), device=device), x[:, :, :-shift]], dim=-1)
+        elif shift < 0:
+            x = torch.cat([x[:, :, -shift:], torch.zeros((B, C, -shift), device=device)], dim=-1)
+
+    if is_2d:
+        x = x.squeeze(1)
+    return x
 
 
 # ── DL 模型建構 ──────────────────────────────────────────────────────────────
@@ -82,6 +106,36 @@ def _build_dl_model(
             dropout=arch_params["dropout"],
             n_classes=n_classes,
         )
+    if model_name == "resnet1d":
+        from .models.cnn1d import ResNet1D_18
+        return ResNet1D_18(
+            in_features=in_features,
+            channels=arch_params.get("channels", 64),
+            dropout=arch_params.get("dropout", 0.2),
+            n_classes=n_classes,
+        )
+    if model_name == "tcn":
+        from .models.cnn1d import TCN
+        return TCN(
+            in_features=in_features,
+            n_blocks=arch_params["n_blocks"],
+            channels=arch_params["channels"],
+            kernel_size=arch_params["kernel_size"],
+            dropout=arch_params["dropout"],
+            n_classes=n_classes,
+        )
+    if model_name == "patchtst":
+        from .models.transformer import PatchTST
+        return PatchTST(
+            in_features=in_features,
+            patch_size=arch_params["patch_size"],
+            d_model=arch_params["d_model"],
+            n_heads=arch_params["n_heads"],
+            depth=arch_params["depth"],
+            ff_dim=arch_params["ff_dim"],
+            dropout=arch_params["dropout"],
+            n_classes=n_classes,
+        )
     raise ValueError(f"Unknown DL model: {model_name}")
 
 
@@ -97,6 +151,8 @@ def train_dl_single_fold(
     y_val: np.ndarray,
     n_classes: int,
     device: str = None,
+    global_cfg: dict = None,
+    metric: str = "f1",
 ) -> float:
     """
     訓練單一 fold，回傳 Val Macro F1。
@@ -108,6 +164,8 @@ def train_dl_single_fold(
 
     in_features = X_tr.shape[1]
     model = _build_dl_model(model_name, arch_params, in_features, n_classes).to(device)
+    global_cfg = global_cfg or {}
+    use_1d_aug = global_cfg.get("use_1d_aug", False)
 
     lr = train_params["lr"]
     wd = train_params["weight_decay"]
@@ -133,6 +191,8 @@ def train_dl_single_fold(
         model.train()
         for xb, yb in train_loader:
             xb, yb = xb.to(device), yb.to(device)
+            if use_1d_aug:
+                xb = _aug_1d(xb, device)
             if ma > 0 and np.random.rand() < mp:
                 xb, ya, yb2, lam = _mixup_batch(xb, yb, ma, device)
                 logits = model(xb)
@@ -147,13 +207,12 @@ def train_dl_single_fold(
         scheduler.step()
 
         # 驗證
-        model.eval()
         with torch.no_grad():
             preds = model(X_val_t).argmax(dim=1).cpu().numpy()
-        val_f1 = f1_score(y_val, preds, average="macro", zero_division=0)
+        val_score = calculate_score(y_val, preds, metric=metric)
 
-        if val_f1 > best_f1:
-            best_f1 = val_f1
+        if val_score > best_f1:
+            best_f1 = val_score
             best_state = {k: v.cpu().clone() for k, v in model.state_dict().items()}
             patience_cnt = 0
         else:
@@ -169,6 +228,49 @@ def train_dl_single_fold(
     return best_f1
 
 
+# ── Tabular early-stop 包裝 ──────────────────────────────────────────────────
+
+def _fit_tabular_with_early_stop(
+    model, model_name: str,
+    X_tr: np.ndarray, y_tr: np.ndarray,
+    X_val: np.ndarray, y_val: np.ndarray,
+) -> None:
+    """
+    對 lgbm / xgb / catboost 使用 eval_set + early stopping 加速訓練。
+    其他模型直接 fit。
+    """
+    import lightgbm as lgb
+
+    if model_name == "lgbm":
+        model.fit(
+            X_tr, y_tr,
+            eval_set=[(X_val, y_val)],
+            callbacks=[
+                lgb.early_stopping(stopping_rounds=200, verbose=False),
+                lgb.log_evaluation(period=-1),
+            ],
+        )
+    elif model_name == "xgb":
+        model.fit(
+            X_tr, y_tr,
+            eval_set=[(X_val, y_val)],
+            verbose=False,
+        )
+    elif model_name == "catboost":
+        # CatBoost 已在 build_tabular_model 設定 od_type="Iter", od_wait=30
+        # 額外傳入 eval_set 可啟用更精準的 logloss 早停
+        try:
+            model.fit(
+                X_tr, y_tr,
+                eval_set=(X_val, y_val),
+                verbose=False,
+            )
+        except Exception:
+            model.fit(X_tr, y_tr)
+    else:
+        model.fit(X_tr, y_tr)
+
+
 # ── Tabular 5-Fold CV ────────────────────────────────────────────────────────
 
 def run_tabular_cv(
@@ -180,6 +282,8 @@ def run_tabular_cv(
     device: str = None,
     tag: str = None,
     save_artifacts: bool = True,
+    global_cfg: dict = None,
+    metric: str = "f1",
 ) -> tuple:
     """
     對一個 tabular config 執行 5-Fold CV。
@@ -187,34 +291,55 @@ def run_tabular_cv(
 
     config keys:
         model_name, feature_set, params
+
+    當 global_cfg["is_timeseries"]=True 時切換為 TimeSeriesSplit（Walk-forward），
+    確保訓練集永遠在驗證集之前。
     """
     device = device or DEVICE
+    global_cfg = global_cfg or {}
     tag = tag or f"{config['model_name']}_{config['feature_set']}"
-    folds = get_folds(y)
     n = len(y)
     oof = np.zeros((n, n_classes), dtype=np.float32)
+    oof_counts = np.zeros((n, 1), dtype=np.float32)
     test_preds = np.zeros((len(X_test), n_classes), dtype=np.float32)
 
-    fold_pbar = tqdm(enumerate(folds), total=len(folds), desc=f"  CV {tag:30s}", ncols=90)
-    for fold_idx, (tr_idx, val_idx) in fold_pbar:
-        fb = FeatureBuilder(feature_set=config["feature_set"])
-        X_tr = fb.fit_transform(X[tr_idx])
-        X_val = fb.transform(X[val_idx])
-        X_te = fb.transform(X_test)
+    is_ts = global_cfg.get("is_timeseries", False)
+    n_seeds = 1 if is_ts else global_cfg.get("n_seeds", 1)
+    n_repeats = 1 if is_ts else global_cfg.get("n_repeats", 1)
 
-        model = build_tabular_model(config["model_name"], config["params"], device=device)
-        model.fit(X_tr, y[tr_idx])
+    for seed_idx in range(n_seeds):
+        cur_seed = SEED + seed_idx * 100
+        if is_ts:
+            folds = get_ts_folds(n, n_splits=5)
+        else:
+            folds = get_folds(y, n_repeats=n_repeats, random_state=cur_seed)
 
-        oof[val_idx] = model.predict_proba(X_val)
-        test_preds += model.predict_proba(X_te) / len(folds)
-
-        val_f1 = f1_score(
-            y[val_idx], oof[val_idx].argmax(axis=1), average="macro", zero_division=0
+        fold_pbar = tqdm(
+            enumerate(folds), total=len(folds),
+            desc=f"  CV {tag[:20]:20s} (S{seed_idx})", ncols=90, leave=False
         )
-        fold_pbar.set_postfix({"fold_f1": f"{val_f1:.4f}"})
+        for fold_idx, (tr_idx, val_idx) in fold_pbar:
+            fb = FeatureBuilder(feature_set=config["feature_set"], global_cfg=global_cfg)
+            X_tr = fb.fit_transform(X[tr_idx])
+            X_val = fb.transform(X[val_idx])
+            X_te = fb.transform(X_test)
 
-    oof_f1 = f1_score(y, oof.argmax(axis=1), average="macro", zero_division=0)
-    print(f"  [CV] {tag:30s} OOF Macro F1 = {oof_f1:.4f}")
+            _cw = "balanced" if metric != "accuracy" else None
+            model = build_tabular_model(config["model_name"], config["params"], device=device, class_weight=_cw)
+            _fit_tabular_with_early_stop(model, config["model_name"], X_tr, y[tr_idx], X_val, y[val_idx])
+
+            oof[val_idx] += model.predict_proba(X_val)
+            oof_counts[val_idx] += 1
+            test_preds += model.predict_proba(X_te) / (len(folds) * n_seeds)
+
+            val_score = calculate_score(
+                y[val_idx], model.predict_proba(X_val).argmax(axis=1), metric=metric
+            )
+            fold_pbar.set_postfix({f"fold_{metric}": f"{val_score:.4f}"})
+
+    oof /= np.maximum(oof_counts, 1.0)
+    oof_score = calculate_score(y, oof.argmax(axis=1), metric=metric)
+    print(f"  [CV] {tag:30s} OOF {get_metric_name(metric)} = {oof_score:.4f}")
 
     if save_artifacts:
         np.save(os.path.join(ARTIFACTS_DIR, f"{tag}_oof.npy"), oof)
@@ -234,6 +359,8 @@ def run_dl_cv(
     device: str = None,
     tag: str = None,
     save_artifacts: bool = True,
+    global_cfg: dict = None,
+    metric: str = "f1",
 ) -> tuple:
     """
     對一個 DL config 執行 5-Fold CV。
@@ -243,10 +370,11 @@ def run_dl_cv(
         model_name, feature_set, arch_params, train_params
     """
     device = device or DEVICE
+    global_cfg = global_cfg or {}
     tag = tag or f"{config['model_name']}_{config['feature_set']}"
-    folds = get_folds(y)
     n = len(y)
     oof = np.zeros((n, n_classes), dtype=np.float32)
+    oof_counts = np.zeros((n, 1), dtype=np.float32)
     test_preds = np.zeros((len(X_test), n_classes), dtype=np.float32)
 
     train_params = config["train_params"]
@@ -257,88 +385,104 @@ def run_dl_cv(
     t_max = int(train_params["t_max"])
     n_epochs = int(train_params["n_epochs"])
     patience = int(train_params["patience"])
+    use_1d_aug = global_cfg.get("use_1d_aug", False)
 
-    for fold_idx, (tr_idx, val_idx) in enumerate(
-        tqdm(folds, desc=f"  CV {tag:30s}", ncols=90)
-    ):
-        torch.manual_seed(SEED + fold_idx)
+    is_ts = global_cfg.get("is_timeseries", False)
+    n_seeds = 1 if is_ts else global_cfg.get("n_seeds", 1)
+    n_repeats = 1 if is_ts else global_cfg.get("n_repeats", 1)
 
-        fb = FeatureBuilder(feature_set=config["feature_set"])
-        X_tr = fb.fit_transform(X[tr_idx])
-        X_val = fb.transform(X[val_idx])
-        X_te = fb.transform(X_test)
+    for seed_idx in range(n_seeds):
+        cur_seed = SEED + seed_idx * 100
+        if is_ts:
+            folds = get_ts_folds(n, n_splits=5)
+        else:
+            folds = get_folds(y, n_repeats=n_repeats, random_state=cur_seed)
 
-        in_features = X_tr.shape[1]
-        model = _build_dl_model(
-            config["model_name"], config["arch_params"], in_features, n_classes
-        ).to(device)
+        for fold_idx, (tr_idx, val_idx) in enumerate(
+            tqdm(folds, desc=f"  CV {tag[:20]:20s} (S{seed_idx})", ncols=90, leave=False)
+        ):
+            torch.manual_seed(cur_seed + fold_idx)
 
-        optimizer = torch.optim.AdamW(
-            model.parameters(),
-            lr=train_params["lr"],
-            weight_decay=train_params["weight_decay"],
-        )
-        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=t_max)
-        criterion = nn.CrossEntropyLoss(label_smoothing=ls)
+            fb = FeatureBuilder(feature_set=config["feature_set"], global_cfg=global_cfg)
+            X_tr = fb.fit_transform(X[tr_idx])
+            X_val = fb.transform(X[val_idx])
+            X_te = fb.transform(X_test)
 
-        train_loader = make_loader(X_tr, y[tr_idx], batch_size=bs, shuffle=True)
-        X_val_t = torch.tensor(X_val, dtype=torch.float32, device=device)
-        X_te_t = torch.tensor(X_te, dtype=torch.float32, device=device)
+            in_features = X_tr.shape[1]
+            model = _build_dl_model(
+                config["model_name"], config["arch_params"], in_features, n_classes
+            ).to(device)
 
-        best_f1, patience_cnt = 0.0, 0
-        best_state = None
+            optimizer = torch.optim.AdamW(
+                model.parameters(),
+                lr=train_params["lr"],
+                weight_decay=train_params["weight_decay"],
+            )
+            scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=t_max)
+            criterion = nn.CrossEntropyLoss(label_smoothing=ls)
 
-        epoch_pbar = tqdm(
-            range(n_epochs),
-            desc=f"    Fold {fold_idx + 1} epochs",
-            leave=False,
-            ncols=90,
-        )
-        for epoch in epoch_pbar:
-            model.train()
-            for xb, yb in train_loader:
-                xb, yb = xb.to(device), yb.to(device)
-                if ma > 0 and np.random.rand() < mp:
-                    xb, ya, yb2, lam = _mixup_batch(xb, yb, ma, device)
-                    logits = model(xb)
-                    loss = _mixup_loss(criterion, logits, ya, yb2, lam)
+            train_loader = make_loader(X_tr, y[tr_idx], batch_size=bs, shuffle=True)
+            X_val_t = torch.tensor(X_val, dtype=torch.float32, device=device)
+            X_te_t = torch.tensor(X_te, dtype=torch.float32, device=device)
+
+            best_f1, patience_cnt = 0.0, 0
+            best_state = None
+
+            epoch_pbar = tqdm(
+                range(n_epochs),
+                desc=f"    Fold {fold_idx + 1} epochs",
+                leave=False,
+                ncols=90,
+            )
+            for epoch in epoch_pbar:
+                model.train()
+                for xb, yb in train_loader:
+                    xb, yb = xb.to(device), yb.to(device)
+                    if use_1d_aug:
+                        xb = _aug_1d(xb, device)
+                    if ma > 0 and np.random.rand() < mp:
+                        xb, ya, yb2, lam = _mixup_batch(xb, yb, ma, device)
+                        logits = model(xb)
+                        loss = _mixup_loss(criterion, logits, ya, yb2, lam)
+                    else:
+                        logits = model(xb)
+                        loss = criterion(logits, yb)
+                    optimizer.zero_grad()
+                    loss.backward()
+                    nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                    optimizer.step()
+                scheduler.step()
+
+                with torch.no_grad():
+                    preds = model(X_val_t).argmax(dim=1).cpu().numpy()
+                val_score = calculate_score(y[val_idx], preds, metric=metric)
+                epoch_pbar.set_postfix({f"val_{metric}": f"{val_score:.4f}", "lr": f"{scheduler.get_last_lr()[0]:.2e}"})
+
+                if val_score > best_f1:
+                    best_f1 = val_score
+                    best_state = {k: v.cpu().clone() for k, v in model.state_dict().items()}
+                    patience_cnt = 0
                 else:
-                    logits = model(xb)
-                    loss = criterion(logits, yb)
-                optimizer.zero_grad()
-                loss.backward()
-                nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-                optimizer.step()
-            scheduler.step()
+                    patience_cnt += 1
+                    if patience_cnt >= patience:
+                        break
 
+            # 用最佳 checkpoint 產出預測
+            if best_state is not None:
+                model.load_state_dict({k: v.to(device) for k, v in best_state.items()})
             model.eval()
             with torch.no_grad():
-                preds = model(X_val_t).argmax(dim=1).cpu().numpy()
-            val_f1 = f1_score(y[val_idx], preds, average="macro", zero_division=0)
-            epoch_pbar.set_postfix({"val_f1": f"{val_f1:.4f}", "lr": f"{scheduler.get_last_lr()[0]:.2e}"})
+                fold_oof_probs = torch.softmax(model(X_val_t), dim=1).cpu().numpy()
+                oof[val_idx] += fold_oof_probs
+                oof_counts[val_idx] += 1
+                test_preds += torch.softmax(model(X_te_t), dim=1).cpu().numpy() / (len(folds) * n_seeds)
 
-            if val_f1 > best_f1:
-                best_f1 = val_f1
-                best_state = {k: v.cpu().clone() for k, v in model.state_dict().items()}
-                patience_cnt = 0
-            else:
-                patience_cnt += 1
-                if patience_cnt >= patience:
-                    break
+            if device.startswith("cuda"):
+                torch.cuda.empty_cache()
 
-        # 用最佳 checkpoint 產出預測
-        if best_state is not None:
-            model.load_state_dict({k: v.to(device) for k, v in best_state.items()})
-        model.eval()
-        with torch.no_grad():
-            oof[val_idx] = torch.softmax(model(X_val_t), dim=1).cpu().numpy()
-            test_preds += torch.softmax(model(X_te_t), dim=1).cpu().numpy() / len(folds)
-
-        if device.startswith("cuda"):
-            torch.cuda.empty_cache()
-
-    oof_f1 = f1_score(y, oof.argmax(axis=1), average="macro", zero_division=0)
-    print(f"  [CV] {tag:30s} OOF Macro F1 = {oof_f1:.4f}")
+    oof /= np.maximum(oof_counts, 1.0)
+    oof_score = calculate_score(y, oof.argmax(axis=1), metric=metric)
+    print(f"  [CV] {tag:30s} OOF {get_metric_name(metric)} = {oof_score:.4f}")
 
     if save_artifacts:
         np.save(os.path.join(ARTIFACTS_DIR, f"{tag}_oof.npy"), oof)
@@ -358,11 +502,13 @@ def run_cv(
     device: str = None,
     tag: str = None,
     save_artifacts: bool = True,
+    global_cfg: dict = None,
+    metric: str = "f1",
 ) -> tuple:
     """
     根據 config["model_name"] 自動選擇 run_tabular_cv 或 run_dl_cv。
     """
-    dl_models = {"mlp", "cnn1d", "transformer"}
+    dl_models = {"mlp", "cnn1d", "resnet1d", "transformer", "tcn", "patchtst"}
     if config["model_name"] in dl_models:
-        return run_dl_cv(config, X, y, X_test, n_classes, device, tag, save_artifacts)
-    return run_tabular_cv(config, X, y, X_test, n_classes, device, tag, save_artifacts)
+        return run_dl_cv(config, X, y, X_test, n_classes, device, tag, save_artifacts, global_cfg, metric)
+    return run_tabular_cv(config, X, y, X_test, n_classes, device, tag, save_artifacts, global_cfg, metric)

@@ -2,15 +2,29 @@
 import numpy as np
 import torch
 from torch.utils.data import Dataset, DataLoader
-from sklearn.model_selection import StratifiedKFold
+from sklearn.model_selection import StratifiedKFold, RepeatedStratifiedKFold, TimeSeriesSplit
 
-from .config import SEED, N_SPLITS
+from .config import SEED
 
 
-def get_folds(y: np.ndarray) -> list:
+def get_folds(y: np.ndarray, n_splits: int = 5, n_repeats: int = 1, random_state: int = SEED) -> list:
     """回傳 5-Fold stratified 切割索引列表。"""
-    skf = StratifiedKFold(n_splits=N_SPLITS, shuffle=True, random_state=SEED)
-    return list(skf.split(np.zeros(len(y)), y))
+    if n_repeats > 1:
+        cv = RepeatedStratifiedKFold(n_splits=n_splits, n_repeats=n_repeats, random_state=random_state)
+    else:
+        cv = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=random_state)
+    return list(cv.split(np.zeros(len(y)), y))
+
+
+def get_ts_folds(n_samples: int, n_splits: int = 5) -> list:
+    """
+    時間序列 Walk-forward 驗證切割。
+    使用 TimeSeriesSplit 確保訓練集永遠在驗證集之前（無 Look-ahead Bias）。
+    越靠近測試集的 fold（fold index 越大）代表越新的時段。
+    """
+    tscv = TimeSeriesSplit(n_splits=n_splits)
+    dummy = np.zeros((n_samples, 1))
+    return list(tscv.split(dummy))
 
 
 class TabularDataset(Dataset):
