@@ -774,3 +774,124 @@ class MLPTrainHPO:
         print(f"  [HPO] MLP-train best {get_metric_name(self.metric)} = {best:.4f}  "
               f"feature_set = {top[0]['feature_set'] if top else '-'}")
         return top
+
+
+# ── TSNet 訓練參數 HPO（架構由 TSNASSearcher 傳入）────────────────────────────
+
+class TSNetTrainHPO:
+    """
+    針對 TSNet 搜尋訓練超參數，輸出 model_name="tsnet" 的 config。
+
+    使用 get_ts_folds（Walk-forward）切割，feature_set 從 TS_DL_FEATURE_SETS 搜尋。
+    """
+
+    def __init__(
+        self,
+        arch_params: dict,
+        n_trials: int = 30,
+        top_k: int = 2,
+        device: str = None,
+        metric: str = "f1",
+    ):
+        self.arch_params = arch_params
+        self.n_trials = n_trials
+        self.top_k = top_k
+        self.device = device
+        self.metric = metric
+
+    def run(self, X: np.ndarray, y: np.ndarray, n_classes: int, global_cfg: dict = None) -> list:
+        """
+        回傳 list of config dict，每個 dict 含：
+            model_name="tsnet", feature_set, arch_params, train_params, score
+        """
+        global_cfg = global_cfg or {}
+        from .config import DEVICE
+        from .train import train_dl_single_fold
+
+        device = self.device or DEVICE
+
+        # 時序切割：使用 Walk-forward 的第一個 fold 做快速評估
+        fold_splits = get_ts_folds(len(X), n_splits=5)
+        tr_idx, val_idx = fold_splits[0]
+
+        trial_records = []
+
+        def objective(trial):
+            import torch
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+
+            fs = trial.suggest_categorical("feature_set", TS_DL_FEATURE_SETS)
+            fb = FeatureBuilder(feature_set=fs, global_cfg=global_cfg)
+            X_tr = fb.fit_transform(X[tr_idx])
+            X_val = fb.transform(X[val_idx])
+            train_p = _dl_train_space(trial)
+
+            _device = device
+            try:
+                score = train_dl_single_fold(
+                    model_name="tsnet",
+                    arch_params=self.arch_params,
+                    train_params=train_p,
+                    X_tr=X_tr,
+                    y_tr=y[tr_idx],
+                    X_val=X_val,
+                    y_val=y[val_idx],
+                    n_classes=n_classes,
+                    device=_device,
+                    global_cfg=global_cfg,
+                )
+            except (RuntimeError, Exception) as e:
+                if "CUDA" in str(e) or "out of memory" in str(e).lower():
+                    import torch as _torch
+                    _torch.cuda.empty_cache()
+                    score = train_dl_single_fold(
+                        model_name="tsnet",
+                        arch_params=self.arch_params,
+                        train_params=train_p,
+                        X_tr=X_tr,
+                        y_tr=y[tr_idx],
+                        X_val=X_val,
+                        y_val=y[val_idx],
+                        n_classes=n_classes,
+                        device="cpu",
+                        global_cfg=global_cfg,
+                    )
+                else:
+                    raise
+
+            trial.set_user_attr("feature_set", fs)
+            trial.set_user_attr("train_params", train_p)
+            return score
+
+        sampler = optuna.samplers.TPESampler(seed=SEED)
+        study = optuna.create_study(direction="maximize", sampler=sampler)
+
+        with tqdm(total=self.n_trials, desc="HPO TSNet-train ", unit="trial", ncols=80) as pbar:
+            def _cb(study, trial, _pbar=pbar):
+                _pbar.update(1)
+                try:
+                    if study.best_trial:
+                        _pbar.set_postfix({f"best_{self.metric}": f"{study.best_value:.4f}"})
+                except ValueError:
+                    pass
+
+            study.optimize(objective, n_trials=self.n_trials, callbacks=[_cb],
+                           catch=(Exception,))
+
+        for t in study.trials:
+            if t.value is not None:
+                trial_records.append({
+                    "model_name": "tsnet",
+                    "feature_set": t.user_attrs.get("feature_set", "raw"),
+                    "arch_params": self.arch_params,
+                    "train_params": t.user_attrs.get("train_params", {}),
+                    "score": t.value,
+                })
+
+        trial_records.sort(key=lambda x: x["score"], reverse=True)
+        top = trial_records[:self.top_k]
+        best = top[0]["score"] if top else float("nan")
+        print(f"  [HPO] TSNet-train best {get_metric_name(self.metric)} = {best:.4f}  "
+              f"feature_set = {top[0]['feature_set'] if top else '-'}")
+        return top

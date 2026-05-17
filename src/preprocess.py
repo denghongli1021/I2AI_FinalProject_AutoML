@@ -81,7 +81,8 @@ def robust_clean_dataframe(df: pd.DataFrame, target_col: str = None) -> pd.DataF
 
     return df
 
-FEATURE_SETS = ["raw", "signal", "pca64", "svd64", "kpca32", "raw_stat", "raw_stat_fft", "poly2"]
+FEATURE_SETS = ["raw", "signal", "pca64", "svd64", "kpca32", "raw_stat", "raw_stat_fft", "poly2",
+                "ts_tabular", "ts_tabular_fft"]
 
 # 各模型類型可使用的特徵集候選（供 HPO 用）
 # poly2: Top-30 特徵的 degree-2 交互項，補捉非線性關係；移除對表格資料意義不大的 raw_stat_fft
@@ -93,8 +94,8 @@ MLP_FEATURE_SETS = ["raw", "raw_stat", "raw_stat_fft", "signal"]
 CNN_FEATURE_SETS = ["raw", "signal"]
 TRANSFORMER_FEATURE_SETS = ["raw", "raw_stat_fft", "signal"]
 
-# 時序模式：TS 特徵已在前處理階段計算，DL 模型直接使用 raw/signal
-TS_TABULAR_FEATURE_SETS = ["raw"]   # lag/rolling 已預先嵌入 X
+# 時序模式：per-row 視窗特徵（差分 + Lag + Rolling），DL 模型直接使用 raw/signal
+TS_TABULAR_FEATURE_SETS = ["ts_tabular", "ts_tabular_fft"]  # 包含 per-row 時序視窗特徵
 TS_DL_FEATURE_SETS = ["raw", "signal"]
 
 
@@ -220,6 +221,16 @@ class FeatureBuilder:
             interactions = inter_all[:, X_top.shape[1]:]
             return np.hstack([X_scaled, interactions]).astype(np.float32)
 
+        if fs == "ts_tabular":
+            ts_win = self._ts_window_features(X_scaled)
+            stat   = self._stat_features(X_scaled)
+            return np.hstack([X_scaled, ts_win, stat]).astype(np.float32)
+        if fs == "ts_tabular_fft":
+            ts_win = self._ts_window_features(X_scaled)
+            fft    = self._fft_features(X_scaled)
+            stat   = self._stat_features(X_scaled)
+            return np.hstack([X_scaled, ts_win, fft, stat]).astype(np.float32)
+
         kmeans_feats = []
         for km in getattr(self, "kmeans_", []):
             kmeans_feats.append(km.transform(X_scaled))
@@ -283,6 +294,54 @@ class FeatureBuilder:
 
         local_stats = np.hstack(local_means + local_stds + local_maxs + local_mins)  # n_segments*4 特徵
         return np.hstack([global_stats, local_stats])
+
+    # ------------------------------------------------------------------
+    def _ts_window_features(self, X: np.ndarray) -> np.ndarray:
+        """Per-row 時序視窗特徵（因果特徵，無未來洩漏）。
+
+        每一列（row）視為一條時序序列，計算：
+          - 一階差分（X[t] - X[t-1]，第 0 列填 0）
+          - Lag=1 特徵（前移一步，首列用 0 填充）
+          - Lag=2 特徵（前移二步，前兩列用 0 填充）
+          - Rolling Mean window=3, 5（前向平均，邊界用已有資料）
+          - Rolling Std  window=3, 5（前向標準差，邊界用已有資料）
+
+        Parameters
+        ----------
+        X : np.ndarray, shape [N, F]
+            已 scale 的特徵矩陣（每列為一個樣本/時間步的特徵向量）。
+
+        Returns
+        -------
+        np.ndarray, shape [N, F * 6]  （diff + lag1 + lag2 + rmean3 + rmean5 + rstd3 + rstd5 = 7 × F）
+        """
+        X = np.asarray(X, dtype=np.float32)
+        n, f = X.shape
+        parts = []
+
+        # 一階差分（首列填 0）
+        diff = np.zeros_like(X)
+        diff[1:] = X[1:] - X[:-1]
+        parts.append(diff)
+
+        # Lag=1（前移一步，首列填 0）
+        lag1 = np.zeros_like(X)
+        lag1[1:] = X[:-1]
+        parts.append(lag1)
+
+        # Lag=2（前移兩步，前兩列填 0）
+        lag2 = np.zeros_like(X)
+        lag2[2:] = X[:-2]
+        parts.append(lag2)
+
+        # Rolling Mean & Std（window=3, 5），使用 pandas 高效計算
+        df_tmp = pd.DataFrame(X)
+        for w in (3, 5):
+            roll = df_tmp.rolling(window=w, min_periods=1)
+            parts.append(roll.mean().values.astype(np.float32))
+            parts.append(roll.std(ddof=0).fillna(0.0).values.astype(np.float32))
+
+        return np.hstack(parts)
 
     # ------------------------------------------------------------------
     def _fft_features(self, X: np.ndarray) -> np.ndarray:

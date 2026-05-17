@@ -20,14 +20,20 @@ python run_pipeline.py --batch --time-limit 3600
 # 跳過深度學習模型（僅跑傳統 ML）
 python run_pipeline.py --batch --skip-dl --top-n 3
 
-# 跳過 NAS，使用預設 MLP 架構
-python run_pipeline.py --no-nas
+# 跳過 NAS（表格模式用預設 MLP，時序模式用預設 TSNet）
+python run_pipeline.py --batch --no-nas
 
 # 指定評估指標（預設 f1）
 python run_pipeline.py --batch --metric accuracy
 
-# 競賽模式
-python run_pipeline.py
+# 單一 CSV 評估（表格資料）
+python run_pipeline.py --csv openml_cc18_data/37_diabetes.csv
+
+# 單一 CSV 評估（時序資料，啟用 TS 模式）
+python run_pipeline.py --csv "ucr_ts_80(時序資料)/dataset.csv" --ts
+
+# 單一 CSV 評估（指定目標欄）
+python run_pipeline.py --csv data.csv --target label --ts
 
 ```
 
@@ -86,14 +92,16 @@ python data_collect_time.py
       黃金預設值保底（src/best_presets.json）
   │
   ▼
-[3] MLP NAS（MLPNASSearcher）
-      OneShotSupernet：4 層 128-unit 共享權重超網路
-      每 batch 隨機抽子架構，再用演化搜尋（突變 + 截斷選擇）
-      小型表格（< 2000 筆）自動跳過
+[3] MLP NAS（表格模式）/ TSNet NAS（時序模式）
+      表格模式：MLPNASSearcher + OneShotSupernet（MLP 共享權重超網路）
+      時序模式：TSNASSearcher + TSNetSupernet（4 種算子：conv_k3/conv_k5/tcn_d2/tcn_d4）
+      no_nas=True 時：表格用 _DEFAULT_MLP_ARCH，時序用 _DEFAULT_TSNET_ARCH
+      小型表格（< 2000 筆）且非時序時自動跳過
   │
   ▼
-[4] MLP 訓練 HPO（MLPTrainHPO）
-      對 NAS 找到的最佳架構跑超參數搜尋（lr / dropout / weight_decay）
+[4] MLP / TSNet 訓練 HPO
+      表格模式：MLPTrainHPO（lr / dropout / weight_decay，StratifiedKFold）
+      時序模式：TSNetTrainHPO（Walk-forward CV，feature_set 從 TS_DL_FEATURE_SETS）
   │
   ▼
 [5] CNN1D / TCN HPO（DLHPO）
@@ -136,8 +144,8 @@ python data_collect_time.py
 │   ├── preprocess.py       # FeatureBuilder（8 種特徵集）+ TSFeatureBuilder
 │   ├── data.py             # get_folds(), get_ts_folds(), TabularDataset
 │   ├── metrics.py          # calculate_score(), get_metric_name()
-│   ├── hpo.py              # TabularHPO, DLHPO, MLPTrainHPO
-│   ├── nas.py              # MLPNASSearcher（OneShotSupernet）
+│   ├── hpo.py              # TabularHPO, DLHPO, MLPTrainHPO, TSNetTrainHPO
+│   ├── nas.py              # MLPNASSearcher, TSNASSearcher（TSNet + CausalConv1d）
 │   ├── train.py            # run_cv, run_tabular_cv, run_dl_cv
 │   ├── ensemble.py         # NelderMeadBlender, MetaLearnerStacker
 │   ├── make_submission.py  # generate_submission()
@@ -166,7 +174,7 @@ python data_collect_time.py
 - 整數且 `nunique ≤ 50` 且比例 < 30% → 分類
 - 否則 → 回歸（批次模式暫時跳過）
 
-### 8 種特徵集（`src/preprocess.py`）
+### 10 種特徵集（`src/preprocess.py`）
 
 | 特徵集 | 說明 | 適用模型 |
 |--------|------|---------|
@@ -178,6 +186,8 @@ python data_collect_time.py
 | `raw_stat` | raw + 全域統計（20 項）+ 局部統計（n_seg×4）+ KMeans 距離 | LGBM, XGB |
 | `raw_stat_fft` | raw_stat + FFT 頻域特徵（頻帶能量/重心/熵等） | MLP, Transformer |
 | `poly2` | raw + Top-N 特徵的 degree-2 交互項（自適應記憶體上限） | LGBM, XGB, RF |
+| `ts_tabular` | X_scaled + 一階差分 + Lag（1,2）+ Rolling Mean/Std（w=3,5）+ 全域統計 | TS Tabular 模型 |
+| `ts_tabular_fft` | ts_tabular 的基礎上再加 FFT 頻域特徵 | TS Tabular 模型 |
 
 各模型可用特徵集：
 - `TABULAR_FEATURE_SETS = ["raw", "raw_stat", "poly2"]`
@@ -186,6 +196,8 @@ python data_collect_time.py
 - `MLP_FEATURE_SETS = ["raw", "raw_stat", "raw_stat_fft", "signal"]`
 - `CNN_FEATURE_SETS = ["raw", "signal"]`
 - `TRANSFORMER_FEATURE_SETS = ["raw", "raw_stat_fft", "signal"]`
+- `TS_TABULAR_FEATURE_SETS = ["ts_tabular", "ts_tabular_fft"]`（時序 Tabular 模型）
+- `TS_DL_FEATURE_SETS = ["raw", "signal"]`（時序 DL 模型）
 
 ### TimeBudget 自適應縮放（`pipeline.py`）
 - `time_limit=0` = 無限制
@@ -201,9 +213,15 @@ python data_collect_time.py
 | ≥ 50,000 筆 | 大資料：縮減 trial 數，關閉 kpca/kmeans |
 
 ### 時序模式特殊行為
-- 切分策略：分類任務用 StratifiedKFold；預測任務用時序順序切分
-- 模型選擇：TCN（取代 CNN1D）+ PatchTST（取代 Transformer）
-- `TSFeatureBuilder`：lag=(1,2,3,7)、rolling window=(3,5,10,20)、momentum、diff
+- **切分策略**：`get_folds(is_timeseries=True)` → TimeSeriesSplit Walk-forward；非 TS → StratifiedKFold
+- **NAS**：TSNASSearcher 搜尋 4 種算子（conv_k3 / conv_k5 / tcn_d2 / tcn_d4）
+  - `--no-nas` 時使用 `_DEFAULT_TSNET_ARCH`（conv_k3 + tcn_d2 + tcn_d4，channels=64）
+- **DL 模型**：TSNet（取代 MLP）+ TCN（取代 CNN1D）+ PatchTST（取代 Transformer）
+- **Tabular 特徵集**：`ts_tabular` / `ts_tabular_fft`（per-row 時序視窗特徵）
+- **DL 特徵集**：`raw` / `signal`（lag/rolling 已內嵌於特徵集）
+- **Mixup 停用**：時序模式下訓練自動停用（防混合引入未來資訊洩漏）
+- **make_loader**：`drop_last=False`，確保每一筆資料都被訓練/預測到
+- `TSFeatureBuilder`（跨時間步特徵）：lag=(1,2,3,7)、rolling window=(3,5,10,20)、momentum、diff
 
 ### artifacts 快取機制
 `artifacts/{dataset_name}/{tag}_oof.npy` + `_test.npy`：CV 完成後自動儲存，重複執行直接載入。

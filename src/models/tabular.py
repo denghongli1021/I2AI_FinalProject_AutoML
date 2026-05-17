@@ -82,7 +82,7 @@ def build_tabular_model(
             **params,
             random_state=seed,
             max_iter=2000,
-            n_jobs=-2,
+            n_jobs=1,  # avoid BrokenProcessPool on Windows when PyTorch CUDA DLLs are loaded
             class_weight=class_weight,
         )
     if name == "svm":

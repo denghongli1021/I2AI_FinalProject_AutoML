@@ -168,12 +168,14 @@ def run_batch(args):
             elapsed = round(time.time() - t0, 1)
 
             row = {
-                "dataset": dataset_name,
-                "type": dtype_label,
-                "task": task,
-                "n_train": len(X_tr),
-                "n_test": len(X_te),
-                **metrics,
+                "dataset":  dataset_name,
+                "type":     dtype_label,
+                "task":     task,
+                "n_train":  len(X_tr),
+                "n_test":   len(X_te),
+                "accuracy": metrics.get("accuracy"),
+                "f1_macro": metrics.get("f1_macro"),
+                "score":    metrics.get("f1_macro", metrics.get("r2")),
                 "elapsed_s": elapsed,
             }
             results.append(row)
@@ -189,12 +191,15 @@ def run_batch(args):
             elapsed = round(time.time() - t0, 1)
             print(f"  [ERROR] {exc}")
             results.append({
-                "dataset": dataset_name,
-                "type": dtype_label,
-                "task": "?",
-                "n_train": 0,
-                "n_test": 0,
-                "error": str(exc)[:80],
+                "dataset":  dataset_name,
+                "type":     dtype_label,
+                "task":     "?",
+                "n_train":  0,
+                "n_test":   0,
+                "accuracy": None,
+                "f1_macro": None,
+                "score":    None,
+                "error":    str(exc)[:80],
                 "elapsed_s": elapsed,
             })
 

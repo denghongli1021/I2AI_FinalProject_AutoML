@@ -1,20 +1,27 @@
 """
-One-Shot Neural Architecture Search（NAS）for MLP。
+One-Shot Neural Architecture Search（NAS）for MLP and TSNet。
 
 流程：
   1. 訓練權重共享 Supernet（每 batch 隨機採樣一個子架構）
   2. 以演化演算法（隨機初始 → 突變 → 截斷選擇）從共享權重中擷取最佳子架構
 
-搜尋空間（所有邊界可由外部設定，不人為固定）：
+MLP 搜尋空間（所有邊界可由外部設定，不人為固定）：
   - depth     : 隱藏層數
   - hidden_dim: 所有層共用同一維度（方便 skip connection）
   - activations: 每層激活函式
   - use_skips  : 每層是否有殘差連接
   - dropout    : Dropout 比率
+
+TSNet 搜尋空間：
+  - n_blocks   : 卷積塊數（1~max_blocks）
+  - operations : 每塊的 op 索引（0=conv_k3, 1=conv_k5, 2=tcn_d2, 3=tcn_d4）
+  - channels   : 特徵通道數
+  - dropout    : Dropout 比率
 """
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from tqdm import tqdm
 
 from .config import SEED, DEVICE
@@ -267,6 +274,322 @@ class MLPNASSearcher:
         print(
             f"  [NAS] Best arch → depth={best_arch['depth']}, "
             f"hidden_dim={best_arch['hidden_dim']}, "
+            f"dropout={best_arch['dropout']:.2f}, "
+            f"Macro F1={best_score:.4f}"
+        )
+        self.best_arch_ = best_arch
+        return best_arch
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# TSNet NAS — 時序 1D-CNN 架構搜尋
+# ════════════════════════════════════════════════════════════════════════════
+
+TS_OPS = ["conv_k3", "conv_k5", "tcn_d2", "tcn_d4"]
+
+
+class CausalConv1d(nn.Module):
+    """因果一維卷積（Left-padding 確保無未來洩漏）。"""
+
+    def __init__(self, channels: int, kernel_size: int, dilation: int = 1):
+        super().__init__()
+        self.pad = (kernel_size - 1) * dilation
+        self.conv = nn.Conv1d(channels, channels, kernel_size, dilation=dilation, padding=0)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # x: [B, C, L]
+        x_padded = F.pad(x, (self.pad, 0))
+        return self.conv(x_padded)
+
+
+class _TSOpBlock(nn.Module):
+    """單一 TSNet 操作塊：可選 4 種因果卷積操作 + BN + ReLU。"""
+
+    def __init__(self, channels: int):
+        super().__init__()
+        # 預先建立所有可能的操作（共享 channels 維度）
+        self.ops = nn.ModuleList([
+            CausalConv1d(channels, kernel_size=3, dilation=1),   # conv_k3
+            CausalConv1d(channels, kernel_size=5, dilation=1),   # conv_k5
+            CausalConv1d(channels, kernel_size=3, dilation=2),   # tcn_d2
+            CausalConv1d(channels, kernel_size=3, dilation=4),   # tcn_d4
+        ])
+        self.bn = nn.BatchNorm1d(channels)
+
+    def forward(self, x: torch.Tensor, op_idx: int) -> torch.Tensor:
+        # x: [B, C, L]
+        out = self.ops[op_idx](x)
+        out = self.bn(out)
+        return F.relu(out + x)  # 殘差連接
+
+
+class TSNet(nn.Module):
+    """
+    時序網路：1D Conv 堆疊 + AdaptiveAvgPool → 分類頭。
+
+    Parameters
+    ----------
+    in_features : int
+        輸入特徵維度（序列長度）
+    channels : int
+        卷積通道數（所有塊共用）
+    operations : list[int]
+        每塊的 op 索引（0=conv_k3, 1=conv_k5, 2=tcn_d2, 3=tcn_d4）
+    n_classes : int
+        分類數
+    dropout : float
+        分類頭前的 Dropout 比率
+    """
+
+    def __init__(
+        self,
+        in_features: int,
+        channels: int = 64,
+        operations: list = None,
+        n_classes: int = 2,
+        dropout: float = 0.1,
+    ):
+        super().__init__()
+        operations = operations or [0, 2, 3]
+        self.in_proj = nn.Conv1d(1, channels, kernel_size=1)
+        self.blocks = nn.ModuleList([
+            _TSOpBlock(channels) for _ in operations
+        ])
+        self.operations = operations
+        self.pool = nn.AdaptiveAvgPool1d(1)
+        self.dropout = nn.Dropout(p=dropout)
+        self.head = nn.Linear(channels, n_classes)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # x: [B, F]  → unsqueeze → [B, 1, F]
+        if x.ndim == 2:
+            x = x.unsqueeze(1)
+        h = self.in_proj(x)  # [B, C, F]
+        for i, (block, op_idx) in enumerate(zip(self.blocks, self.operations)):
+            h = block(h, op_idx)
+        h = self.pool(h).squeeze(-1)  # [B, C]
+        h = self.dropout(h)
+        return self.head(h)
+
+
+class TSNetSupernet(nn.Module):
+    """
+    TSNet 超網路：固定 max_blocks 個 block，每個 block 有 4 種 op 可選。
+    子架構由 arch（n_blocks + operations 列表）決定使用哪幾個 block 及各 block 的 op。
+    """
+
+    def __init__(self, in_features: int, channels: int, max_blocks: int, n_classes: int):
+        super().__init__()
+        self.in_proj = nn.Conv1d(1, channels, kernel_size=1)
+        self.blocks = nn.ModuleList([_TSOpBlock(channels) for _ in range(max_blocks)])
+        self.pool = nn.AdaptiveAvgPool1d(1)
+        self.dropout = nn.Dropout(p=0.0)  # 比率由外部 arch 決定
+        self.head = nn.Linear(channels, n_classes)
+        self.max_blocks = max_blocks
+
+    def forward(self, x: torch.Tensor, arch: dict, dropout_rate: float = 0.0) -> torch.Tensor:
+        n_blocks = arch["n_blocks"]
+        operations = arch["operations"]  # list[int], len == n_blocks
+
+        if x.ndim == 2:
+            x = x.unsqueeze(1)
+        h = self.in_proj(x)
+
+        for i in range(n_blocks):
+            h = self.blocks[i](h, op_idx=operations[i])
+            if dropout_rate > 0:
+                h = F.dropout(h, p=dropout_rate, training=self.training)
+
+        h = self.pool(h).squeeze(-1)
+        if dropout_rate > 0:
+            h = F.dropout(h, p=dropout_rate, training=self.training)
+        return self.head(h)
+
+
+# ── TSNet 架構採樣與突變 ─────────────────────────────────────────────────────
+
+def _random_ts_arch(max_blocks: int) -> dict:
+    """隨機採樣 TSNet 子架構。"""
+    n_blocks = np.random.randint(1, max_blocks + 1)
+    return {
+        "n_blocks": n_blocks,
+        "operations": [int(np.random.randint(0, len(TS_OPS))) for _ in range(n_blocks)],
+        "channels": int(np.random.choice([32, 64, 128])),
+        "dropout": float(np.random.uniform(0.0, 0.4)),
+    }
+
+
+def _mutate_ts_arch(arch: dict, max_blocks: int) -> dict:
+    """突變一個 TSNet 子架構。"""
+    new = {k: list(v) if isinstance(v, list) else v for k, v in arch.items()}
+    n_blocks = new["n_blocks"]
+    choice = np.random.randint(0, 4)
+
+    if choice == 0 and n_blocks < max_blocks:
+        new["n_blocks"] += 1
+        new["operations"].append(int(np.random.randint(0, len(TS_OPS))))
+    elif choice == 1 and n_blocks > 1:
+        new["n_blocks"] -= 1
+        new["operations"] = new["operations"][:new["n_blocks"]]
+    elif choice == 2:
+        layer = np.random.randint(0, n_blocks)
+        new["operations"][layer] = int(np.random.randint(0, len(TS_OPS)))
+    else:
+        new["channels"] = int(np.random.choice([32, 64, 128]))
+        new["dropout"] = float(np.clip(new["dropout"] + np.random.uniform(-0.1, 0.1), 0.0, 0.4))
+
+    return new
+
+
+# ── TSNASSearcher ────────────────────────────────────────────────────────────
+
+class TSNASSearcher:
+    """
+    TSNet NAS，介面與 MLPNASSearcher 相同。
+
+    Parameters
+    ----------
+    max_blocks          : Supernet 最大 block 數
+    channels            : 固定通道數（Supernet 使用最大值）
+    n_supernet_epochs   : Supernet 訓練 epoch 數
+    supernet_lr         : Supernet 訓練學習率
+    supernet_wd         : Supernet 訓練 weight decay
+    n_candidates        : 演化初始族群大小
+    n_evolution_rounds  : 演化迭代輪數
+    device              : 訓練裝置
+    """
+
+    def __init__(
+        self,
+        max_blocks: int = 4,
+        channels: int = 64,
+        n_supernet_epochs: int = 20,
+        supernet_lr: float = 1e-3,
+        supernet_wd: float = 1e-4,
+        n_candidates: int = 15,
+        n_evolution_rounds: int = 3,
+        device: str = None,
+    ):
+        self.max_blocks = max_blocks
+        self.channels = channels
+        self.n_supernet_epochs = n_supernet_epochs
+        self.supernet_lr = supernet_lr
+        self.supernet_wd = supernet_wd
+        self.n_candidates = n_candidates
+        self.n_evolution_rounds = n_evolution_rounds
+        self.device = device or DEVICE
+        self.best_arch_: dict = None
+
+    # ------------------------------------------------------------------
+    def _train_supernet(
+        self, X: np.ndarray, y: np.ndarray, n_classes: int
+    ) -> TSNetSupernet:
+        """訓練 TSNet 權重共享 Supernet：每 batch 隨機採樣一個子架構。"""
+        in_features = X.shape[1]
+        supernet = TSNetSupernet(
+            in_features=in_features,
+            channels=self.channels,
+            max_blocks=self.max_blocks,
+            n_classes=n_classes,
+        ).to(self.device)
+
+        optimizer = torch.optim.AdamW(
+            supernet.parameters(), lr=self.supernet_lr, weight_decay=self.supernet_wd
+        )
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer, T_max=self.n_supernet_epochs
+        )
+        criterion = nn.CrossEntropyLoss()
+
+        X_t = torch.tensor(X, dtype=torch.float32, device=self.device)
+        y_t = torch.tensor(y, dtype=torch.long, device=self.device)
+        ds = torch.utils.data.TensorDataset(X_t, y_t)
+        loader = torch.utils.data.DataLoader(ds, batch_size=256, shuffle=True, drop_last=False)
+
+        supernet.train()
+        for epoch in tqdm(
+            range(self.n_supernet_epochs),
+            desc="  TS-NAS supernet",
+            leave=False,
+            ncols=80,
+        ):
+            for xb, yb in loader:
+                arch = _random_ts_arch(self.max_blocks)
+                optimizer.zero_grad()
+                logits = supernet(xb, arch, dropout_rate=arch["dropout"])
+                loss = criterion(logits, yb)
+                loss.backward()
+                nn.utils.clip_grad_norm_(supernet.parameters(), 1.0)
+                optimizer.step()
+            scheduler.step()
+
+        return supernet
+
+    # ------------------------------------------------------------------
+    def _eval_arch(
+        self, supernet: TSNetSupernet, X: np.ndarray, y: np.ndarray, arch: dict
+    ) -> float:
+        """用共享權重直接推論，計算 Macro F1（免重新訓練）。"""
+        from sklearn.metrics import f1_score as skf1
+
+        supernet.eval()
+        X_t = torch.tensor(X, dtype=torch.float32, device=self.device)
+        with torch.no_grad():
+            logits = supernet(X_t, arch, dropout_rate=0.0)
+        preds = logits.argmax(dim=1).cpu().numpy()
+        return skf1(y, preds, average="macro", zero_division=0)
+
+    # ------------------------------------------------------------------
+    def _evolutionary_search(
+        self, supernet: TSNetSupernet, X: np.ndarray, y: np.ndarray
+    ) -> tuple:
+        """演化搜尋：隨機初始族群 → 截斷選擇 → 突變 → 迭代。"""
+        np.random.seed(SEED)
+        population = [_random_ts_arch(self.max_blocks) for _ in range(self.n_candidates)]
+        scores = [self._eval_arch(supernet, X, y, a) for a in population]
+
+        for rnd in tqdm(
+            range(self.n_evolution_rounds),
+            desc="  TS-NAS evolution",
+            leave=False,
+            ncols=80,
+        ):
+            top_n = max(2, len(population) // 3)
+            top_idx = np.argsort(scores)[::-1][:top_n]
+            parents = [population[i] for i in top_idx]
+
+            offspring = [_mutate_ts_arch(p, self.max_blocks) for p in parents]
+            offspring_scores = [self._eval_arch(supernet, X, y, a) for a in offspring]
+
+            population += offspring
+            scores += offspring_scores
+
+            combined = sorted(zip(scores, population), key=lambda x: x[0], reverse=True)
+            population = [c[1] for c in combined[:self.n_candidates]]
+            scores = [c[0] for c in combined[:self.n_candidates]]
+
+        best_idx = int(np.argmax(scores))
+        return population[best_idx], scores[best_idx]
+
+    # ------------------------------------------------------------------
+    def search(self, X: np.ndarray, y: np.ndarray, n_classes: int) -> dict:
+        """
+        執行完整 TSNet NAS 流程，回傳最佳 arch_params dict。
+        dict 含 n_blocks / operations / channels / dropout。
+        """
+        torch.manual_seed(SEED)
+        np.random.seed(SEED)
+
+        print("  [TS-NAS] Training TSNet supernet ...")
+        supernet = self._train_supernet(X, y, n_classes)
+
+        print("  [TS-NAS] Evolutionary architecture search ...")
+        best_arch, best_score = self._evolutionary_search(supernet, X, y)
+
+        print(
+            f"  [TS-NAS] Best arch → n_blocks={best_arch['n_blocks']}, "
+            f"ops={[TS_OPS[i] for i in best_arch['operations']]}, "
+            f"channels={best_arch['channels']}, "
             f"dropout={best_arch['dropout']:.2f}, "
             f"Macro F1={best_score:.4f}"
         )

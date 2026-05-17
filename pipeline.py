@@ -23,8 +23,8 @@ import time
 import numpy as np
 
 from src.config import DEVICE, ARTIFACTS_DIR
-from src.hpo import TabularHPO, DLHPO, MLPTrainHPO
-from src.nas import MLPNASSearcher
+from src.hpo import TabularHPO, DLHPO, MLPTrainHPO, TSNetTrainHPO
+from src.nas import MLPNASSearcher, TSNASSearcher
 from src.train import run_cv
 from src.ensemble import NelderMeadBlender, MetaLearnerStacker
 
@@ -37,6 +37,12 @@ _DEFAULT_MLP_ARCH = {
     "activations": ["gelu", "gelu", "gelu"],
     "use_skips": [True, True, True],
     "dropout": 0.2,
+}
+_DEFAULT_TSNET_ARCH = {
+    "n_blocks": 3,
+    "operations": [0, 2, 3],  # conv_k3, tcn_d2, tcn_d4
+    "channels": 64,
+    "dropout": 0.1,
 }
 
 
@@ -299,32 +305,52 @@ def run(
             not is_ts and len(X_train) < 2000
         )
         if not skip_nas:
-            print(f"\n[3] MLP NAS (epochs={cfg['nas_epochs']}, candidates={cfg['nas_candidates']}) ...")
-            print(f"  [Budget] {budget.status_str()}")
-            nas = MLPNASSearcher(
-                n_supernet_epochs=cfg["nas_epochs"],
-                n_candidates=cfg["nas_candidates"],
-                n_evolution_rounds=cfg["nas_rounds"],
-                device=DEVICE,
-            )
-            mlp_arch = nas.search(X_train, y_train, n_classes)
+            if is_ts:
+                print(f"\n[3] TSNet NAS (epochs={cfg['nas_epochs']}, candidates={cfg['nas_candidates']}) ...")
+                print(f"  [Budget] {budget.status_str()}")
+                nas = TSNASSearcher(
+                    n_supernet_epochs=cfg["nas_epochs"],
+                    n_candidates=cfg["nas_candidates"],
+                    n_evolution_rounds=cfg["nas_rounds"],
+                    device=DEVICE,
+                )
+                mlp_arch = nas.search(X_train, y_train, n_classes)
+            else:
+                print(f"\n[3] MLP NAS (epochs={cfg['nas_epochs']}, candidates={cfg['nas_candidates']}) ...")
+                print(f"  [Budget] {budget.status_str()}")
+                nas = MLPNASSearcher(
+                    n_supernet_epochs=cfg["nas_epochs"],
+                    n_candidates=cfg["nas_candidates"],
+                    n_evolution_rounds=cfg["nas_rounds"],
+                    device=DEVICE,
+                )
+                mlp_arch = nas.search(X_train, y_train, n_classes)
         else:
             reason = "時間預算不足" if not no_nas else "no_nas=True"
             print(f"\n[3] 跳過 NAS（{reason}），使用預設架構")
-            mlp_arch = _DEFAULT_MLP_ARCH
+            mlp_arch = _DEFAULT_TSNET_ARCH if is_ts else _DEFAULT_MLP_ARCH
 
-        # [4] MLP 訓練 HPO
+        # [4] MLP / TSNet 訓練 HPO
         mlp_trials = budget.scale_trials(cfg["mlp_train_trials"])
         if budget.should_skip(cost_fraction=0.20):
-            print("\n[4] 時間預算緊迫，跳過 MLP 訓練 HPO")
+            hpo_model_name = "TSNet" if is_ts else "MLP"
+            print(f"\n[4] 時間預算緊迫，跳過 {hpo_model_name} 訓練 HPO")
             mlp_configs = []
         else:
-            print(f"\n[4] MLP 訓練 HPO ({mlp_trials} trials) ...")
-            mlp_hpo = MLPTrainHPO(
-                arch_params=mlp_arch, n_trials=mlp_trials,
-                top_k=cfg["mlp_top_k"], device=DEVICE,
-                metric=metric,
-            )
+            if is_ts:
+                print(f"\n[4] TSNet 訓練 HPO ({mlp_trials} trials) ...")
+                mlp_hpo = TSNetTrainHPO(
+                    arch_params=mlp_arch, n_trials=mlp_trials,
+                    top_k=cfg["mlp_top_k"], device=DEVICE,
+                    metric=metric,
+                )
+            else:
+                print(f"\n[4] MLP 訓練 HPO ({mlp_trials} trials) ...")
+                mlp_hpo = MLPTrainHPO(
+                    arch_params=mlp_arch, n_trials=mlp_trials,
+                    top_k=cfg["mlp_top_k"], device=DEVICE,
+                    metric=metric,
+                )
             mlp_configs = mlp_hpo.run(X_train, y_train, n_classes, cfg)
 
         # [5] CNN1D / TCN HPO

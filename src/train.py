@@ -31,7 +31,9 @@ from .metrics import calculate_score, get_metric_name
 
 def _mixup_batch(x: torch.Tensor, y: torch.Tensor, alpha: float, device: str):
     """對一個 batch 套用 Mixup；回傳 mixed_x, y_a, y_b, lam。"""
-    lam = float(np.random.beta(alpha, alpha)) if alpha > 0 else 1.0
+    if alpha <= 0:
+        return x, y, y, 1.0
+    lam = float(np.random.beta(alpha, alpha))
     B = x.size(0)
     idx = torch.randperm(B, device=device)
     return lam * x + (1 - lam) * x[idx], y, y[idx], lam
@@ -136,6 +138,15 @@ def _build_dl_model(
             dropout=arch_params["dropout"],
             n_classes=n_classes,
         )
+    if model_name == "tsnet":
+        from .nas import TSNet
+        return TSNet(
+            in_features=in_features,
+            channels=arch_params.get("channels", 64),
+            operations=arch_params.get("operations", [0, 2, 3]),
+            n_classes=n_classes,
+            dropout=arch_params.get("dropout", 0.1),
+        )
     raise ValueError(f"Unknown DL model: {model_name}")
 
 
@@ -171,11 +182,16 @@ def train_dl_single_fold(
     wd = train_params["weight_decay"]
     bs = int(train_params["batch_size"])
     ls = train_params["label_smoothing"]
-    ma = train_params["mixup_alpha"]
-    mp = train_params["mixup_prob"]
+    ma = train_params.get("mixup_alpha", 0.0)
+    mp = train_params.get("mixup_prob", 0.0)
     t_max = int(train_params["t_max"])
     n_epochs = int(train_params["n_epochs"])
     patience = int(train_params["patience"])
+
+    # 時序模式下關閉 Mixup（樣本順序有意義，混合會引入未來洩漏）
+    if global_cfg.get("is_timeseries", False):
+        ma = 0.0
+        mp = 0.0
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=wd)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=t_max)
@@ -377,17 +393,22 @@ def run_dl_cv(
     oof_counts = np.zeros((n, 1), dtype=np.float32)
     test_preds = np.zeros((len(X_test), n_classes), dtype=np.float32)
 
-    train_params = config["train_params"]
-    bs = int(train_params["batch_size"])
-    ls = train_params["label_smoothing"]
-    ma = train_params["mixup_alpha"]
-    mp = train_params["mixup_prob"]
-    t_max = int(train_params["t_max"])
-    n_epochs = int(train_params["n_epochs"])
-    patience = int(train_params["patience"])
+    train_params = config.get("train_params") or {}
+    arch_params_cfg = config.get("arch_params") or {}
+    bs = int(train_params.get("batch_size", 128))
+    ls = train_params.get("label_smoothing", 0.0)
+    ma = train_params.get("mixup_alpha", 0.0)
+    mp = train_params.get("mixup_prob", 0.0)
+    t_max = int(train_params.get("t_max", 10))
+    n_epochs = int(train_params.get("n_epochs", 30))
+    patience = int(train_params.get("patience", 7))
     use_1d_aug = global_cfg.get("use_1d_aug", False)
 
     is_ts = global_cfg.get("is_timeseries", False)
+    # 時序模式下關閉 Mixup
+    if is_ts:
+        ma = 0.0
+        mp = 0.0
     n_seeds = 1 if is_ts else global_cfg.get("n_seeds", 1)
     n_repeats = 1 if is_ts else global_cfg.get("n_repeats", 1)
 
@@ -410,13 +431,13 @@ def run_dl_cv(
 
             in_features = X_tr.shape[1]
             model = _build_dl_model(
-                config["model_name"], config["arch_params"], in_features, n_classes
+                config["model_name"], arch_params_cfg, in_features, n_classes
             ).to(device)
 
             optimizer = torch.optim.AdamW(
                 model.parameters(),
-                lr=train_params["lr"],
-                weight_decay=train_params["weight_decay"],
+                lr=train_params.get("lr", 1e-3),
+                weight_decay=train_params.get("weight_decay", 1e-4),
             )
             scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=t_max)
             criterion = nn.CrossEntropyLoss(label_smoothing=ls)
@@ -508,7 +529,7 @@ def run_cv(
     """
     根據 config["model_name"] 自動選擇 run_tabular_cv 或 run_dl_cv。
     """
-    dl_models = {"mlp", "cnn1d", "resnet1d", "transformer", "tcn", "patchtst"}
+    dl_models = {"mlp", "cnn1d", "resnet1d", "transformer", "tcn", "patchtst", "tsnet"}
     if config["model_name"] in dl_models:
         return run_dl_cv(config, X, y, X_test, n_classes, device, tag, save_artifacts, global_cfg, metric)
     return run_tabular_cv(config, X, y, X_test, n_classes, device, tag, save_artifacts, global_cfg, metric)

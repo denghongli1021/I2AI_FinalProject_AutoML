@@ -7,8 +7,19 @@ from sklearn.model_selection import StratifiedKFold, RepeatedStratifiedKFold, Ti
 from .config import SEED
 
 
-def get_folds(y: np.ndarray, n_splits: int = 5, n_repeats: int = 1, random_state: int = SEED) -> list:
-    """回傳 5-Fold stratified 切割索引列表。"""
+def get_folds(
+    y: np.ndarray,
+    n_splits: int = 5,
+    n_repeats: int = 1,
+    random_state: int = SEED,
+    is_timeseries: bool = False,
+) -> list:
+    """回傳 5-Fold 切割索引列表。
+
+    當 is_timeseries=True 時改呼叫 get_ts_folds（TimeSeriesSplit Walk-forward）。
+    """
+    if is_timeseries:
+        return get_ts_folds(len(y), n_splits=n_splits)
     if n_repeats > 1:
         cv = RepeatedStratifiedKFold(n_splits=n_splits, n_repeats=n_repeats, random_state=random_state)
     else:
@@ -48,4 +59,4 @@ def make_loader(
     shuffle: bool = False,
 ) -> DataLoader:
     ds = TabularDataset(X, y)
-    return DataLoader(ds, batch_size=batch_size, shuffle=shuffle, drop_last=shuffle)
+    return DataLoader(ds, batch_size=batch_size, shuffle=shuffle, drop_last=False)

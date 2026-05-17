@@ -147,20 +147,28 @@ def run_batch(args):
             # ── 評估 ──────────────────────────────────────────────────────────
             from src.metrics import calculate_score, get_metric_name
             m_name = get_metric_name(args.metric)
-            
+
             score_b = calculate_score(y_te, result.test_blend, metric=args.metric)
             score_s = calculate_score(y_te, result.test_stack, metric=args.metric)
-            
-            # 以較佳的 ensemble 結果作為代表分數
+
+            # 選較佳的 ensemble 結果，再計算兩個固定指標
+            best_preds = result.test_stack if score_s >= score_b else result.test_blend
             best_score = round(max(score_b, score_s), 4)
-            elapsed  = round(time.time() - t_ds, 1)
+            acc    = round(calculate_score(y_te, best_preds, metric="accuracy"), 4)
+            f1     = round(calculate_score(y_te, best_preds, metric="f1"), 4)
+            elapsed = round(time.time() - t_ds, 1)
+
             print(f"\n  [結果] Blend → {m_name}={score_b:.4f}")
             print(f"  [結果] Stack → {m_name}={score_s:.4f}")
             print(f"  [耗時] {elapsed}s")
             results.append({
                 "dataset":   dataset_name,
-                "task":      "timeseries" if is_ts else "tabular",
-                "metric":    args.metric,
+                "type":      "TS" if is_ts else "Tab",
+                "task":      task,
+                "n_train":   len(y_tr),
+                "n_test":    len(y_te),
+                "accuracy":  acc,
+                "f1_macro":  f1,
                 "score":     best_score,
                 "elapsed_s": elapsed,
             })
@@ -169,8 +177,12 @@ def run_batch(args):
             traceback.print_exc()
             results.append({
                 "dataset":   dataset_name,
-                "task":      "timeseries" if is_ts else "tabular",
-                "metric":    args.metric,
+                "type":      "TS" if is_ts else "Tab",
+                "task":      task,
+                "n_train":   len(y_tr) if "y_tr" in dir() else None,
+                "n_test":    len(y_te) if "y_te" in dir() else None,
+                "accuracy":  None,
+                "f1_macro":  None,
                 "score":     None,
                 "elapsed_s": round(time.time() - t_ds, 1),
             })
@@ -187,20 +199,140 @@ def run_batch(args):
     print(f"{'='*65}\n")
 
 
+def run_single(args):
+    """
+    單一 CSV 模式：讀取指定 CSV，80/20 split，呼叫 pipeline.run()，輸出評估結果。
+
+    --csv   : CSV 檔案路徑
+    --target: 目標欄位名稱（可選，未指定時自動偵測）
+    --ts    : 是否為時序資料集
+    """
+    csv_path = args.csv
+    if not os.path.isfile(csv_path):
+        print(f"[錯誤] 找不到檔案：{csv_path}")
+        sys.exit(1)
+
+    dataset_name = os.path.splitext(os.path.basename(csv_path))[0]
+    is_ts = getattr(args, "ts", False)
+    dtype_label = "TS" if is_ts else "Tab"
+
+    print(f"\n{'='*65}")
+    print(f"  Pipeline 單資料集模式  ─  {dataset_name}  [{dtype_label}]")
+    print(f"{'='*65}")
+
+    t_ds = time.time()
+
+    df = pd.read_csv(csv_path)
+
+    # 目標欄偵測
+    if getattr(args, "target", None):
+        target_col = args.target
+        if target_col not in df.columns:
+            print(f"[錯誤] 找不到目標欄位 '{target_col}'，可用欄位：{list(df.columns)}")
+            sys.exit(1)
+    else:
+        target_col = _find_target_col(df)
+
+    y_raw = df[target_col]
+    task = _auto_detect_task(y_raw)
+
+    if task == "regression":
+        print("  [SKIP] 回歸任務暫不支援 Pipeline")
+        return
+
+    X_all = (df.drop(columns=[target_col])
+               .select_dtypes(include=[np.number])
+               .fillna(0).values.astype(np.float32))
+    le = LabelEncoder()
+    y_all = le.fit_transform(y_raw.astype(str).values)
+    n_classes = len(le.classes_)
+
+    is_forecasting = is_ts and task != "classification"
+
+    if not is_forecasting:
+        try:
+            X_tr, X_te, y_tr, y_te = train_test_split(
+                X_all, y_all, test_size=0.2, random_state=SEED, stratify=y_all)
+        except ValueError:
+            X_tr, X_te, y_tr, y_te = train_test_split(
+                X_all, y_all, test_size=0.2, random_state=SEED)
+        split_mode = "Random Stratified"
+    else:
+        split_idx = int(len(X_all) * 0.8)
+        X_tr, X_te = X_all[:split_idx], X_all[split_idx:]
+        y_tr, y_te = y_all[:split_idx], y_all[split_idx:]
+        split_mode = "Chronological (No Shuffle)"
+
+    print(f"  target={target_col}  n_train={len(y_tr)}  n_test={len(y_te)}  "
+          f"n_classes={n_classes}  split={split_mode}")
+
+    budget = _pl.TimeBudget(limit_sec=args.time_limit, t_start=t_ds)
+    cfg = _pl.get_cfg(args.fast, n_samples=len(y_tr))
+    cfg["is_timeseries"] = is_forecasting
+
+    result = _pl.run(
+        X_tr, y_tr, X_te, n_classes, cfg, budget,
+        skip_tabular=args.skip_tabular,
+        skip_dl=args.skip_dl,
+        no_nas=args.no_nas,
+        is_ts=is_forecasting,
+        artifacts_dir=os.path.join(ARTIFACTS_DIR, "single", dataset_name),
+        metric=args.metric,
+    )
+
+    from src.metrics import calculate_score, get_metric_name
+    m_name = get_metric_name(args.metric)
+    score_b = calculate_score(y_te, result.test_blend, metric=args.metric)
+    score_s = calculate_score(y_te, result.test_stack, metric=args.metric)
+    elapsed = round(time.time() - t_ds, 1)
+
+    print(f"\n  [結果] Blend → {m_name}={score_b:.4f}")
+    print(f"  [結果] Stack → {m_name}={score_s:.4f}")
+    print(f"  [耗時] {elapsed}s")
+    print(f"{'='*65}\n")
+
+
 def main():
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(
+        description="AutoML Pipeline 執行入口",
+        formatter_class=argparse.RawTextHelpFormatter,
+    )
+    # 通用旗標
     parser.add_argument("--fast",         action="store_true", help="縮減 HPO/NAS 次數")
     parser.add_argument("--skip-tabular", action="store_true", help="跳過傳統模型 HPO")
     parser.add_argument("--skip-dl",      action="store_true", help="跳過深度學習模型")
     parser.add_argument("--no-nas",       action="store_true", help="跳過 NAS，使用預設架構")
     parser.add_argument("--time-limit",   type=float, default=0, help="總時間上限（秒，0=無限）")
-    parser.add_argument("--openml-dir",   default="openml_cc18_data")
-    parser.add_argument("--ts-dir",       default="ucr_ts_80(時序資料)")
-    parser.add_argument("--top-n",        type=int, default=5, help="每目錄取前 N 個資料集")
-    parser.add_argument("--metric",       choices=["f1", "accuracy"], default="f1", help="優化指標 (預設 f1)")
+    parser.add_argument("--metric",       choices=["f1", "accuracy"], default="f1",
+                        help="優化指標（預設 f1）")
+
+    # 批次模式旗標
+    parser.add_argument("--batch",        action="store_true",
+                        help="批次模式：評估 openml_dir + ts_dir 前 top-n 個資料集")
+    parser.add_argument("--openml-dir",   default="openml_cc18_data",
+                        help="OpenML CSV 目錄（批次模式用）")
+    parser.add_argument("--ts-dir",       default="ucr_ts_80(時序資料)",
+                        help="UCR 時序 CSV 目錄（批次模式用）")
+    parser.add_argument("--top-n",        type=int, default=5,
+                        help="每目錄取前 N 個資料集（批次模式用）")
+
+    # 單一 CSV 模式旗標
+    parser.add_argument("--csv",          type=str, default=None,
+                        help="單一 CSV 檔案路徑（指定後進入單資料集模式）")
+    parser.add_argument("--target",       type=str, default=None,
+                        help="目標欄位名稱（單 CSV 模式用，未指定時自動偵測）")
+    parser.add_argument("--ts",           action="store_true",
+                        help="標記為時序資料集（單 CSV 模式用）")
+
     args = parser.parse_args()
 
-    run_batch(args)
+    if args.csv:
+        run_single(args)
+    elif args.batch:
+        run_batch(args)
+    else:
+        parser.print_help()
+        print("\n[提示] 請指定 --csv <path> 或 --batch 來執行 Pipeline。")
 
 
 if __name__ == "__main__":
