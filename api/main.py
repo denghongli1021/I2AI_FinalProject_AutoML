@@ -30,26 +30,38 @@ if hasattr(sys.stdout, "reconfigure"):
     except Exception:
         pass
 
+# 載入 .env (本地開發用,Render 已經有環境變數注入機制)
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+
 import io
 
 import numpy as np
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel
 
 from api import preprocess, train, visualize
+from api.auth import init_db, router as auth_router, get_current_user
 from api.preprocess import (
     run_data_audit,
     preprocess_for_training,
     preprocess_for_inference,
 )
 from api.preprocess.core import AutoRouter
-from api.store import DATASETS, MODELS, PREPROCESSORS
+from api.store import (
+    DATASETS, MODELS, PREPROCESSORS,
+    get_owned, list_owned, stamp,
+)
 from api.visualize import AutoMLVisualizer
 
 app = FastAPI(title="AutoML API", version="0.1.0")
 
+# CORS — 允許 credentials 走 (給 Authorization header 用);origins 用 regex 含 localhost / GitHub Pages
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -57,6 +69,12 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# 啟動時建表 (User table)
+init_db()
+
+# 掛 auth router (/api/auth/*)
+app.include_router(auth_router, prefix="/api")
 
 
 @app.get("/api/health")
@@ -75,7 +93,10 @@ def health() -> dict[str, Any]:
 # 1. PREPROCESS
 # ============================================================
 @app.post("/api/preprocess")
-async def preprocess_endpoint(file: UploadFile = File(...)) -> dict[str, Any]:
+async def preprocess_endpoint(
+    file: UploadFile = File(...),
+    user = Depends(get_current_user),
+) -> dict[str, Any]:
     raw = await file.read()
     try:
         df, response = preprocess.run(raw, file.filename)
@@ -89,12 +110,83 @@ async def preprocess_endpoint(file: UploadFile = File(...)) -> dict[str, Any]:
         response["auditReport"] = {"error": str(e)}
 
     dataset_id = str(uuid.uuid4())
-    DATASETS[dataset_id] = {
+    DATASETS[dataset_id] = stamp({
         "df": df,
         "fileName": file.filename,
         "loadedAt": time.time(),
-    }
+        # 把 response 快取起來,/api/dataset/{id} 直接吐回去,省得重算
+        "response": response,
+    }, user)
     return {"id": dataset_id, **response}
+
+
+# ============================================================
+# 1c. DATASET listing/fetching — 給前端登入時把使用者已上傳的 CSV 還原回來
+# ============================================================
+@app.get("/api/dataset/list")
+def dataset_list_endpoint(user = Depends(get_current_user)) -> dict[str, Any]:
+    """列出當前 user 的所有 datasets,只回 metadata (不含整份 rows,避免 payload 過大)。"""
+    items = []
+    for ds_id, entry in list_owned(DATASETS, user):
+        resp = entry.get("response") or {}
+        items.append({
+            "id": ds_id,
+            "fileName": entry.get("fileName"),
+            "loadedAt": entry.get("loadedAt"),
+            "rowCount": resp.get("rowCount", 0),
+            "colCount": resp.get("colCount", 0),
+            "headers": resp.get("headers", []),
+        })
+    # 最新上傳排前面
+    items.sort(key=lambda x: x.get("loadedAt") or 0, reverse=True)
+    return {"datasets": items}
+
+
+@app.get("/api/dataset/{dataset_id}")
+def dataset_get_endpoint(
+    dataset_id: str,
+    user = Depends(get_current_user),
+) -> dict[str, Any]:
+    """取單一 dataset 的完整資料 (含 rows / analysis / correlation 等)。"""
+    entry = get_owned(DATASETS, dataset_id, user, "datasetId")
+    resp = entry.get("response")
+    if not resp:
+        raise HTTPException(status_code=500, detail="dataset response 快取遺失,請重新上傳")
+    return {"id": dataset_id, **resp}
+
+
+@app.delete("/api/dataset/{dataset_id}")
+def dataset_delete_endpoint(
+    dataset_id: str,
+    user = Depends(get_current_user),
+) -> dict[str, Any]:
+    """刪除 dataset + 級聯刪掉它的 preprocessors + models。"""
+    # 驗證擁有者 — 不是自己的就 404
+    get_owned(DATASETS, dataset_id, user, "datasetId")
+
+    # 找這個 dataset 衍生的 preprocessors
+    pp_ids = [pid for pid, p in PREPROCESSORS.items() if p.get("datasetId") == dataset_id]
+
+    # 找用到這些 preprocessor (或直接用此 dataset 訓練) 的 models
+    # 注意:raw 模式訓練的 model 沒有 preprocessorId,只能透過 dataset 連回 — 但 MODELS
+    # 沒存 datasetId,所以 raw 訓練的 model 無法精準對應。保守一點:刪 preprocessor 連結的 model。
+    model_ids = [mid for mid, m in MODELS.items() if m.get("preprocessorId") in pp_ids]
+
+    # 級聯刪除
+    DATASETS.pop(dataset_id, None)
+    for pid in pp_ids:
+        PREPROCESSORS.pop(pid, None)
+    for mid in model_ids:
+        MODELS.pop(mid, None)
+
+    return {
+        "ok": True,
+        "removed": {
+            "dataset": dataset_id,
+            "preprocessors": pp_ids,
+            "models": model_ids,
+        },
+    }
 
 
 # ============================================================
@@ -106,11 +198,12 @@ class AuditRequest(BaseModel):
 
 
 @app.post("/api/preprocess/audit")
-def preprocess_audit_endpoint(req: AuditRequest) -> dict[str, Any]:
+def preprocess_audit_endpoint(
+    req: AuditRequest,
+    user = Depends(get_current_user),
+) -> dict[str, Any]:
     """快速健檢:不真的跑 pipeline,只回傳 audit + 欄位分類預覽。"""
-    bundle = DATASETS.get(req.datasetId)
-    if bundle is None:
-        raise HTTPException(status_code=404, detail="datasetId 不存在")
+    bundle = get_owned(DATASETS, req.datasetId, user, "datasetId")
     df = bundle["df"]
     if req.target and req.target not in df.columns:
         raise HTTPException(status_code=400, detail=f"target '{req.target}' 不在欄位中")
@@ -138,11 +231,12 @@ class TransformRequest(BaseModel):
 
 
 @app.post("/api/preprocess/transform")
-def preprocess_transform_endpoint(req: TransformRequest) -> dict[str, Any]:
+def preprocess_transform_endpoint(
+    req: TransformRequest,
+    user = Depends(get_current_user),
+) -> dict[str, Any]:
     """跑完整的 preprocess_for_training,把 fitted preprocessor 存起來。"""
-    bundle = DATASETS.get(req.datasetId)
-    if bundle is None:
-        raise HTTPException(status_code=404, detail="datasetId 不存在")
+    bundle = get_owned(DATASETS, req.datasetId, user, "datasetId")
     df = bundle["df"]
     if req.target not in df.columns:
         raise HTTPException(status_code=400, detail=f"target '{req.target}' 不在欄位中")
@@ -156,7 +250,7 @@ def preprocess_transform_endpoint(req: TransformRequest) -> dict[str, Any]:
 
     feature_names = list(X_train.columns)
     preprocessor_id = f"pp_{uuid.uuid4().hex[:8]}"
-    PREPROCESSORS[preprocessor_id] = {
+    PREPROCESSORS[preprocessor_id] = stamp({
         "preprocessor": fitted,
         "target": req.target,
         "datasetId": req.datasetId,
@@ -166,7 +260,7 @@ def preprocess_transform_endpoint(req: TransformRequest) -> dict[str, Any]:
         "X_test": X_test,
         "y_train": y_train,
         "y_test": y_test,
-    }
+    }, user)
 
     # Router 分類預覽 (用於前端顯示哪些欄位被分到哪一桶)
     scan_df = df.drop(columns=[req.target])
@@ -197,16 +291,21 @@ def preprocess_transform_endpoint(req: TransformRequest) -> dict[str, Any]:
 
 
 @app.get("/api/preprocess/list")
-def preprocess_list_endpoint() -> dict[str, Any]:
-    """列出目前後端記憶體裡所有可用的 preprocessor (給實驗室「資料來源」下拉用)。"""
+def preprocess_list_endpoint(
+    user = Depends(get_current_user),
+) -> dict[str, Any]:
+    """列出當前 user 的所有 preprocessor (給實驗室「資料來源」下拉用)。"""
     items = []
-    for pid, entry in PREPROCESSORS.items():
+    for pid, entry in list_owned(PREPROCESSORS, user):
         ds_id = entry.get("datasetId")
+        # 只顯示自己擁有的 dataset 名稱;不是自己的 dataset 不揭露 (回 None)
         ds_bundle = DATASETS.get(ds_id) or {}
+        if ds_bundle.get("_owner") != entry.get("_owner"):
+            ds_bundle = {}
         items.append({
             "id": pid,
             "datasetId": ds_id,
-            "fileName": ds_bundle.get("fileName"),  # 比 UUID 穩定的對應依據
+            "fileName": ds_bundle.get("fileName"),
             "target": entry.get("target"),
             "featureCount": len(entry.get("featureNames", [])),
             "trainSize": int(len(entry["X_train"])) if entry.get("X_train") is not None else 0,
@@ -216,12 +315,14 @@ def preprocess_list_endpoint() -> dict[str, Any]:
 
 
 @app.get("/api/preprocess/download/{preprocessor_id}/{split}")
-def preprocess_download_endpoint(preprocessor_id: str, split: str):
+def preprocess_download_endpoint(
+    preprocessor_id: str,
+    split: str,
+    user = Depends(get_current_user),
+):
     """下載 train.csv / test.csv (處理後特徵 + 目標)。"""
     import pandas as pd
-    entry = PREPROCESSORS.get(preprocessor_id)
-    if entry is None:
-        raise HTTPException(status_code=404, detail="preprocessorId 不存在")
+    entry = get_owned(PREPROCESSORS, preprocessor_id, user, "preprocessorId")
     if split not in ("train", "test"):
         raise HTTPException(status_code=400, detail="split 必須是 'train' 或 'test'")
 
@@ -251,12 +352,13 @@ class InferenceRequest(BaseModel):
 
 
 @app.post("/api/preprocess/inference")
-def preprocess_inference_endpoint(req: InferenceRequest) -> dict[str, Any]:
+def preprocess_inference_endpoint(
+    req: InferenceRequest,
+    user = Depends(get_current_user),
+) -> dict[str, Any]:
     """用已 fit 好的 preprocessor 套用到新資料。"""
     import pandas as pd
-    entry = PREPROCESSORS.get(req.preprocessorId)
-    if entry is None:
-        raise HTTPException(status_code=404, detail="preprocessorId 不存在")
+    entry = get_owned(PREPROCESSORS, req.preprocessorId, user, "preprocessorId")
 
     try:
         new_df = pd.DataFrame(req.rows)
@@ -286,10 +388,8 @@ class TrainRequest(BaseModel):
     preprocessorId: str | None = None  # sources 含 "preprocessed" 時必填
 
 
-def _resolve_dataset(req: TrainRequest):
-    bundle = DATASETS.get(req.datasetId)
-    if bundle is None:
-        raise HTTPException(status_code=404, detail="datasetId 不存在,請先呼叫 /api/preprocess")
+def _resolve_dataset(req: TrainRequest, user):
+    bundle = get_owned(DATASETS, req.datasetId, user, "datasetId")
     df = bundle["df"]
     if req.target not in df.columns:
         raise HTTPException(status_code=400, detail=f"target '{req.target}' 不在欄位中")
@@ -305,7 +405,7 @@ def _prefix_event(ev: dict, label: str) -> dict:
     return ev
 
 
-def _run_sources(req: TrainRequest, on_progress=None):
+def _run_sources(req: TrainRequest, user, on_progress=None):
     """依 req.sources 跑指定的資料來源,回傳合併後的
     [(bundle, estimator, scaler, X_test_df), ...]。bundle 已標上 dataSource。"""
     sources = req.sources or ["raw"]
@@ -314,7 +414,7 @@ def _run_sources(req: TrainRequest, on_progress=None):
 
     # --- 來源 1: 原始資料集 ---
     if "raw" in sources:
-        df = _resolve_dataset(req)
+        df = _resolve_dataset(req, user)
         emit = (lambda ev: on_progress(_prefix_event(ev, "原始"))) if on_progress else None
         raw_results = train.run(df, req.target, req.features, req.algorithms, req.options, on_progress=emit)
         for bundle, est, scaler, xtdf in raw_results:
@@ -328,9 +428,7 @@ def _run_sources(req: TrainRequest, on_progress=None):
     if "preprocessed" in sources:
         if not req.preprocessorId:
             raise HTTPException(status_code=400, detail="選了「已預處理資料」但未提供 preprocessorId")
-        entry = PREPROCESSORS.get(req.preprocessorId)
-        if entry is None:
-            raise HTTPException(status_code=404, detail="preprocessorId 不存在,請重新執行預處理")
+        entry = get_owned(PREPROCESSORS, req.preprocessorId, user, "preprocessorId")
         emit = (lambda ev: on_progress(_prefix_event(ev, "預處理"))) if on_progress else None
         pp_results = train.run_prepared(
             entry["X_train"], entry["X_test"], entry["y_train"], entry["y_test"],
@@ -352,40 +450,46 @@ def _run_sources(req: TrainRequest, on_progress=None):
     return combined
 
 
-def _store_models(results) -> list[dict[str, Any]]:
+def _store_models(results, user) -> list[dict[str, Any]]:
     """把 (bundle, estimator, scaler, X_test_df) 結果存進 MODELS,並回傳 bundle 列表。"""
     bundles = []
     for bundle, estimator, scaler, X_test_df in results:
         model_id = f"model_{uuid.uuid4().hex[:8]}"
         bundle["id"] = model_id
-        MODELS[model_id] = {
+        MODELS[model_id] = stamp({
             "bundle": bundle,
             "estimator": estimator,
             "scaler": scaler,
             "featureNames": bundle["featureNames"],
             "X_test_df": X_test_df,  # for SHAP visualizer
             "preprocessorId": bundle.get("preprocessorId"),  # 預處理來源模型才有
-        }
+        }, user)
         bundles.append(bundle)
     return bundles
 
 
 @app.post("/api/train")
-def train_endpoint(req: TrainRequest) -> dict[str, Any]:
+def train_endpoint(
+    req: TrainRequest,
+    user = Depends(get_current_user),
+) -> dict[str, Any]:
     try:
-        results = _run_sources(req)
+        results = _run_sources(req, user)
     except HTTPException:
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"train 失敗: {e}")
-    return {"models": _store_models(results)}
+    return {"models": _store_models(results, user)}
 
 
 # ============================================================
 # 2b. TRAIN (SSE) — 即時推送進度與 log
 # ============================================================
 @app.post("/api/train/stream")
-def train_stream_endpoint(req: TrainRequest):
+def train_stream_endpoint(
+    req: TrainRequest,
+    user = Depends(get_current_user),
+):
     def event_stream():
         q: queue.Queue = queue.Queue()
         result_box: dict[str, Any] = {"results": None, "error": None}
@@ -393,7 +497,7 @@ def train_stream_endpoint(req: TrainRequest):
         def worker():
             try:
                 result_box["results"] = _run_sources(
-                    req, on_progress=lambda ev: q.put(ev),
+                    req, user, on_progress=lambda ev: q.put(ev),
                 )
             except HTTPException as he:
                 result_box["error"] = str(he.detail)
@@ -415,7 +519,7 @@ def train_stream_endpoint(req: TrainRequest):
         if result_box["error"]:
             yield f"data: {json.dumps({'type': 'error', 'message': result_box['error']}, ensure_ascii=False)}\n\n"
         else:
-            bundles = _store_models(result_box["results"])
+            bundles = _store_models(result_box["results"], user)
             yield f"data: {json.dumps({'type': 'done', 'models': bundles}, ensure_ascii=False)}\n\n"
 
     return StreamingResponse(
@@ -435,10 +539,11 @@ class VisualizeRequest(BaseModel):
 
 
 @app.post("/api/visualize")
-def visualize_endpoint(req: VisualizeRequest) -> dict[str, Any]:
-    entry = MODELS.get(req.modelId)
-    if entry is None:
-        raise HTTPException(status_code=404, detail="modelId 不存在")
+def visualize_endpoint(
+    req: VisualizeRequest,
+    user = Depends(get_current_user),
+) -> dict[str, Any]:
+    entry = get_owned(MODELS, req.modelId, user, "modelId")
     return visualize.run(entry["bundle"], req.chartType, req.options)
 
 
@@ -453,15 +558,16 @@ class ShapRequest(BaseModel):
 
 
 @app.post("/api/visualize/shap")
-def visualize_shap_endpoint(req: ShapRequest) -> dict[str, Any]:
+def visualize_shap_endpoint(
+    req: ShapRequest,
+    user = Depends(get_current_user),
+) -> dict[str, Any]:
     if AutoMLVisualizer is None:
         raise HTTPException(
             status_code=500,
             detail="AutoMLVisualizer 未啟用 — 請安裝 shap + plotly: pip install shap plotly",
         )
-    entry = MODELS.get(req.modelId)
-    if entry is None:
-        raise HTTPException(status_code=404, detail="modelId 不存在")
+    entry = get_owned(MODELS, req.modelId, user, "modelId")
 
     estimator = entry.get("estimator")
     X_test_df = entry.get("X_test_df")
@@ -511,10 +617,11 @@ class PredictRequest(BaseModel):
 
 
 @app.post("/api/predict")
-def predict_endpoint(req: PredictRequest) -> dict[str, Any]:
-    entry = MODELS.get(req.modelId)
-    if entry is None:
-        raise HTTPException(status_code=404, detail="modelId 不存在")
+def predict_endpoint(
+    req: PredictRequest,
+    user = Depends(get_current_user),
+) -> dict[str, Any]:
+    entry = get_owned(MODELS, req.modelId, user, "modelId")
 
     estimator = entry["estimator"]
     scaler = entry["scaler"]
@@ -545,12 +652,11 @@ async def predict_batch_endpoint(
     modelId: str = Form(...),
     file: UploadFile = File(...),
     sampleFile: UploadFile | None = File(None),
+    user = Depends(get_current_user),
 ) -> Response:
     import pandas as pd
 
-    entry = MODELS.get(modelId)
-    if entry is None:
-        raise HTTPException(status_code=404, detail="modelId 不存在")
+    entry = get_owned(MODELS, modelId, user, "modelId")
     estimator = entry["estimator"]
     scaler = entry["scaler"]
     feature_names = entry["featureNames"]
@@ -567,12 +673,8 @@ async def predict_batch_endpoint(
     if preprocessor_id:
         # ── 預處理來源的模型 ──
         # 上傳的 CSV 是「原始格式」(跟訓練資料同欄位),要先過同一個 preprocessor 轉換
-        pp_entry = PREPROCESSORS.get(preprocessor_id)
-        if pp_entry is None:
-            raise HTTPException(
-                status_code=400,
-                detail="此模型對應的 preprocessor 已不存在 (後端可能重啟過),請重新執行預處理再訓練",
-            )
+        # 同 user 的 preprocessor 才能拿;不是的話當作不存在 (404)
+        pp_entry = get_owned(PREPROCESSORS, preprocessor_id, user, "preprocessor")
         preprocessor = pp_entry["preprocessor"]
         pp_target = pp_entry["target"]
         # 丟掉目標欄 (CSV 若有帶),其餘原始欄位交給 preprocessor

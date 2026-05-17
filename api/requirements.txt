@@ -11,3 +11,16 @@ python-multipart>=0.0.9
 # Plotly JSON is rendered by frontend Plotly.newPlot, so kaleido is not needed.
 shap>=0.44.0
 plotly>=5.18.0
+# Auth: SQLAlchemy ORM + Postgres driver (Supabase) / fallback SQLite for local dev.
+sqlalchemy>=2.0.0
+psycopg2-binary>=2.9.0
+# Auth: password hashing + JWT (bcrypt direct, no passlib — passlib 1.7.x conflicts with bcrypt 5.x).
+bcrypt>=4.0.0
+python-jose[cryptography]>=3.3.0
+# Required by Pydantic EmailStr (RegisterRequest in api/auth/routes.py).
+email-validator>=2.0.0
+# Auth: OAuth (Google + GitHub) via Authlib.
+authlib>=1.3.0
+httpx>=0.27.0
+# Load env vars from .env file during local dev.
+python-dotenv>=1.0.0

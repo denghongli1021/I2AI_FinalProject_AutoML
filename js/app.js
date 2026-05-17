@@ -17,6 +17,37 @@ document.addEventListener('DOMContentLoaded', () => {
   initApiKeepAlive();
   initNotifications();
   loadTrainingHistory();
+  // Auth — 讀 localStorage / 接 OAuth callback,後續所有 ApiClient fetch 自動帶 token
+  if (typeof AuthClient !== 'undefined') AuthClient.init();
+
+  // 監聽 auth 狀態變化 — 登入 / 登出 / 切帳號都要全清 + 重抓新使用者的資料
+  let _authInitial = true;
+  window.addEventListener('auth:changed', async (ev) => {
+    const wasInitial = _authInitial;
+    _authInitial = false;
+    // 1. 清光上一位使用者的 in-memory 狀態
+    clearAllUserState();
+    // 2. 載入新使用者的訓練歷史 (per-user localStorage key)
+    loadTrainingHistory();
+    // 2a. 若有歷史,自動套用最新一筆 — dashboard 跟 leaderboard 才有東西可顯示
+    if (_trainingHistory.length > 0) {
+      _activeHistoryRunId = _trainingHistory[0].id;
+      MLEngine.trainedModels = _trainingHistory[0].models || [];
+    }
+    // 3. 抓 datasets
+    await restoreUserDatasets();
+    // 4. 重新渲染當前頁面 (不然會卡在舊資料的 render)
+    const visiblePage = document.querySelector('.page-section:not(.hidden)');
+    if (visiblePage) {
+      const pageId = visiblePage.id.replace('page-', '');
+      // 登出 (user 是 null) 而且不在 dashboard → 跳回 dashboard
+      if (!wasInitial && !ev.detail?.user && pageId !== 'dashboard') {
+        navigateTo('dashboard');
+      } else {
+        renderPageCharts(pageId);
+      }
+    }
+  });
   // Show demo data on first load
   showDemoDataset();
   setTimeout(() => renderPageCharts('dashboard'), 100);
@@ -58,47 +89,228 @@ function setGlobalStatus(state, message) {
   if (message) text.textContent = message;
 }
 
+// ===== 切換使用者時清空所有 in-memory 狀態 =====
+// auth:changed 觸發時 (登入 / 登出 / 切帳號) 都要先清,避免看到上一位的資料。
+function clearAllUserState() {
+  // ML 引擎 — 訓練好的模型
+  if (typeof MLEngine !== 'undefined') {
+    MLEngine.trainedModels = [];
+    MLEngine.trainingHistory = [];
+  }
+  // 訓練歷史 (in-memory) + active 選擇 — 不動 localStorage,因為 key 已 per-user 隔離
+  _trainingHistory = [];
+  _activeHistoryRunId = null;
+  // 通知 (session-only,不持久化)
+  _notifications = [];
+  // 預處理歷史
+  ppHistory = [];
+  ppLastPreprocessorId = null;
+  ppLastFeatureColumns = [];
+  // 資料引擎
+  if (typeof DataEngine !== 'undefined') {
+    DataEngine.datasets = [];
+    DataEngine.currentDataset = null;
+  }
+  // 重設訓練按鈕狀態
+  if (typeof setTrainBtnState === 'function') setTrainBtnState('idle');
+  // 重設全域狀態指示器
+  if (typeof setGlobalStatus === 'function') setGlobalStatus('idle', '系統就緒');
+  // 隱藏通知 popover (若還開著)
+  document.getElementById('notification-detail-popover')?.classList.add('hidden');
+  // 重新渲染相關 UI
+  renderNotifications();
+  // 回到 dashboard (避免停在「實驗室 / 排行榜」看到空畫面卻不知所云)
+  // 但不要在 init 階段 navigate (那時還沒切頁) — 只在 logout 後才跳
+}
+
+// ===== USER DATASET RESTORATION =====
+// auth:changed 時呼叫 — 把後端記憶體裡屬於當前 user 的 datasets 抓回前端 DataEngine。
+// 只先抓 metadata (stub),點擊時才 lazy fetch 完整 rows/analysis。
+async function restoreUserDatasets() {
+  if (typeof ApiClient === 'undefined' || !ApiClient.enabled) return;
+  try {
+    const list = await ApiClient.datasetList();
+    // 清掉舊的 (避免切換使用者後看到上一位的)
+    DataEngine.datasets = [];
+    DataEngine.currentDataset = null;
+    for (const meta of list) {
+      DataEngine.datasets.push({
+        id: meta.id,
+        fileName: meta.fileName,
+        rowCount: meta.rowCount,
+        colCount: meta.colCount,
+        headers: meta.headers || [],
+        // stub — 點擊時才補齊
+        data: [],
+        columns: {},
+        analysis: [],
+        loadedAt: meta.loadedAt ? new Date(meta.loadedAt * 1000) : new Date(),
+        _fromApi: true,
+        _stub: true,
+      });
+    }
+    // 自動把最新一筆當 currentDataset (但需要 fetch full data 才能 render)
+    if (DataEngine.datasets.length > 0) {
+      await hydrateDatasetIfStub(DataEngine.datasets[0]);
+      DataEngine.currentDataset = DataEngine.datasets[0];
+    }
+    // 重新渲染 dataset 頁面跟相關 UI
+    if (typeof renderDatasetPage === 'function') renderDatasetPage();
+    // 也同步 file-info-bar / upload-card 顯示狀態
+    const uploadCard = document.getElementById('upload-card');
+    const infoBar = document.getElementById('file-info-bar');
+    if (DataEngine.currentDataset) {
+      if (uploadCard) uploadCard.classList.add('hidden');
+      if (infoBar) {
+        infoBar.classList.remove('hidden');
+        const ds = DataEngine.currentDataset;
+        const nameEl = document.getElementById('file-info-name');
+        const metaEl = document.getElementById('file-info-meta');
+        if (nameEl) nameEl.textContent = ds.fileName;
+        if (metaEl) metaEl.textContent = `${ds.rowCount.toLocaleString()} 筆資料 | ${ds.colCount} 個欄位`;
+      }
+    } else {
+      if (uploadCard) uploadCard.classList.remove('hidden');
+      if (infoBar) infoBar.classList.add('hidden');
+    }
+  } catch (e) {
+    console.warn('restoreUserDatasets 失敗:', e.message);
+  }
+}
+
+// stub dataset 點擊時 lazy fetch — 把 rows/analysis 補齊
+async function hydrateDatasetIfStub(ds) {
+  if (!ds || !ds._stub) return ds;
+  try {
+    const full = await ApiClient.datasetGet(ds.id);
+    // 重建 columns 字典 (headers + data → {header: [values]})
+    const columns = {};
+    (full.headers || []).forEach((h, i) => {
+      columns[h] = (full.data || []).map(row => row[i]);
+    });
+    Object.assign(ds, {
+      data: full.data || [],
+      columns,
+      analysis: full.analysis || [],
+      _correlation: full.correlation || null,
+      _healthScore: full.healthScore || null,
+      _processingLog: full.processingLog || null,
+      _stub: false,
+    });
+  } catch (e) {
+    console.warn('hydrateDataset 失敗:', e.message);
+  }
+  return ds;
+}
+
 // ===== TRAINING HISTORY (localStorage 持久化,最近 5 筆) =====
 // 每筆: { id, timestamp, datasetId, datasetName, target, taskType,
 //        sources, modelCount, bestModel: {name, score}, metric, options, models[] }
-// 重新整理後還在;quota 用爆時自動丟最舊的;再爆就拋棄重型欄位 (testTrue/testPred)。
-const _HISTORY_KEY = 'automl_training_history';
+// Per-user 隔離:key 後綴帶 owner (u{user.id} 或 guest),登出不會看到別人的紀錄。
 const _HISTORY_LIMIT = 5;
 let _trainingHistory = [];
 
+function _historyKey() {
+  // 跟後端 store.owner_id() 同邏輯
+  const u = (typeof AuthClient !== 'undefined' && AuthClient.user) ? `u${AuthClient.user.id}` : 'guest';
+  return `automl_training_history_${u}`;
+}
+
+// 最新一次訓練的完整資料 (含 testTrue/testPred/featureStats) 獨立存一份,
+// 這樣即使主歷史被 slim 過,最新那筆的圖表/What-If 永遠能完整 render。
+function _latestFullKey() {
+  const u = (typeof AuthClient !== 'undefined' && AuthClient.user) ? `u${AuthClient.user.id}` : 'guest';
+  return `automl_latest_full_${u}`;
+}
+
+function _saveLatestFull(entry) {
+  try { localStorage.setItem(_latestFullKey(), JSON.stringify(entry)); }
+  catch (e) {
+    // 一筆都裝不下就放棄,不影響主歷史
+    try { localStorage.removeItem(_latestFullKey()); } catch (_) {}
+  }
+}
+
+function _loadLatestFull() {
+  try {
+    const raw = localStorage.getItem(_latestFullKey());
+    return raw ? JSON.parse(raw) : null;
+  } catch (e) { return null; }
+}
+
 function loadTrainingHistory() {
   try {
-    const raw = localStorage.getItem(_HISTORY_KEY);
+    const raw = localStorage.getItem(_historyKey());
     _trainingHistory = raw ? JSON.parse(raw) : [];
   } catch (e) {
     _trainingHistory = [];
   }
+  // 把最新一次的完整版本還原回去 (主歷史可能被 slim 過)
+  const latestFull = _loadLatestFull();
+  if (latestFull && _trainingHistory.length > 0 && _trainingHistory[0].id === latestFull.id) {
+    _trainingHistory[0] = latestFull;
+  }
 }
 
 function _persistTrainingHistory() {
-  // 嘗試完整存,quota 爆掉時逐步降級
+  const key = _historyKey();
   const trySave = (data) => {
-    try { localStorage.setItem(_HISTORY_KEY, JSON.stringify(data)); return true; }
+    try { localStorage.setItem(key, JSON.stringify(data)); return true; }
     catch (e) { return false; }
   };
+
+  // 重要:in-memory _trainingHistory 永遠保留全部筆數 (5 筆),不因為 localStorage
+  // 寫不下就丟掉。寫 localStorage 時用 slim 副本,讓筆數能完整持久化。
+
+  // Level 0: 完整版
   if (trySave(_trainingHistory)) return;
-  // Level 1: 砍最舊的直到只剩 1 筆
-  while (_trainingHistory.length > 1) {
-    _trainingHistory.pop();
-    if (trySave(_trainingHistory)) return;
-  }
-  // Level 2: 拋棄重型欄位 (testTrue/testPred/featureStats)
-  const slim = _trainingHistory.map(h => ({
+  console.warn('[訓練歷史] localStorage 容量不足,啟動瘦身模式...');
+
+  // Level 1: 先砍最大的 What-If 用資料 (featureStats / means / stds)
+  // 散點圖 / 殘差圖 / 特徵重要性都還能用
+  const slim1 = _trainingHistory.map(h => ({
     ...h,
-    models: (h.models || []).map(m => ({
-      ...m,
-      testTrue: undefined, testPred: undefined,
-      featureStats: undefined, means: undefined, stds: undefined,
-    })),
+    models: (h.models || []).map(m => {
+      const { featureStats, means, stds, ...rest } = m;
+      return rest;
+    }),
   }));
-  if (trySave(slim)) { _trainingHistory = slim; return; }
-  // Level 3: 投降,清空 localStorage
-  try { localStorage.removeItem(_HISTORY_KEY); } catch (e) {}
+  if (trySave(slim1)) return;
+
+  // Level 2: 再砍 testTrue / testPred (散點圖 / 殘差圖會 fallback 到佔位訊息)
+  const slim2 = slim1.map(h => ({
+    ...h,
+    models: h.models.map(m => {
+      const { testTrue, testPred, ...rest } = m;
+      return rest;
+    }),
+  }));
+  if (trySave(slim2)) return;
+
+  // Level 3: 再砍 featureImportance / featureNames (特徵重要性 fallback)
+  const slim3 = slim2.map(h => ({
+    ...h,
+    models: h.models.map(m => {
+      const { featureImportance, featureNames, X_test_df, ...rest } = m;
+      return rest;
+    }),
+  }));
+  if (trySave(slim3)) return;
+
+  // Level 3: 只留 metadata + bestModel (連 models 陣列都丟)
+  const metaOnly = _trainingHistory.map(h => ({
+    id: h.id, timestamp: h.timestamp,
+    datasetId: h.datasetId, datasetName: h.datasetName,
+    target: h.target, taskType: h.taskType,
+    sources: h.sources, modelCount: h.modelCount,
+    metric: h.metric, bestModel: h.bestModel,
+    options: h.options,
+    models: [],
+  }));
+  if (trySave(metaOnly)) return;
+
+  // Level 4: 投降清空
+  try { localStorage.removeItem(key); } catch (e) {}
 }
 
 function pushTrainingHistory(entry) {
@@ -106,52 +318,191 @@ function pushTrainingHistory(entry) {
   _trainingHistory.unshift(entry);
   if (_trainingHistory.length > _HISTORY_LIMIT) _trainingHistory = _trainingHistory.slice(0, _HISTORY_LIMIT);
   _persistTrainingHistory();
+  // 把這筆最新的完整版另存一份 — 之後 reload / 登出登入後還能保留 testTrue/featureStats
+  _saveLatestFull(entry);
   _activeHistoryRunId = entry.id; // 新訓練即「現在」
 }
 
 // 排行榜 / 洞察頁顯示中的歷史 runId — 切換選單時更新
 let _activeHistoryRunId = null;
 
-// 填充歷史下拉選單。
-// 重要:不要用 cloneNode(true) — HTML form element 的 selected/value 屬性
-// 不會被 cloneNode 保留,會導致「切換後 dropdown 顯示舊選項、但資料已經換」的同步 bug。
-// 改用 instance flag 確保 change listener 只綁一次。
-function populateHistorySelect(selectEl) {
-  if (!selectEl) return;
+// 三層級聯歷史選擇器:資料集 → target → 訓練紀錄。
+// 用法:HTML 給一個 <div class="history-cascade"></div>,呼叫 renderHistoryCascade(container)。
+function renderHistoryCascade(container) {
+  if (!container) return;
+
+  const variant = container.dataset.variant || 'full'; // 'compact' = 排行榜縮小版
+  const selectCls = variant === 'compact'
+    ? 'bg-dark-800 border border-dark-600 rounded px-2 py-1 text-xs focus:border-primary-500 outline-none'
+    : 'bg-dark-800 border border-dark-600 rounded-lg px-3 py-2 text-sm focus:border-primary-500 outline-none';
+  const labelCls = variant === 'compact' ? 'text-[10px] text-dark-500' : 'text-xs text-dark-400';
+
   if (_trainingHistory.length === 0) {
-    selectEl.innerHTML = '<option>無歷史紀錄</option>';
-    selectEl.disabled = true;
+    container.innerHTML = `<p class="${variant === 'compact' ? 'text-[11px]' : 'text-xs'} text-dark-500">尚無歷史訓練紀錄 — 訓練後會顯示在這裡</p>`;
     return;
   }
-  selectEl.disabled = false;
-  selectEl.innerHTML = '';
-  _trainingHistory.forEach((h) => {
+
+  // 永遠重建 markup (簡單,不會有 cache 狀態問題)
+  container.innerHTML = `
+    <div class="flex items-center gap-2 flex-wrap">
+      <div class="flex items-center gap-1">
+        <span class="${labelCls}">資料集</span>
+        <select class="cascade-dataset ${selectCls} max-w-[12rem]"></select>
+      </div>
+      <span class="text-dark-600">›</span>
+      <div class="flex items-center gap-1">
+        <span class="${labelCls}">target</span>
+        <select class="cascade-target ${selectCls} max-w-[10rem]"></select>
+      </div>
+      <span class="text-dark-600">›</span>
+      <div class="flex items-center gap-1">
+        <span class="${labelCls}">訓練</span>
+        <select class="cascade-run ${selectCls} max-w-[20rem]"></select>
+      </div>
+      <button class="history-info-btn w-6 h-6 rounded-full bg-dark-700 hover:bg-primary-500/20 text-dark-400 hover:text-primary-300 text-[12px] flex items-center justify-center transition-colors" title="查看訓練詳情">ⓘ</button>
+    </div>
+  `;
+
+  const dsSelect  = container.querySelector('.cascade-dataset');
+  const tgSelect  = container.querySelector('.cascade-target');
+  const runSelect = container.querySelector('.cascade-run');
+  const infoBtn   = container.querySelector('.history-info-btn');
+
+  const fmtScore = (r) => r.taskType === 'regression'
+    ? `R²=${r.bestModel.score.toFixed(4)}`
+    : `Acc=${(r.bestModel.score * 100).toFixed(1)}%`;
+  const fmtTime = (ts) => {
+    const d = new Date(ts);
+    return `${String(d.getMonth()+1).padStart(2,'0')}/${String(d.getDate()).padStart(2,'0')} ${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`;
+  };
+
+  // ---- 內部 populate helpers ----
+  const refillRunSelect = (datasetName, target) => {
+    const runs = _trainingHistory
+      .filter(h => h.datasetName === datasetName && h.target === target)
+      .sort((a, b) => {
+        if (b.modelCount !== a.modelCount) return b.modelCount - a.modelCount;
+        return (b.bestModel?.score || 0) - (a.bestModel?.score || 0);
+      });
+    runSelect.innerHTML = '';
+    runs.forEach(r => {
+      const opt = document.createElement('option');
+      opt.value = r.id;
+      opt.textContent = `${fmtTime(r.timestamp)} · ${r.modelCount} 模型 · ${fmtScore(r)}`;
+      runSelect.appendChild(opt);
+    });
+    // 預設選 activeHistoryRunId (若還屬於這個資料集+target),否則選第一筆
+    if (runs.find(r => r.id === _activeHistoryRunId)) {
+      runSelect.value = _activeHistoryRunId;
+    } else if (runs.length > 0) {
+      runSelect.value = runs[0].id;
+    }
+    if (infoBtn) infoBtn.dataset.runId = runSelect.value || '';
+  };
+
+  const refillTargetSelect = (datasetName) => {
+    const targets = [...new Set(
+      _trainingHistory.filter(h => h.datasetName === datasetName).map(h => h.target)
+    )];
+    tgSelect.innerHTML = '';
+    targets.forEach(t => {
+      const opt = document.createElement('option');
+      opt.value = t;
+      opt.textContent = t;
+      tgSelect.appendChild(opt);
+    });
+    // 預設選 activeRun 的 target (若還在),否則第一個
+    const activeRun = _trainingHistory.find(h => h.id === _activeHistoryRunId);
+    if (activeRun && activeRun.datasetName === datasetName && targets.includes(activeRun.target)) {
+      tgSelect.value = activeRun.target;
+    } else {
+      tgSelect.value = targets[0];
+    }
+    refillRunSelect(datasetName, tgSelect.value);
+  };
+
+  // ---- 第一層:資料集 ----
+  const datasets = [...new Set(_trainingHistory.map(h => h.datasetName))];
+  dsSelect.innerHTML = '';
+  datasets.forEach(ds => {
     const opt = document.createElement('option');
-    opt.value = h.id;
-    const ts = new Date(h.timestamp);
-    const tsStr = `${String(ts.getMonth()+1).padStart(2,'0')}/${String(ts.getDate()).padStart(2,'0')} ${String(ts.getHours()).padStart(2,'0')}:${String(ts.getMinutes()).padStart(2,'0')}`;
-    const score = h.taskType === 'regression'
-      ? `R²=${h.bestModel.score.toFixed(4)}`
-      : `Acc=${(h.bestModel.score * 100).toFixed(1)}%`;
-    opt.textContent = `${tsStr} · ${h.datasetName} · ${h.modelCount} 模型 · ${score}`;
-    selectEl.appendChild(opt);
+    opt.value = ds;
+    opt.textContent = ds;
+    dsSelect.appendChild(opt);
   });
-  // active 不存在 (例如重整後第一次 render) → 預設用最新
-  if (!_activeHistoryRunId || !_trainingHistory.find(h => h.id === _activeHistoryRunId)) {
-    _activeHistoryRunId = _trainingHistory[0].id;
-  }
-  // 用 select.value 指定選中項 — 這個會在每次 render 都生效
-  selectEl.value = _activeHistoryRunId;
-  // 只綁一次 listener
-  if (!selectEl.__historyListenerAttached) {
-    selectEl.addEventListener('change', e => applyHistoricalRun(e.target.value));
-    selectEl.__historyListenerAttached = true;
-  }
+  const activeRun = _trainingHistory.find(h => h.id === _activeHistoryRunId);
+  dsSelect.value = activeRun ? activeRun.datasetName : datasets[0];
+  refillTargetSelect(dsSelect.value);
+
+  // ---- listeners (每次 render 都重綁,因為元素是新的) ----
+  dsSelect.addEventListener('change', () => {
+    refillTargetSelect(dsSelect.value);
+    if (runSelect.value) applyHistoricalRun(runSelect.value);
+  });
+  tgSelect.addEventListener('change', () => {
+    refillRunSelect(dsSelect.value, tgSelect.value);
+    if (runSelect.value) applyHistoricalRun(runSelect.value);
+  });
+  runSelect.addEventListener('change', () => {
+    if (infoBtn) infoBtn.dataset.runId = runSelect.value;
+    applyHistoricalRun(runSelect.value);
+  });
+  if (infoBtn) _wireHistoryInfoBtn(infoBtn);
+}
+
+// 給 ⓘ 按鈕綁 hover 事件 (顯示訓練詳情 popover)
+function _wireHistoryInfoBtn(btn) {
+  btn.addEventListener('mouseenter', e => {
+    const runId = e.currentTarget.dataset.runId;
+    const run = _trainingHistory.find(h => h.id === runId);
+    if (!run) return;
+    const popover = document.getElementById('notification-detail-popover');
+    if (!popover) return;
+    if (_notifDetailHideTimer) { clearTimeout(_notifDetailHideTimer); _notifDetailHideTimer = null; }
+
+    const isReg = run.taskType === 'regression';
+    popover.innerHTML = renderNotificationDetailContent({
+      type: 'training',
+      dataset: run.datasetName,
+      target: run.target,
+      taskType: run.taskType,
+      sources: run.sources || ['raw'],
+      modelCount: run.modelCount,
+      metric: run.metric || (isReg ? 'R²' : 'Accuracy'),
+      topModels: (run.models || []).slice(0, 5).map(m => ({
+        name: m.name.replace(/^\[(原始|預處理)\]\s*/, ''),
+        source: m.dataSource === 'preprocessed' ? '預處理' : '原始',
+        score: isReg ? m.metrics.testR2 : m.metrics.testAccuracy,
+        trainTime: m.trainTime || 0,
+      })),
+      totalTime: (run.models || []).reduce((s, m) => s + (m.trainTime || 0), 0),
+    });
+    popover.classList.remove('hidden');
+
+    // 定位 — 放按鈕左下,空間不夠時改右
+    requestAnimationFrame(() => {
+      const rect = btn.getBoundingClientRect();
+      const popRect = popover.getBoundingClientRect();
+      const margin = 8;
+      let left = rect.left - popRect.width - margin;
+      let top  = rect.bottom + margin;
+      if (left < margin) left = rect.right + margin;
+      if (top + popRect.height > window.innerHeight - margin) {
+        top = Math.max(margin, window.innerHeight - popRect.height - margin);
+      }
+      popover.style.left = `${left}px`;
+      popover.style.top = `${top}px`;
+    });
+
+    popover.onmouseenter = () => { if (_notifDetailHideTimer) { clearTimeout(_notifDetailHideTimer); _notifDetailHideTimer = null; } };
+    popover.onmouseleave = () => scheduleHideNotificationDetail();
+  });
+  btn.addEventListener('mouseleave', () => scheduleHideNotificationDetail());
 }
 
 function clearTrainingHistory() {
   _trainingHistory = [];
-  try { localStorage.removeItem(_HISTORY_KEY); } catch (e) {}
+  try { localStorage.removeItem(_historyKey()); } catch (e) {}
 }
 
 // 把指定的歷史紀錄套用到 MLEngine.trainedModels,並重新渲染目前頁面相關區塊
@@ -424,7 +775,11 @@ function navigateTo(page) {
     item.classList.toggle('active', item.dataset.page === page);
   });
   document.getElementById('breadcrumb-current').textContent = PAGE_NAMES[page] || page;
-  setTimeout(() => renderPageCharts(page), 50);
+  setTimeout(() => {
+    renderPageCharts(page);
+    // 多丟一次 resize 給保險:處理「容器剛從 hidden 切回 visible,ECharts 還沒重算尺寸」
+    setTimeout(() => window.dispatchEvent(new Event('resize')), 100);
+  }, 50);
 }
 
 function initNavigation() {
@@ -443,12 +798,16 @@ function renderPageCharts(page) {
 
   switch (page) {
     case 'dashboard':
-      if (appMode === 'demo' || MLEngine.trainedModels.length > 0) {
+      if (appMode === 'real' && (MLEngine.trainedModels.length > 0 || _trainingHistory.length > 0)) {
+        // Real mode 且有訓練紀錄 → 用真實資料 (歷史 + 通知 + 最近實驗)
+        renderRealPerformanceTrend();
+        renderRealTaskDistribution();
+        updateDashboardRealMetrics();          // metrics + 最近實驗
+        renderSystemNotificationsCard();
+      } else if (appMode === 'demo' || MLEngine.trainedModels.length > 0) {
+        // 純 demo 模式 → mock 圖
         renderPerformanceTrend();
         renderTaskDistribution();
-        if (appMode === 'real' && MLEngine.trainedModels.length > 0) {
-          updateDashboardRealMetrics();
-        }
       }
       break;
     case 'datasets':
@@ -697,17 +1056,39 @@ function renderDatasetList() {
         <svg class="w-4 h-4 text-dark-500 hover:text-danger-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>
       </button>
     `;
-    // Click to switch dataset
-    div.addEventListener('click', (e) => {
+    // Click to switch dataset (stub 需 lazy fetch)
+    div.addEventListener('click', async (e) => {
       if (e.target.closest('.ds-remove-btn')) return;
+      await hydrateDatasetIfStub(ds);
       DataEngine.switchDataset(ds.id);
       renderDatasetPage();
     });
-    // Remove button
-    div.querySelector('.ds-remove-btn').addEventListener('click', (e) => {
+    // Remove button — 先呼叫後端 DELETE (級聯刪 preprocessor + model),再清前端 state
+    div.querySelector('.ds-remove-btn').addEventListener('click', async (e) => {
       e.stopPropagation();
+      const ok = confirm(`確定要移除「${ds.fileName}」?\n相關預處理結果與訓練模型也會一併刪除。`);
+      if (!ok) return;
+      try {
+        if (typeof ApiClient !== 'undefined' && ApiClient.enabled && ds._fromApi) {
+          await ApiClient.datasetDelete(ds.id);
+        }
+      } catch (err) {
+        // 不擋本機刪除 — 後端刪不到 (可能 stub 已過期) 還是允許清前端
+        console.warn('後端刪除失敗,仍會清前端:', err.message);
+      }
+      // 清前端:dataset + 關聯的 pp/training history
       DataEngine.removeDataset(ds.id);
+      ppHistory = ppHistory.filter(p => p.datasetId !== ds.id);
+      _trainingHistory = _trainingHistory.filter(h => h.datasetId !== ds.id);
+      if (_activeHistoryRunId && !_trainingHistory.find(h => h.id === _activeHistoryRunId)) {
+        _activeHistoryRunId = _trainingHistory[0]?.id || null;
+        MLEngine.trainedModels = _activeHistoryRunId
+          ? (_trainingHistory.find(h => h.id === _activeHistoryRunId).models || [])
+          : [];
+      }
+      _persistTrainingHistory();
       renderDatasetPage();
+      notify('已移除資料集', `${ds.fileName} 連同預處理 / 訓練結果已刪除`, 'info');
     });
     listEl.appendChild(div);
   });
@@ -2528,6 +2909,7 @@ function renderRealExperimentsPage() {
   document.getElementById('exp-dataset-badge').textContent = ds.fileName || 'Dataset';
 
   // Dataset picker — 列出已上傳的所有 CSV,選了就 switchDataset + 重新建立 form
+  // 不用 cloneNode (它會掃掉 select 的 value);改用 flag 確保 listener 只綁一次
   const dsSelect = document.getElementById('exp-dataset-select');
   const dsInfo = document.getElementById('exp-dataset-info');
   if (dsSelect) {
@@ -2536,20 +2918,24 @@ function renderRealExperimentsPage() {
       const opt = document.createElement('option');
       opt.value = d.id;
       opt.textContent = d.fileName;
-      if (d.id === ds.id) opt.selected = true;
       dsSelect.appendChild(opt);
     });
+    // 用 select.value 同步當前 dataset (cloneNode 會掉,這個不會)
+    dsSelect.value = ds.id;
     if (dsInfo) dsInfo.textContent = `${ds.rowCount.toLocaleString()} 筆 × ${ds.colCount} 欄`;
-    // 換 listener (clone 避免重複疊加)
-    const newDsSelect = dsSelect.cloneNode(true);
-    dsSelect.parentNode.replaceChild(newDsSelect, dsSelect);
-    newDsSelect.addEventListener('change', e => {
-      const newId = e.target.value;
-      if (newId !== ds.id) {
-        DataEngine.switchDataset(newId);
-        renderRealExperimentsPage(); // 重新建構整個表單
-      }
-    });
+    if (!dsSelect.__expDsWired) {
+      dsSelect.__expDsWired = true;
+      dsSelect.addEventListener('change', async e => {
+        const newId = e.target.value;
+        const cur = DataEngine.currentDataset;
+        if (!cur || newId !== cur.id) {
+          const target = DataEngine.datasets.find(d => d.id === newId);
+          await hydrateDatasetIfStub(target);
+          DataEngine.switchDataset(newId);
+          renderRealExperimentsPage();
+        }
+      });
+    }
   }
 
   // Populate target select with all numeric columns
@@ -2717,10 +3103,8 @@ function renderRealExperimentsPage() {
       fetchErr = e.message;
       all = ppHistory;  // fallback to in-memory
     }
-    // 當前資料集的排前面,其他資料集的也顯示 (但標註),避免「明明跑過卻看不到」
-    const mine = all.filter(p => p.datasetId === ds.id);
-    const others = all.filter(p => p.datasetId !== ds.id);
-    ppMatches = [...mine, ...others];
+    // 只列當前資料集的 preprocessor — 其他資料集 schema 不一樣,套錯只會炸,不顯示
+    ppMatches = all.filter(p => p.datasetId === ds.id);
 
     ppSelect.innerHTML = '';
     if (ppMatches.length === 0) {
@@ -2737,8 +3121,7 @@ function renderRealExperimentsPage() {
       ppMatches.forEach(p => {
         const opt = document.createElement('option');
         opt.value = p.id;
-        const tag = p.datasetId === ds.id ? '' : ' ⚠其他資料集';
-        opt.textContent = `${p.id} — target=${p.target}, ${p.featureCount} 特徵 (train ${p.trainSize}/test ${p.testSize})${tag}`;
+        opt.textContent = `${p.id} — target=${p.target}, ${p.featureCount} 特徵 (train ${p.trainSize}/test ${p.testSize})`;
         ppSelect.appendChild(opt);
       });
       ppSelect.disabled = !srcPp.checked;
@@ -2943,6 +3326,16 @@ async function startRealTraining(ds, targetCol, options = {}) {
       options: { features: options.features, algorithms: options.algorithms },
       models, // 完整模型陣列;localStorage 爆 quota 時 _persistTrainingHistory 會自動降級
     });
+
+    // 訓練完成後同步重新渲染當前頁面 — 使用者若已在 dashboard / leaderboard / insights
+    // 可以立刻看到新訓練,不用先切走再切回
+    const _curPage = document.querySelector('.page-section:not(.hidden)');
+    if (_curPage) {
+      const _pid = _curPage.id.replace('page-', '');
+      if (['dashboard', 'leaderboard', 'insights'].includes(_pid)) {
+        renderPageCharts(_pid);
+      }
+    }
 
     // 訓練完成通知 — 右上角鈴鐺
     const best = models[0];
@@ -3253,10 +3646,11 @@ function renderRealLeaderboard() {
 
   const isReg = models[0].taskType === 'regression';
 
-  // Update dataset dropdown — 列出 [現在] + 歷史紀錄,可切換查看
-  const lbSelect = document.getElementById('lb-dataset-select');
-  if (lbSelect) {
-    populateHistorySelect(lbSelect, 'leaderboard');
+  // 歷史訓練 — 三層級聯 (資料集 → target → 訓練紀錄)
+  const lbCascade = document.getElementById('lb-history-cascade');
+  if (lbCascade) {
+    lbCascade.dataset.variant = 'compact'; // 排行榜空間有限,用小尺寸
+    renderHistoryCascade(lbCascade);
   }
 
   // Update column headers
@@ -3459,8 +3853,8 @@ function renderRealInsights() {
   const models = MLEngine.trainedModels;
   if (models.length === 0) return;
 
-  // 歷史訓練選擇器
-  populateHistorySelect(document.getElementById('insights-history-select'));
+  // 歷史訓練 — 三層級聯
+  renderHistoryCascade(document.getElementById('insights-history-cascade'));
 
   const best = models[0];
   const isReg = best.taskType === 'regression';
@@ -3558,6 +3952,17 @@ function initShapSection(models, best) {
   loadShapFigures();
 }
 
+// 清空 SHAP 三張 Plotly 圖 — 切換歷史 / 模型時先清,避免使用者看到舊圖以為沒更新
+function _clearShapFigures() {
+  ['shap-fig-global', 'shap-fig-waterfall', 'shap-fig-dependence'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el && typeof Plotly !== 'undefined') {
+      try { Plotly.purge(el); } catch (e) {}
+      el.innerHTML = '';
+    }
+  });
+}
+
 async function loadShapFigures() {
   if (typeof Plotly === 'undefined') {
     document.getElementById('shap-error').classList.remove('hidden');
@@ -3573,10 +3978,13 @@ async function loadShapFigures() {
   if (!modelId) {
     errEl.classList.remove('hidden');
     errEl.textContent = '請先選擇模型';
+    _clearShapFigures();
     return;
   }
   errEl.classList.add('hidden');
   loadEl.classList.remove('hidden');
+  // 先清空舊圖,讓使用者看到 loading 狀態,避免誤以為沒切換
+  _clearShapFigures();
 
   try {
     const res = await ApiClient.visualizeShap({
@@ -3588,7 +3996,12 @@ async function loadShapFigures() {
     Plotly.newPlot('shap-fig-dependence', res.dependence.data, res.dependence.layout, cfg);
   } catch (e) {
     errEl.classList.remove('hidden');
-    errEl.textContent = e.message;
+    // 訊息明顯一點 — 通常是後端 model 找不到 (重啟過 / 歷史紀錄但 model 沒持久化)
+    const msg = e.message.includes('404') || e.message.includes('不存在')
+      ? '⚠ 此歷史模型已不在後端記憶體 (uvicorn 重啟後會丟失)。請重新訓練以查看 SHAP 解釋。'
+      : `SHAP 載入失敗:${e.message}`;
+    errEl.textContent = msg;
+    _clearShapFigures();
   } finally {
     loadEl.classList.add('hidden');
   }
@@ -3794,6 +4207,10 @@ function renderRealFeatureImportance(model) {
 
   const names = model.featureNames;
   const values = model.featureImportance;
+  if (!names || !values || names.length === 0) {
+    _chartPlaceholderMessage(chart, '此歷史紀錄的特徵重要性資料已被壓縮\n請重新訓練以查看完整圖表');
+    return;
+  }
   const pairs = names.map((n, i) => ({ name: n, value: values[i] })).sort((a, b) => b.value - a.value).slice(0, 15);
 
   chart.setOption({
@@ -3838,9 +4255,26 @@ function renderRealModelCompare(models, isReg) {
   });
 }
 
+// 共用:在 chart 上印一段中央訊息 (data 不全時的 fallback)
+function _chartPlaceholderMessage(chart, msg) {
+  chart.setOption({
+    title: {
+      text: msg,
+      left: 'center', top: 'center',
+      textStyle: { color: '#64748b', fontSize: 13, lineHeight: 20 },
+    },
+  }, true);
+}
+
 function renderRealPredScatter(model, isReg) {
   const chart = initChart('chart-real-pred-scatter');
   if (!chart) return;
+
+  // 防禦:從 localStorage 還原的歷史 run 可能因 quota 觸發瘦身,testTrue/testPred 被砍
+  if (!model.testTrue || !model.testPred || model.testTrue.length === 0) {
+    _chartPlaceholderMessage(chart, '此歷史紀錄的測試集資料已被壓縮\n請重新訓練以查看散點圖');
+    return;
+  }
 
   if (!isReg) {
     // Classification: show confusion-like accuracy per class
@@ -3873,6 +4307,10 @@ function renderRealResiduals(model) {
   const chart = initChart('chart-real-residuals');
   if (!chart) return;
 
+  if (!model.testTrue || !model.testPred || model.testTrue.length === 0) {
+    _chartPlaceholderMessage(chart, '此歷史紀錄的測試集資料已被壓縮\n請重新訓練以查看殘差分佈');
+    return;
+  }
   const residuals = model.testTrue.map((t, i) => t - model.testPred[i]);
   // Histogram
   const binCount = 20;
@@ -3911,24 +4349,226 @@ function renderRealResiduals(model) {
 // ===== DASHBOARD REAL METRICS =====
 function updateDashboardRealMetrics() {
   const models = MLEngine.trainedModels;
-  // Update the 4 metric cards (they're the first metric-card elements in the dashboard)
   const cards = document.querySelectorAll('#page-dashboard .metric-card');
-  if (cards.length >= 4) {
-    // Active datasets
-    cards[0].querySelector('.text-3xl').textContent = DataEngine.datasets.length.toString();
-    // Completed experiments
-    cards[1].querySelector('.text-3xl').textContent = models.length.toString();
-    // Best model score
-    const best = models[0];
-    const isReg = best.taskType === 'regression';
-    const scoreStr = isReg
-      ? (best.metrics.testR2 * 100).toFixed(1) + '<span class="text-lg text-dark-400">%</span>'
-      : (best.metrics.testScore * 100).toFixed(1) + '<span class="text-lg text-dark-400">%</span>';
-    cards[2].querySelector('.text-3xl').innerHTML = scoreStr;
-    cards[2].querySelector('.text-dark-400.text-sm').textContent = isReg ? '最佳模型 R²' : '最佳模型準確率';
-    // Deployed models
-    cards[3].querySelector('.text-3xl').textContent = '0';
+  if (cards.length < 4) return;
+
+  // Card 0: 活躍數據集 — DataEngine.datasets 總數
+  cards[0].querySelector('.text-3xl').textContent = DataEngine.datasets.length.toString();
+  const sub0 = cards[0].querySelector('.text-success-400, .text-dark-400.text-xs, .text-xs');
+  if (sub0 && DataEngine.currentDataset) sub0.textContent = `當前: ${DataEngine.currentDataset.fileName || ''}`;
+
+  // Card 1: 已完成實驗 — 歷史訓練「次數」(每次 run = 1 個實驗)
+  const totalRuns = _trainingHistory.length;
+  cards[1].querySelector('.text-3xl').textContent = totalRuns.toString();
+  const sub1 = cards[1].querySelectorAll('.text-success-400, .text-dark-400.text-xs, .text-xs');
+  if (sub1.length && totalRuns > 0) {
+    const totalModels = _trainingHistory.reduce((s, h) => s + (h.modelCount || 0), 0);
+    sub1[sub1.length - 1].textContent = `共訓練 ${totalModels} 個模型`;
   }
+
+  // Card 2: 最佳模型分數 — 用「歷史中最高分」而非「上次最佳」
+  let best = models[0];
+  let bestRun = null;
+  for (const h of _trainingHistory) {
+    if (!bestRun || (h.bestModel?.score ?? 0) > (bestRun.bestModel?.score ?? 0)) {
+      bestRun = h;
+    }
+  }
+  if (bestRun) {
+    const isReg = bestRun.taskType === 'regression';
+    const score = bestRun.bestModel.score;
+    cards[2].querySelector('.text-3xl').innerHTML = isReg
+      ? score.toFixed(3) + '<span class="text-lg text-dark-400"> R²</span>'
+      : (score * 100).toFixed(1) + '<span class="text-lg text-dark-400">%</span>';
+    cards[2].querySelector('.text-dark-400.text-sm').textContent = isReg ? '歷史最佳 R²' : '歷史最佳準確率';
+  } else if (best) {
+    const isReg = best.taskType === 'regression';
+    cards[2].querySelector('.text-3xl').innerHTML = isReg
+      ? best.metrics.testR2.toFixed(3) + '<span class="text-lg text-dark-400"> R²</span>'
+      : (best.metrics.testAccuracy * 100).toFixed(1) + '<span class="text-lg text-dark-400">%</span>';
+  }
+
+  // Card 3: 已部署模型 → 改成「目前載入模型數」(更實用)
+  cards[3].querySelector('.text-3xl').textContent = models.length.toString();
+  const lbl3 = cards[3].querySelector('.text-dark-400.text-sm');
+  if (lbl3) lbl3.textContent = '當前訓練模型數';
+
+  // 最近實驗清單 — 用 _trainingHistory 取代 mock data
+  renderRecentExperimentsCard();
+}
+
+// 模型效能趨勢 (real mode) — 用 _trainingHistory,每個資料集一條線、X 軸是訓練時間、Y 軸是該次最佳分數
+function renderRealPerformanceTrend() {
+  const chart = initChart('chart-performance-trend');
+  if (!chart) return;
+  if (_trainingHistory.length === 0) {
+    chart.setOption({ title: { text: '尚無訓練紀錄', textStyle: { color: '#94a3b8', fontSize: 14 }, left: 'center', top: 'center' } });
+    return;
+  }
+
+  // 倒過來 — 時間軸是「舊 → 新」
+  const runsOldFirst = [..._trainingHistory].reverse();
+
+  // 依資料集分組
+  const byDataset = new Map();
+  runsOldFirst.forEach(h => {
+    if (!byDataset.has(h.datasetName)) byDataset.set(h.datasetName, []);
+    byDataset.get(h.datasetName).push(h);
+  });
+
+  // X 軸:用所有訓練的時間戳 (合併 + 排序)
+  const xLabels = runsOldFirst.map(h => {
+    const d = new Date(h.timestamp);
+    return `${String(d.getMonth()+1).padStart(2,'0')}/${String(d.getDate()).padStart(2,'0')} ${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`;
+  });
+
+  const palette = ['#3b82f6', '#06b6d4', '#8b5cf6', '#f59e0b', '#10b981'];
+  const series = [];
+  let colorIdx = 0;
+  byDataset.forEach((runs, datasetName) => {
+    const color = palette[colorIdx++ % palette.length];
+    // 對應到 xLabels 的 sparse data (沒跑該資料集的位置給 null)
+    const data = runsOldFirst.map(h => h.datasetName === datasetName ? h.bestModel.score : null);
+    series.push({
+      name: datasetName,
+      type: 'line',
+      data,
+      smooth: false,
+      connectNulls: true,
+      symbol: 'circle',
+      symbolSize: 6,
+      lineStyle: { width: 2, color },
+      itemStyle: { color },
+    });
+  });
+
+  chart.setOption({
+    tooltip: {
+      trigger: 'axis',
+      backgroundColor: '#1e293b', borderColor: '#334155', textStyle: { color: '#e2e8f0', fontSize: 11 },
+      formatter: (params) => {
+        const idx = params[0].dataIndex;
+        const run = runsOldFirst[idx];
+        const isReg = run.taskType === 'regression';
+        return `<b>${run.datasetName}</b><br>` +
+               `target: ${run.target}<br>` +
+               `${run.modelCount} 模型 · ${run.bestModel.name}<br>` +
+               `${isReg ? 'R²' : 'Acc'}: ${isReg ? run.bestModel.score.toFixed(4) : (run.bestModel.score*100).toFixed(1)+'%'}`;
+      },
+    },
+    legend: { data: [...byDataset.keys()], top: 5, right: 10, textStyle: { color: '#94a3b8', fontSize: 11 } },
+    grid: { left: 50, right: 20, top: 40, bottom: 30 },
+    xAxis: { type: 'category', data: xLabels, axisLine: { lineStyle: { color: '#1e293b' } }, axisLabel: { color: '#64748b', fontSize: 10 } },
+    yAxis: { type: 'value', min: 0, max: 1, axisLine: { show: false }, axisLabel: { color: '#64748b', fontSize: 10, formatter: v => v.toFixed(2) }, splitLine: { lineStyle: { color: '#1e293b' } } },
+    series,
+  }, true);
+}
+
+// 任務類型分佈 (real mode) — 從歷史統計 classification vs regression
+function renderRealTaskDistribution() {
+  const chart = initChart('chart-task-distribution');
+  if (!chart) return;
+  if (_trainingHistory.length === 0) {
+    chart.setOption({ title: { text: '尚無訓練紀錄', textStyle: { color: '#94a3b8', fontSize: 14 }, left: 'center', top: 'center' } });
+    return;
+  }
+
+  const counts = { classification: 0, regression: 0 };
+  _trainingHistory.forEach(h => {
+    if (h.taskType === 'classification') counts.classification++;
+    else if (h.taskType === 'regression') counts.regression++;
+  });
+
+  const data = [
+    { value: counts.classification, name: '分類', itemStyle: { color: '#3b82f6' } },
+    { value: counts.regression,     name: '迴歸', itemStyle: { color: '#06b6d4' } },
+  ].filter(d => d.value > 0);
+
+  chart.setOption({
+    tooltip: { trigger: 'item', backgroundColor: '#1e293b', borderColor: '#334155', textStyle: { color: '#e2e8f0' } },
+    series: [{
+      type: 'pie', radius: ['50%', '75%'], center: ['50%', '50%'],
+      avoidLabelOverlap: true,
+      itemStyle: { borderRadius: 6, borderColor: '#0f172a', borderWidth: 3 },
+      label: { show: true, color: '#94a3b8', fontSize: 11, formatter: '{b}\n{c} 次 ({d}%)' },
+      labelLine: { lineStyle: { color: '#334155' } },
+      data,
+    }],
+  }, true);
+}
+
+// 系統通知卡片 — 把 dashboard 上的「系統通知」改用真實 _notifications
+function renderSystemNotificationsCard() {
+  const cards = document.querySelectorAll('#page-dashboard .card');
+  let targetCard = null;
+  cards.forEach(c => {
+    const title = c.querySelector('.card-title');
+    if (title && title.textContent.trim() === '系統通知') targetCard = c;
+  });
+  if (!targetCard) return;
+  const body = targetCard.querySelector('.space-y-3');
+  if (!body) return;
+  body.innerHTML = '';
+  if (_notifications.length === 0) {
+    body.innerHTML = '<p class="text-xs text-dark-500 py-6 text-center">暫無通知</p>';
+    return;
+  }
+  const iconMap = {
+    success: { svg: '<svg class="w-5 h-5 text-success-400 flex-shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>', wrap: 'bg-success-500/5 border border-success-500/10' },
+    error:   { svg: '<svg class="w-5 h-5 text-danger-400 flex-shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>', wrap: 'bg-danger-500/5 border border-danger-500/10' },
+    warning: { svg: '<svg class="w-5 h-5 text-warning-400 flex-shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"/></svg>', wrap: 'bg-warning-500/5 border border-warning-500/10' },
+    info:    { svg: '<svg class="w-5 h-5 text-primary-400 flex-shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>', wrap: 'bg-primary-500/5 border border-primary-500/10' },
+  };
+  _notifications.slice(0, 5).forEach(n => {
+    const ic = iconMap[n.type] || iconMap.info;
+    const div = document.createElement('div');
+    div.className = `flex gap-3 p-3 rounded-lg ${ic.wrap}`;
+    div.innerHTML = `${ic.svg}<div><p class="text-sm font-medium">${escapeHtml(n.title)}</p><p class="text-xs text-dark-400 mt-1">${escapeHtml(n.message)}</p></div>`;
+    body.appendChild(div);
+  });
+}
+
+function renderRecentExperimentsCard() {
+  // 找到 dashboard 上「最近實驗」卡片的 space-y-3 內容區
+  // 簡單作法:找第一個 card-title 文字是「最近實驗」的卡片
+  const cards = document.querySelectorAll('#page-dashboard .card');
+  let targetCard = null;
+  cards.forEach(c => {
+    const title = c.querySelector('.card-title');
+    if (title && title.textContent.trim() === '最近實驗') targetCard = c;
+  });
+  if (!targetCard) return;
+  const body = targetCard.querySelector('.space-y-3');
+  if (!body) return;
+  body.innerHTML = '';
+  if (_trainingHistory.length === 0) {
+    body.innerHTML = '<p class="text-xs text-dark-500 py-6 text-center">尚未有訓練紀錄</p>';
+    return;
+  }
+  _trainingHistory.slice(0, 5).forEach((h, i) => {
+    const elapsedMin = Math.floor((Date.now() - h.timestamp) / 60000);
+    const elapsedStr = elapsedMin < 1 ? '剛剛' : elapsedMin < 60 ? `${elapsedMin} 分鐘前` : `${Math.floor(elapsedMin/60)} 小時前`;
+    const isReg = h.taskType === 'regression';
+    const scoreStr = isReg
+      ? `R²=${h.bestModel.score.toFixed(4)}`
+      : `Acc=${(h.bestModel.score*100).toFixed(1)}%`;
+    const dotColor = i === 0 ? 'bg-primary-500 animate-pulse' : 'bg-success-500';
+    const item = document.createElement('div');
+    item.className = 'flex items-center gap-3 p-3 rounded-lg bg-dark-800/50 hover:bg-dark-800 transition-colors cursor-pointer';
+    item.innerHTML = `
+      <div class="w-2 h-2 rounded-full ${dotColor}"></div>
+      <div class="flex-1 min-w-0">
+        <p class="text-sm font-medium truncate">${escapeHtml(h.datasetName)} <span class="text-dark-500 text-xs">→ ${escapeHtml(h.target)}</span></p>
+        <p class="text-xs text-dark-400">${isReg ? '迴歸' : '分類'} | ${escapeHtml(h.bestModel.name)} | ${scoreStr}</p>
+      </div>
+      <span class="text-xs text-dark-400 shrink-0">${elapsedStr}</span>
+    `;
+    item.addEventListener('click', () => {
+      applyHistoricalRun(h.id);
+      navigateTo('leaderboard');
+    });
+    body.appendChild(item);
+  });
 }
 
 // ===== SYSTEM SETTINGS =====

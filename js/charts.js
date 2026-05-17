@@ -24,8 +24,28 @@ function initChart(domId) {
   }
   const chart = echarts.init(el, null, { renderer: 'canvas' });
   chartInstances[domId] = chart;
+
+  // 用 ResizeObserver 追蹤容器尺寸變化 — 從別頁切回來時容器從 0 變成正常尺寸,
+  // 觀察器會自動觸發 chart.resize() 重繪。比 rAF 保險很多。
+  if (typeof ResizeObserver !== 'undefined' && !el.__chartResizeObs) {
+    el.__chartResizeObs = new ResizeObserver(() => {
+      const c = chartInstances[domId];
+      if (c) { try { c.resize(); } catch (e) {} }
+    });
+    el.__chartResizeObs.observe(el);
+  }
+
+  // 防禦性:rAF 後再 resize 一次,給尺寸初次就 OK 的情境用
+  requestAnimationFrame(() => requestAnimationFrame(() => {
+    try { chart.resize(); } catch (e) {}
+  }));
   return chart;
 }
+
+// 全域 resize — 視窗或頁面切換後讓所有圖表自我修正
+window.addEventListener('resize', () => {
+  Object.values(chartInstances).forEach(c => { try { c.resize(); } catch (e) {} });
+});
 
 // ===== DASHBOARD CHARTS =====
 function renderPerformanceTrend() {

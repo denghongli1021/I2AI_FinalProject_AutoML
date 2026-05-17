@@ -25,6 +25,26 @@ const ApiClient = {
     }
   },
 
+  // ---- 0. DATASET LIST / GET — 登入後 (或 guest) 把後端記憶體裡的 datasets 還原回前端 ----
+  async datasetList() {
+    const r = await fetch(`${this.baseUrl}/api/dataset/list`, { method: 'GET' });
+    if (!r.ok) throw new Error(`datasetList 失敗 (${r.status})`);
+    const j = await r.json();
+    return j.datasets || [];
+  },
+
+  async datasetGet(id) {
+    const r = await fetch(`${this.baseUrl}/api/dataset/${encodeURIComponent(id)}`, { method: 'GET' });
+    if (!r.ok) throw new Error(`datasetGet 失敗 (${r.status})`);
+    return r.json();
+  },
+
+  async datasetDelete(id) {
+    const r = await fetch(`${this.baseUrl}/api/dataset/${encodeURIComponent(id)}`, { method: 'DELETE' });
+    if (!r.ok) throw new Error(`datasetDelete 失敗 (${r.status})`);
+    return r.json();
+  },
+
   // ---- 1. PREPROCESS ----
   async preprocess(file) {
     const fd = new FormData();

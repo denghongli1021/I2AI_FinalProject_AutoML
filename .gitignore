@@ -10,3 +10,7 @@ I2AI_FinalProject_AutoML-feat-preprocessingv2/
 I2AI_FinalProject_AutoML-feat-visualization/
 autogluon/
 .claude/
+
+# Auth — 本機環境變數 / SQLite fallback DB,絕對不能 commit
+.env
+api/auth.db
