@@ -1,0 +1,193 @@
+"""
+1D Signal Transformer 與 PatchTST：
+  SignalTransformer — Patch Embedding + CLS token + Multi-Head Attention（適合靜態特徵序列）
+  PatchTST          — Channel-Independent Patch Embedding + Mean Pooling（適合時間序列，無未來偏差）
+
+所有架構參數由外部傳入（不人為固定）。
+"""
+import math
+import torch
+import torch.nn as nn
+
+
+class SignalTransformer(nn.Module):
+    """
+    Parameters
+    ----------
+    in_features : int
+        輸入訊號長度（特徵維度）。
+    patch_size : int
+        每個 patch 的長度；in_features 必須能被整除（不足時補零）。
+    d_model : int
+        Transformer 內部維度。
+    n_heads : int
+        Multi-Head Attention 頭數（必須整除 d_model）。
+    depth : int
+        Transformer Encoder 層數。
+    ff_dim : int
+        Feed-Forward 子層的隱藏維度。
+    dropout : float
+    n_classes : int
+    """
+
+    def __init__(
+        self,
+        in_features: int,
+        patch_size: int,
+        d_model: int,
+        n_heads: int,
+        depth: int,
+        ff_dim: int,
+        dropout: float,
+        n_classes: int,
+    ):
+        super().__init__()
+        # 若不能整除則補零，確保切 patch 正確
+        self.patch_size = patch_size
+        n_patches = math.ceil(in_features / patch_size)
+        self.n_patches = n_patches
+        self.pad_len = n_patches * patch_size - in_features
+
+        # Patch Embedding
+        self.patch_embed = nn.Linear(patch_size, d_model)
+
+        # CLS token + 位置嵌入
+        self.cls_token = nn.Parameter(torch.zeros(1, 1, d_model))
+        self.pos_embed = nn.Parameter(torch.zeros(1, n_patches + 1, d_model))
+        nn.init.trunc_normal_(self.pos_embed, std=0.02)
+        nn.init.trunc_normal_(self.cls_token, std=0.02)
+
+        # Transformer Encoder
+        enc_layer = nn.TransformerEncoderLayer(
+            d_model=d_model,
+            nhead=n_heads,
+            dim_feedforward=ff_dim,
+            dropout=dropout,
+            activation="gelu",
+            batch_first=True,
+            norm_first=True,
+        )
+        self.transformer = nn.TransformerEncoder(enc_layer, num_layers=depth)
+
+        # 分類頭：取 CLS token
+        self.head = nn.Sequential(
+            nn.LayerNorm(d_model),
+            nn.Dropout(dropout),
+            nn.Linear(d_model, n_classes),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        B = x.shape[0]
+
+        # 補零（若 in_features 不整除 patch_size）
+        if self.pad_len > 0:
+            x = torch.cat([x, torch.zeros(B, self.pad_len, device=x.device)], dim=1)
+
+        # 切 patch：[B, n_patches, patch_size]
+        x = x.reshape(B, self.n_patches, self.patch_size)
+        x = self.patch_embed(x)  # [B, n_patches, d_model]
+
+        # 拼接 CLS token
+        cls = self.cls_token.expand(B, -1, -1)
+        x = torch.cat([cls, x], dim=1)          # [B, n_patches+1, d_model]
+        x = x + self.pos_embed
+
+        # Transformer 編碼
+        x = self.transformer(x)
+
+        # 以 CLS token 做分類
+        return self.head(x[:, 0])
+
+
+class PatchTST(nn.Module):
+    """
+    PatchTST（Patch Time Series Transformer）—— 時序 SOTA。
+
+    與 SignalTransformer 的主要差異：
+      1. 無 CLS token，改用對所有 patch 做 Mean Pooling → 減少過擬合
+      2. 無絕對位置嵌入（可選學習式位置編碼），更適合可變長度序列
+      3. Pre-Norm（norm_first=True）確保梯度穩定
+
+    設計原則：
+      - 將輸入序列切割成 patch（區塊），每個 patch 獨立映射到 d_model
+      - Transformer 學習 patch 間的長距離依賴
+      - 避免 full-attention 的 O(L^2) 開銷（L = sequence length >> n_patches）
+
+    Parameters
+    ----------
+    in_features : int
+        輸入序列長度（特徵維度）。
+    patch_size : int
+        每個 patch 的長度；不足時補零。
+    d_model : int
+        Transformer 隱藏維度。
+    n_heads : int
+        Multi-Head Attention 頭數（需整除 d_model）。
+    depth : int
+        Transformer Encoder 層數。
+    ff_dim : int
+        Feed-Forward 子層隱藏維度。
+    dropout : float
+    n_classes : int
+    """
+
+    def __init__(
+        self,
+        in_features: int,
+        patch_size: int,
+        d_model: int,
+        n_heads: int,
+        depth: int,
+        ff_dim: int,
+        dropout: float,
+        n_classes: int,
+    ):
+        super().__init__()
+        self.patch_size = patch_size
+        n_patches = math.ceil(in_features / patch_size)
+        self.n_patches = n_patches
+        self.pad_len = n_patches * patch_size - in_features
+
+        self.patch_embed = nn.Linear(patch_size, d_model)
+        # 學習式位置嵌入（可選；對超長序列可設為 0）
+        self.pos_embed = nn.Parameter(torch.zeros(1, n_patches, d_model))
+        nn.init.trunc_normal_(self.pos_embed, std=0.02)
+
+        enc_layer = nn.TransformerEncoderLayer(
+            d_model=d_model,
+            nhead=n_heads,
+            dim_feedforward=ff_dim,
+            dropout=dropout,
+            activation="gelu",
+            batch_first=True,
+            norm_first=True,   # Pre-Norm：梯度更穩定
+        )
+        self.transformer = nn.TransformerEncoder(enc_layer, num_layers=depth)
+
+        # Mean Pooling → 分類頭（無 CLS token 過擬合問題）
+        self.norm = nn.LayerNorm(d_model)
+        self.head = nn.Sequential(
+            nn.Dropout(dropout),
+            nn.Linear(d_model, n_classes),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        B = x.shape[0]
+
+        # 補零使長度整除 patch_size
+        if self.pad_len > 0:
+            x = torch.cat(
+                [x, torch.zeros(B, self.pad_len, device=x.device)], dim=1
+            )
+
+        # 切 patch 並映射到 d_model
+        x = x.reshape(B, self.n_patches, self.patch_size)   # [B, n_patches, patch_size]
+        x = self.patch_embed(x)                              # [B, n_patches, d_model]
+        x = x + self.pos_embed                               # 加入位置嵌入
+
+        # Transformer 編碼
+        x = self.transformer(x)   # [B, n_patches, d_model]
+
+        # Mean Pooling：對所有 patch 取均值
+        x = self.norm(x.mean(dim=1))   # [B, d_model]
+        return self.head(x)            # [B, n_classes]

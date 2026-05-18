@@ -46,18 +46,19 @@ from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel
 
 from api import preprocess, train, visualize
+from api import storage
 from api.auth import init_db, router as auth_router, get_current_user
+from api.auth.db import get_db
 from api.preprocess import (
     run_data_audit,
     preprocess_for_training,
     preprocess_for_inference,
 )
 from api.preprocess.core import AutoRouter
-from api.store import (
-    DATASETS, MODELS, PREPROCESSORS,
-    get_owned, list_owned, stamp,
-)
+# 注意:DATASETS/MODELS/PREPROCESSORS in-memory dicts 還是被 storage 層的 guest 路徑用,
+# 不過 main.py 自己已經完全靠 storage helpers,不再直接 import 那些 dict。
 from api.visualize import AutoMLVisualizer
+from sqlalchemy.orm import Session as DbSession
 
 app = FastAPI(title="AutoML API", version="0.1.0")
 
@@ -79,10 +80,13 @@ app.include_router(auth_router, prefix="/api")
 
 @app.get("/api/health")
 def health() -> dict[str, Any]:
+    # 不再回 DATASETS/MODELS 計數 — 那是 guest 路徑用的 in-memory dict,跟登入使用者
+    # 看到的內容無關。要看真的用量需要 user_id,health 是 public endpoint 拿不到。
+    from api.store import DATASETS as _DATASETS, MODELS as _MODELS
     return {
         "ok": True,
-        "datasets": len(DATASETS),
-        "models": len(MODELS),
+        "guestDatasets": len(_DATASETS),
+        "guestModels": len(_MODELS),
         "engine": "python-sklearn",
         "python": sys.version.split()[0],
         "platform": platform.platform(),
@@ -90,12 +94,13 @@ def health() -> dict[str, Any]:
 
 
 # ============================================================
-# 1. PREPROCESS
+# 1. PREPROCESS — CSV 上傳 → DataFrame + analysis,寫入 storage
 # ============================================================
 @app.post("/api/preprocess")
 async def preprocess_endpoint(
     file: UploadFile = File(...),
     user = Depends(get_current_user),
+    db: DbSession = Depends(get_db),
 ) -> dict[str, Any]:
     raw = await file.read()
     try:
@@ -103,20 +108,15 @@ async def preprocess_endpoint(
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"preprocess 失敗: {e}")
 
-    # 隊友 preprocessing 模組的健康診斷 (target 之後從 /api/train 才會傳)
     try:
         response["auditReport"] = run_data_audit(df, None)
     except Exception as e:
         response["auditReport"] = {"error": str(e)}
 
-    dataset_id = str(uuid.uuid4())
-    DATASETS[dataset_id] = stamp({
-        "df": df,
-        "fileName": file.filename,
-        "loadedAt": time.time(),
-        # 把 response 快取起來,/api/dataset/{id} 直接吐回去,省得重算
-        "response": response,
-    }, user)
+    dataset_id = storage.save_dataset(
+        df=df, file_name=file.filename, csv_bytes=raw,
+        response=response, user=user, db=db,
+    )
     return {"id": dataset_id, **response}
 
 
@@ -124,32 +124,23 @@ async def preprocess_endpoint(
 # 1c. DATASET listing/fetching — 給前端登入時把使用者已上傳的 CSV 還原回來
 # ============================================================
 @app.get("/api/dataset/list")
-def dataset_list_endpoint(user = Depends(get_current_user)) -> dict[str, Any]:
-    """列出當前 user 的所有 datasets,只回 metadata (不含整份 rows,避免 payload 過大)。"""
-    items = []
-    for ds_id, entry in list_owned(DATASETS, user):
-        resp = entry.get("response") or {}
-        items.append({
-            "id": ds_id,
-            "fileName": entry.get("fileName"),
-            "loadedAt": entry.get("loadedAt"),
-            "rowCount": resp.get("rowCount", 0),
-            "colCount": resp.get("colCount", 0),
-            "headers": resp.get("headers", []),
-        })
-    # 最新上傳排前面
-    items.sort(key=lambda x: x.get("loadedAt") or 0, reverse=True)
-    return {"datasets": items}
+def dataset_list_endpoint(
+    user = Depends(get_current_user),
+    db: DbSession = Depends(get_db),
+) -> dict[str, Any]:
+    """列出當前 user 的所有 datasets,只回 metadata。"""
+    return {"datasets": storage.list_datasets(user, db)}
 
 
 @app.get("/api/dataset/{dataset_id}")
 def dataset_get_endpoint(
     dataset_id: str,
     user = Depends(get_current_user),
+    db: DbSession = Depends(get_db),
 ) -> dict[str, Any]:
     """取單一 dataset 的完整資料 (含 rows / analysis / correlation 等)。"""
-    entry = get_owned(DATASETS, dataset_id, user, "datasetId")
-    resp = entry.get("response")
+    bundle = storage.get_dataset(dataset_id, user, db, include_df=False)
+    resp = bundle.get("response")
     if not resp:
         raise HTTPException(status_code=500, detail="dataset response 快取遺失,請重新上傳")
     return {"id": dataset_id, **resp}
@@ -159,34 +150,10 @@ def dataset_get_endpoint(
 def dataset_delete_endpoint(
     dataset_id: str,
     user = Depends(get_current_user),
+    db: DbSession = Depends(get_db),
 ) -> dict[str, Any]:
     """刪除 dataset + 級聯刪掉它的 preprocessors + models。"""
-    # 驗證擁有者 — 不是自己的就 404
-    get_owned(DATASETS, dataset_id, user, "datasetId")
-
-    # 找這個 dataset 衍生的 preprocessors
-    pp_ids = [pid for pid, p in PREPROCESSORS.items() if p.get("datasetId") == dataset_id]
-
-    # 找用到這些 preprocessor (或直接用此 dataset 訓練) 的 models
-    # 注意:raw 模式訓練的 model 沒有 preprocessorId,只能透過 dataset 連回 — 但 MODELS
-    # 沒存 datasetId,所以 raw 訓練的 model 無法精準對應。保守一點:刪 preprocessor 連結的 model。
-    model_ids = [mid for mid, m in MODELS.items() if m.get("preprocessorId") in pp_ids]
-
-    # 級聯刪除
-    DATASETS.pop(dataset_id, None)
-    for pid in pp_ids:
-        PREPROCESSORS.pop(pid, None)
-    for mid in model_ids:
-        MODELS.pop(mid, None)
-
-    return {
-        "ok": True,
-        "removed": {
-            "dataset": dataset_id,
-            "preprocessors": pp_ids,
-            "models": model_ids,
-        },
-    }
+    return storage.delete_dataset(dataset_id, user, db)
 
 
 # ============================================================
@@ -201,9 +168,10 @@ class AuditRequest(BaseModel):
 def preprocess_audit_endpoint(
     req: AuditRequest,
     user = Depends(get_current_user),
+    db: DbSession = Depends(get_db),
 ) -> dict[str, Any]:
     """快速健檢:不真的跑 pipeline,只回傳 audit + 欄位分類預覽。"""
-    bundle = get_owned(DATASETS, req.datasetId, user, "datasetId")
+    bundle = storage.get_dataset(req.datasetId, user, db, include_df=True)
     df = bundle["df"]
     if req.target and req.target not in df.columns:
         raise HTTPException(status_code=400, detail=f"target '{req.target}' 不在欄位中")
@@ -234,9 +202,10 @@ class TransformRequest(BaseModel):
 def preprocess_transform_endpoint(
     req: TransformRequest,
     user = Depends(get_current_user),
+    db: DbSession = Depends(get_db),
 ) -> dict[str, Any]:
     """跑完整的 preprocess_for_training,把 fitted preprocessor 存起來。"""
-    bundle = get_owned(DATASETS, req.datasetId, user, "datasetId")
+    bundle = storage.get_dataset(req.datasetId, user, db, include_df=True)
     df = bundle["df"]
     if req.target not in df.columns:
         raise HTTPException(status_code=400, detail=f"target '{req.target}' 不在欄位中")
@@ -249,18 +218,12 @@ def preprocess_transform_endpoint(
         raise HTTPException(status_code=500, detail=f"transform 失敗: {e}")
 
     feature_names = list(X_train.columns)
-    preprocessor_id = f"pp_{uuid.uuid4().hex[:8]}"
-    PREPROCESSORS[preprocessor_id] = stamp({
-        "preprocessor": fitted,
-        "target": req.target,
-        "datasetId": req.datasetId,
-        "featureNames": feature_names,
-        # 存切分結果給後續下載
-        "X_train": X_train,
-        "X_test": X_test,
-        "y_train": y_train,
-        "y_test": y_test,
-    }, user)
+    preprocessor_id = storage.save_preprocessor(
+        preprocessor=fitted, target=req.target, dataset_id=req.datasetId,
+        feature_names=feature_names,
+        X_train=X_train, X_test=X_test, y_train=y_train, y_test=y_test,
+        user=user, db=db, test_size=req.testSize,
+    )
 
     # Router 分類預覽 (用於前端顯示哪些欄位被分到哪一桶)
     scan_df = df.drop(columns=[req.target])
@@ -293,25 +256,10 @@ def preprocess_transform_endpoint(
 @app.get("/api/preprocess/list")
 def preprocess_list_endpoint(
     user = Depends(get_current_user),
+    db: DbSession = Depends(get_db),
 ) -> dict[str, Any]:
     """列出當前 user 的所有 preprocessor (給實驗室「資料來源」下拉用)。"""
-    items = []
-    for pid, entry in list_owned(PREPROCESSORS, user):
-        ds_id = entry.get("datasetId")
-        # 只顯示自己擁有的 dataset 名稱;不是自己的 dataset 不揭露 (回 None)
-        ds_bundle = DATASETS.get(ds_id) or {}
-        if ds_bundle.get("_owner") != entry.get("_owner"):
-            ds_bundle = {}
-        items.append({
-            "id": pid,
-            "datasetId": ds_id,
-            "fileName": ds_bundle.get("fileName"),
-            "target": entry.get("target"),
-            "featureCount": len(entry.get("featureNames", [])),
-            "trainSize": int(len(entry["X_train"])) if entry.get("X_train") is not None else 0,
-            "testSize": int(len(entry["X_test"])) if entry.get("X_test") is not None else 0,
-        })
-    return {"preprocessors": items}
+    return {"preprocessors": storage.list_preprocessors(user, db)}
 
 
 @app.get("/api/preprocess/download/{preprocessor_id}/{split}")
@@ -319,10 +267,11 @@ def preprocess_download_endpoint(
     preprocessor_id: str,
     split: str,
     user = Depends(get_current_user),
+    db: DbSession = Depends(get_db),
 ):
     """下載 train.csv / test.csv (處理後特徵 + 目標)。"""
     import pandas as pd
-    entry = get_owned(PREPROCESSORS, preprocessor_id, user, "preprocessorId")
+    entry = storage.get_preprocessor(preprocessor_id, user, db)
     if split not in ("train", "test"):
         raise HTTPException(status_code=400, detail="split 必須是 'train' 或 'test'")
 
@@ -355,10 +304,11 @@ class InferenceRequest(BaseModel):
 def preprocess_inference_endpoint(
     req: InferenceRequest,
     user = Depends(get_current_user),
+    db: DbSession = Depends(get_db),
 ) -> dict[str, Any]:
     """用已 fit 好的 preprocessor 套用到新資料。"""
     import pandas as pd
-    entry = get_owned(PREPROCESSORS, req.preprocessorId, user, "preprocessorId")
+    entry = storage.get_preprocessor(req.preprocessorId, user, db)
 
     try:
         new_df = pd.DataFrame(req.rows)
@@ -388,12 +338,12 @@ class TrainRequest(BaseModel):
     preprocessorId: str | None = None  # sources 含 "preprocessed" 時必填
 
 
-def _resolve_dataset(req: TrainRequest, user):
-    bundle = get_owned(DATASETS, req.datasetId, user, "datasetId")
+def _resolve_dataset(req: TrainRequest, user, db: DbSession):
+    bundle = storage.get_dataset(req.datasetId, user, db, include_df=True)
     df = bundle["df"]
     if req.target not in df.columns:
         raise HTTPException(status_code=400, detail=f"target '{req.target}' 不在欄位中")
-    return df
+    return df, bundle.get("fileName") or "dataset"
 
 
 def _prefix_event(ev: dict, label: str) -> dict:
@@ -405,16 +355,16 @@ def _prefix_event(ev: dict, label: str) -> dict:
     return ev
 
 
-def _run_sources(req: TrainRequest, user, on_progress=None):
-    """依 req.sources 跑指定的資料來源,回傳合併後的
-    [(bundle, estimator, scaler, X_test_df), ...]。bundle 已標上 dataSource。"""
+def _run_sources(req: TrainRequest, user, db: DbSession, on_progress=None):
+    """依 req.sources 跑指定的資料來源,回傳 (combined results, dataset_name)。"""
     sources = req.sources or ["raw"]
     multi = len([s for s in sources if s in ("raw", "preprocessed")]) > 1
     combined: list = []
+    dataset_name = None
 
     # --- 來源 1: 原始資料集 ---
     if "raw" in sources:
-        df = _resolve_dataset(req, user)
+        df, dataset_name = _resolve_dataset(req, user, db)
         emit = (lambda ev: on_progress(_prefix_event(ev, "原始"))) if on_progress else None
         raw_results = train.run(df, req.target, req.features, req.algorithms, req.options, on_progress=emit)
         for bundle, est, scaler, xtdf in raw_results:
@@ -428,7 +378,14 @@ def _run_sources(req: TrainRequest, user, on_progress=None):
     if "preprocessed" in sources:
         if not req.preprocessorId:
             raise HTTPException(status_code=400, detail="選了「已預處理資料」但未提供 preprocessorId")
-        entry = get_owned(PREPROCESSORS, req.preprocessorId, user, "preprocessorId")
+        entry = storage.get_preprocessor(req.preprocessorId, user, db)
+        if dataset_name is None and entry.get("datasetId") == req.datasetId:
+            # raw 沒勾,從 dataset bundle 拿名字
+            try:
+                ds_bundle = storage.get_dataset(req.datasetId, user, db, include_df=False)
+                dataset_name = ds_bundle.get("fileName")
+            except HTTPException:
+                pass
         emit = (lambda ev: on_progress(_prefix_event(ev, "預處理"))) if on_progress else None
         pp_results = train.run_prepared(
             entry["X_train"], entry["X_test"], entry["y_train"], entry["y_test"],
@@ -437,7 +394,7 @@ def _run_sources(req: TrainRequest, user, on_progress=None):
         for bundle, est, scaler, xtdf in pp_results:
             bundle["dataSource"] = "preprocessed"
             bundle["dataSourceLabel"] = f"預處理 ({req.preprocessorId})"
-            bundle["preprocessorId"] = req.preprocessorId  # 批次預測時要用它把原始 CSV 轉換
+            bundle["preprocessorId"] = req.preprocessorId
             if multi:
                 bundle["name"] = f"[預處理] {bundle['name']}"
             combined.append((bundle, est, scaler, xtdf))
@@ -445,26 +402,47 @@ def _run_sources(req: TrainRequest, user, on_progress=None):
     if not combined:
         raise HTTPException(status_code=400, detail="沒有指定有效的資料來源 (raw / preprocessed)")
 
-    # 跨來源一起重新排序,方便直接比較
     combined.sort(key=lambda r: r[0]["metrics"].get("testScore", 0.0), reverse=True)
-    return combined
+    return combined, dataset_name or "dataset"
 
 
-def _store_models(results, user) -> list[dict[str, Any]]:
-    """把 (bundle, estimator, scaler, X_test_df) 結果存進 MODELS,並回傳 bundle 列表。"""
+def _store_models(results, req: TrainRequest, user, db: DbSession, training_run_id: str | None = None) -> list[dict[str, Any]]:
+    """把 (bundle, estimator, scaler, X_test_df) 結果存進 storage,並回傳 bundle 列表。
+    每個 model 失敗都記錄並繼續,避免單一 model 壞掉整批回不到前端。"""
+    if not results:
+        raise HTTPException(status_code=500, detail="_store_models 收到空結果 (results 為 None 或空 list)")
     bundles = []
-    for bundle, estimator, scaler, X_test_df in results:
-        model_id = f"model_{uuid.uuid4().hex[:8]}"
-        bundle["id"] = model_id
-        MODELS[model_id] = stamp({
-            "bundle": bundle,
-            "estimator": estimator,
-            "scaler": scaler,
-            "featureNames": bundle["featureNames"],
-            "X_test_df": X_test_df,  # for SHAP visualizer
-            "preprocessorId": bundle.get("preprocessorId"),  # 預處理來源模型才有
-        }, user)
-        bundles.append(bundle)
+    fail_count = 0
+    for i, (bundle, estimator, scaler, X_test_df) in enumerate(results):
+        try:
+            model_id = storage.save_model(
+                bundle=bundle, estimator=estimator, scaler=scaler, X_test_df=X_test_df,
+                user=user, db=db,
+                preprocessor_id=bundle.get("preprocessorId"),
+                dataset_id=req.datasetId,
+                training_run_id=training_run_id,
+                hyperparameters=bundle.get("hyperparameters", {}),
+            )
+            bundle["id"] = model_id
+            bundles.append(bundle)
+        except Exception as e:
+            # 印詳細錯誤到 uvicorn log,但不讓整個 batch 死掉
+            import traceback as _tb
+            print(f"[_store_models] save_model 第 {i+1}/{len(results)} 筆失敗 "
+                  f"(algo={bundle.get('type') or bundle.get('name')}): {type(e).__name__}: {e}",
+                  flush=True)
+            _tb.print_exc()
+            # DB session 可能進入髒狀態,rollback 才能繼續用
+            try: db.rollback()
+            except Exception: pass
+            # 沒 id 還是讓 bundle 回到前端 (至少看得到 metrics)
+            bundle["id"] = None
+            bundle["_storeError"] = f"{type(e).__name__}: {e}"
+            bundles.append(bundle)
+            fail_count += 1
+    if fail_count and fail_count == len(results):
+        # 全失敗 → 整批爛了,讓上層當錯誤處理
+        raise HTTPException(status_code=500, detail=f"所有模型存檔失敗 (最後一筆: {bundles[-1].get('_storeError')})")
     return bundles
 
 
@@ -472,14 +450,455 @@ def _store_models(results, user) -> list[dict[str, Any]]:
 def train_endpoint(
     req: TrainRequest,
     user = Depends(get_current_user),
+    db: DbSession = Depends(get_db),
 ) -> dict[str, Any]:
+    t_start = time.time()
+    run_id = storage.create_training_run(
+        dataset_id=req.datasetId, dataset_name="(loading)",
+        engine="sklearn", target=req.target,
+        task_type=req.options.get("taskType", "auto") if req.options else "auto",
+        sources=req.sources, options=req.options or {},
+        user=user, db=db,
+    )
     try:
-        results = _run_sources(req, user)
-    except HTTPException:
+        results, dataset_name = _run_sources(req, user, db)
+    except HTTPException as he:
+        storage.finish_training_run(run_id, user, db, status="failed", error_msg=str(he.detail))
         raise
     except Exception as e:
+        storage.finish_training_run(run_id, user, db, status="failed", error_msg=str(e))
         raise HTTPException(status_code=500, detail=f"train 失敗: {e}")
-    return {"models": _store_models(results, user)}
+
+    bundles = _store_models(results, req, user, db, training_run_id=run_id)
+    # 更新 training run 為 completed + 補 dataset_name + top models
+    storage.finish_training_run(
+        run_id, user, db, status="completed",
+        results_summary={"topModels": [{"id": b.get("id"), "name": b.get("name"),
+                                         "score": b.get("metrics", {}).get("testScore", 0.0)}
+                                        for b in bundles[:5]],
+                         "datasetName": dataset_name},
+        model_ids=[b.get("id") for b in bundles if b.get("id")],
+        elapsed_sec=round(time.time() - t_start, 2),
+    )
+    return {"models": bundles}
+
+
+# ============================================================
+# 2c. TRAIN (Daniel Pipeline) — 測試模式專用,跑 Daniel 的完整 AutoML pipeline
+#     HPO → NAS → 5-Fold CV → Nelder-Mead Blend + Meta-Learner Stack
+# ============================================================
+@app.get("/api/train/pipeline/benchmark")
+def pipeline_benchmark_endpoint() -> dict[str, Any]:
+    """讀取 Daniel 的批次評估結果 CSV,給前端做 pipeline vs baseline 對照表。"""
+    import os
+    import pandas as pd
+    csv_path = os.path.join(
+        os.path.dirname(__file__), "train", "pipeline", "pipeline_batch_results.csv",
+    )
+    if not os.path.isfile(csv_path):
+        raise HTTPException(status_code=404, detail="benchmark CSV 不存在")
+    try:
+        df = pd.read_csv(csv_path)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"讀取 CSV 失敗: {e}")
+    # nan 在 JSON 不合法,先轉成 None
+    df = df.where(pd.notna(df), None)
+    rows = df.to_dict(orient="records")
+    return {"rows": rows, "count": len(rows)}
+
+
+@app.post("/api/train/pipeline/stream")
+async def train_pipeline_stream_endpoint(
+    # 模式 A:測試模式直接上傳 CSV
+    file: UploadFile | None = File(None),
+    # 模式 B:實驗室從現有 dataset / preprocessor 跑
+    datasetId: str | None = Form(None),
+    sources: str | None = Form(None),
+    preprocessorId: str | None = Form(None),
+    # Option B:訓練時上傳「想預測的 test.csv」(無 label) — 訓練完直接回預測結果
+    predictFile: UploadFile | None = File(None),
+    # 通用 pipeline options
+    target: str | None = Form(None),
+    timeSeries: bool = Form(False),
+    metric: str = Form("f1"),
+    fast: bool = Form(True),
+    timeLimit: float = Form(0),
+    skipTabular: bool = Form(False),
+    skipDl: bool = Form(False),
+    noNas: bool = Form(False),
+    user = Depends(get_current_user),
+    db: DbSession = Depends(get_db),
+):
+    """Pipeline 訓練 endpoint。詳見 docstring。"""
+    from api.train.daniel_runner import run_pipeline as run_daniel_pipeline
+    import io as _io
+
+    # 解析 sources
+    src_list: list[str] = []
+    if sources:
+        try:
+            src_list = json.loads(sources)
+        except Exception:
+            raise HTTPException(status_code=400, detail="sources 必須是 JSON list")
+    if not isinstance(src_list, list):
+        raise HTTPException(status_code=400, detail="sources 必須是 list")
+
+    direct_upload = file is not None
+    from_store = datasetId is not None
+    if not direct_upload and not from_store:
+        raise HTTPException(status_code=400, detail="需提供 file 或 datasetId")
+    if direct_upload and from_store:
+        raise HTTPException(status_code=400, detail="file 與 datasetId 擇一即可")
+
+    # 預先讀 predictFile (Option B) — 訓練完拿這份 CSV 對每個 result 做預測
+    predict_csv_bytes: bytes | None = None
+    predict_csv_name: str | None = None
+    if predictFile is not None:
+        predict_csv_bytes = await predictFile.read()
+        predict_csv_name = predictFile.filename or "predict_input.csv"
+
+    jobs: list[dict[str, Any]] = []
+    base_options = {
+        "target": target, "timeSeries": timeSeries, "metric": metric, "fast": fast,
+        "timeLimit": timeLimit, "skipTabular": skipTabular, "skipDl": skipDl, "noNas": noNas,
+    }
+    dataset_name_for_run = "(uploaded)"
+
+    if direct_upload:
+        raw = await file.read()
+        dataset_name_for_run = file.filename or "uploaded.csv"
+        # 即使是 direct upload 也支援 predictFile (override 內部 split)
+        if predict_csv_bytes:
+            jobs.append({
+                "label": "上傳", "source": "upload",
+                "train_csv_bytes": raw,
+                "test_csv_bytes": predict_csv_bytes,
+                "train_file_name": dataset_name_for_run,
+                "options": base_options,
+                "predict_input_bytes": predict_csv_bytes,
+            })
+        else:
+            jobs.append({
+                "label": "上傳", "source": "upload",
+                "csv_bytes": raw, "file_name": dataset_name_for_run,
+                "options": base_options,
+            })
+    else:
+        if not src_list:
+            src_list = ["raw"]
+
+        if "raw" in src_list:
+            bundle = storage.get_dataset(datasetId, user, db, include_df=True)
+            df = bundle["df"]
+            dataset_name_for_run = bundle.get("fileName") or "dataset.csv"
+            if target and target not in df.columns:
+                raise HTTPException(status_code=400, detail=f"target '{target}' 不在 dataset 欄位中")
+            buf = _io.StringIO()
+            df.to_csv(buf, index=False)
+            train_csv = buf.getvalue().encode("utf-8")
+
+            if predict_csv_bytes:
+                # 有上傳 predict.csv → 走 pre-split 模式,test_csv = predict.csv
+                jobs.append({
+                    "label": "原始", "source": "raw",
+                    "train_csv_bytes": train_csv,
+                    "test_csv_bytes": predict_csv_bytes,
+                    "train_file_name": dataset_name_for_run,
+                    "options": base_options,
+                    "predict_input_bytes": predict_csv_bytes,
+                })
+            else:
+                jobs.append({
+                    "label": "原始", "source": "raw",
+                    "csv_bytes": train_csv,
+                    "file_name": dataset_name_for_run,
+                    "options": base_options,
+                })
+
+        if "preprocessed" in src_list:
+            if not preprocessorId:
+                raise HTTPException(status_code=400, detail="選了 'preprocessed' 但未提供 preprocessorId")
+            pp_entry = storage.get_preprocessor(preprocessorId, user, db)
+            if dataset_name_for_run == "(uploaded)":
+                try:
+                    ds_bundle = storage.get_dataset(datasetId, user, db, include_df=False)
+                    dataset_name_for_run = ds_bundle.get("fileName") or "dataset.csv"
+                except HTTPException:
+                    pass
+            X_train_df = pp_entry["X_train"]
+            X_test_df = pp_entry["X_test"]
+            y_train = pp_entry["y_train"]
+            y_test = pp_entry["y_test"]
+            pp_target = pp_entry["target"]
+            pp_obj = pp_entry["preprocessor"]
+
+            train_df = X_train_df.copy()
+            train_df[pp_target] = list(y_train)
+            buf_tr = _io.StringIO(); train_df.to_csv(buf_tr, index=False)
+
+            # 決定 test CSV:有 predict_csv 時用使用者上傳的 (套用同一個 preprocessor)
+            predict_input_for_job: bytes | None = None
+            if predict_csv_bytes:
+                import pandas as _pd
+                try:
+                    predict_df_raw = _pd.read_csv(_io.BytesIO(predict_csv_bytes))
+                    # 預處理器 fit 時看的是不含 target 的 X,所以丟掉 target (若有)
+                    predict_feat_raw = predict_df_raw.drop(columns=[pp_target], errors="ignore")
+                    transformed = pp_obj.transform(predict_feat_raw)
+                    if hasattr(transformed, "toarray"):
+                        transformed = transformed.toarray()
+                    transformed_df = _pd.DataFrame(transformed, columns=list(X_train_df.columns))
+                except Exception as e:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"套用預處理到 predict CSV 失敗 — 欄位需與原始訓練資料一致: {e}",
+                    )
+                buf_te = _io.StringIO()
+                transformed_df.to_csv(buf_te, index=False)
+                predict_input_for_job = predict_csv_bytes
+            else:
+                test_df = X_test_df.copy()
+                test_df[pp_target] = list(y_test)
+                buf_te = _io.StringIO(); test_df.to_csv(buf_te, index=False)
+
+            pp_options = dict(base_options)
+            pp_options["target"] = pp_target
+
+            jobs.append({
+                "label": "預處理", "source": "preprocessed",
+                "train_csv_bytes": buf_tr.getvalue().encode("utf-8"),
+                "test_csv_bytes": buf_te.getvalue().encode("utf-8"),
+                "train_file_name": f"{bundle_safe_name(pp_target)}.csv",
+                "options": pp_options,
+                "preprocessorId": preprocessorId,
+                "predict_input_bytes": predict_input_for_job,
+            })
+
+    if not jobs:
+        raise HTTPException(status_code=400, detail="沒有產生任何訓練任務")
+
+    multi = len(jobs) > 1
+
+    # 建 TrainingRun (running 狀態,完成後再 update)
+    pipeline_run_id = storage.create_training_run(
+        dataset_id=datasetId or "uploaded",
+        dataset_name=dataset_name_for_run,
+        engine="pipeline",
+        target=target or "(auto)",
+        task_type="classification",
+        sources=src_list if from_store else ["upload"],
+        options={
+            "metric": metric, "fast": fast, "timeSeries": timeSeries,
+            "skipDl": skipDl, "noNas": noNas, "skipTabular": skipTabular,
+            "timeLimit": timeLimit, "preprocessorId": preprocessorId,
+            "hasPredictFile": predict_csv_bytes is not None,
+        },
+        user=user, db=db,
+    )
+    # 上傳的 predict.csv 存成 'input' artifact (auth 才有 run_id)
+    if predict_csv_bytes and pipeline_run_id:
+        storage.save_prediction_artifact(
+            training_run_id=pipeline_run_id, kind="input",
+            file_name=predict_csv_name or "predict_input.csv",
+            content_bytes=predict_csv_bytes, user=user, db=db,
+        )
+
+    t_start = time.time()
+
+    def event_stream():
+        q: queue.Queue = queue.Queue()
+        all_results: list[dict[str, Any]] = []
+        error_msg: str | None = None
+
+        def prefix(ev, label):
+            if not multi:
+                return ev
+            if ev.get("type") == "log":
+                return {**ev, "msg": f"[{label}] {ev.get('msg', '')}"}
+            if ev.get("type") == "progress":
+                return {**ev, "step": f"[{label}] {ev.get('step', '')}", "source": label}
+            return ev
+
+        def _build_submission_csv(predict_input_bytes: bytes, predictions: list, target_name: str) -> bytes:
+            """從 predict_input 拿第一欄當 ID,接上預測欄位,輸出 submission.csv bytes。"""
+            import pandas as _pd
+            predict_df = _pd.read_csv(_io.BytesIO(predict_input_bytes))
+            sub = _pd.DataFrame()
+            # 第一欄當 ID (常見 Kaggle 格式)
+            id_col = predict_df.columns[0]
+            sub[id_col] = predict_df[id_col].values[:len(predictions)]
+            sub[target_name] = predictions[:len(sub)]
+            out = _io.StringIO()
+            sub.to_csv(out, index=False)
+            return out.getvalue().encode("utf-8-sig")
+
+        def worker():
+            nonlocal error_msg
+            try:
+                for job in jobs:
+                    label = job["label"]
+                    on_prog = lambda ev, _label=label: q.put(prefix(ev, _label))
+                    if "train_csv_bytes" in job:
+                        r = run_daniel_pipeline(
+                            train_csv_bytes=job["train_csv_bytes"],
+                            test_csv_bytes=job["test_csv_bytes"],
+                            train_file_name=job["train_file_name"],
+                            options=job["options"],
+                            on_progress=on_prog,
+                        )
+                    else:
+                        r = run_daniel_pipeline(
+                            csv_bytes=job["csv_bytes"],
+                            file_name=job["file_name"],
+                            options=job["options"],
+                            on_progress=on_prog,
+                        )
+                    r["dataSource"] = job["source"]
+                    r["dataSourceLabel"] = label
+                    if job.get("preprocessorId"):
+                        r["preprocessorId"] = job["preprocessorId"]
+
+                    # Option B:有 predict_input 且 pipeline 成功 → 寫 submission artifact
+                    predict_input = job.get("predict_input_bytes")
+                    if (predict_input and r.get("ok") and r.get("predictions") and pipeline_run_id):
+                        try:
+                            submission_bytes = _build_submission_csv(
+                                predict_input, r["predictions"], r.get("target") or "prediction",
+                            )
+                            kind = f"submission_{job['source']}"
+                            storage.save_prediction_artifact(
+                                training_run_id=pipeline_run_id, kind=kind,
+                                file_name=f"submission_{job['source']}.csv",
+                                content_bytes=submission_bytes, user=user, db=db,
+                            )
+                            r["submissionAvailable"] = True
+                            r["submissionKind"] = kind
+                        except Exception as e:
+                            q.put({"type": "log", "level": "warning",
+                                   "msg": f"[{label}] submission CSV 產生失敗: {e}"})
+
+                    all_results.append(r)
+            except Exception as e:
+                error_msg = str(e)
+            finally:
+                q.put(None)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+        while True:
+            ev = q.get()
+            if ev is None:
+                break
+            yield f"data: {json.dumps(ev, ensure_ascii=False)}\n\n"
+
+        elapsed = round(time.time() - t_start, 2)
+        if error_msg:
+            storage.finish_training_run(pipeline_run_id, user, db,
+                                        status="failed", error_msg=error_msg,
+                                        elapsed_sec=elapsed)
+            yield f"data: {json.dumps({'type': 'error', 'message': error_msg}, ensure_ascii=False)}\n\n"
+        else:
+            # 整理 results_summary (per-source 分數 + bestScore)
+            summary = {
+                "perSource": [{
+                    "source": r.get("dataSource"),
+                    "label": r.get("dataSourceLabel"),
+                    "bestScore": r.get("bestScore"),
+                    "scoreBlend": r.get("scoreBlend"),
+                    "scoreStack": r.get("scoreStack"),
+                    "accuracy": r.get("accuracy"),
+                    "f1": r.get("f1"),
+                    "metric": r.get("metric"),
+                    "elapsedSec": r.get("elapsedSec"),
+                    "submissionAvailable": r.get("submissionAvailable", False),
+                    "submissionKind": r.get("submissionKind"),
+                } for r in all_results],
+                "datasetName": dataset_name_for_run,
+            }
+            has_predictions = any(r.get("submissionAvailable") for r in all_results)
+            storage.finish_training_run(
+                pipeline_run_id, user, db, status="completed",
+                results_summary=summary, has_predictions=has_predictions,
+                elapsed_sec=elapsed,
+            )
+            yield f"data: {json.dumps({'type': 'done', 'results': all_results, 'runId': pipeline_run_id}, ensure_ascii=False, default=str)}\n\n"
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+# ============================================================
+# TRAINING RUNS — 給 dashboard 最近實驗篩選用
+# ============================================================
+@app.get("/api/training-runs")
+def list_training_runs_endpoint(
+    datasetId: str | None = None,
+    target: str | None = None,
+    engine: str | None = None,
+    limit: int = 50,
+    user = Depends(get_current_user),
+    db: DbSession = Depends(get_db),
+) -> dict[str, Any]:
+    """列出 user 的訓練紀錄,可依 datasetId / target / engine 篩選,新→舊排序。
+    Guest 走 in-memory 路徑(沒 DB)→ 直接回空 list,前端就 fallback 用 localStorage 的歷史。"""
+    return {"runs": storage.list_training_runs(
+        user, db, dataset_id=datasetId, target=target, engine=engine, limit=limit,
+    )}
+
+
+@app.get("/api/training-runs/{run_id}")
+def get_training_run_endpoint(
+    run_id: str,
+    user = Depends(get_current_user),
+    db: DbSession = Depends(get_db),
+) -> dict[str, Any]:
+    return storage.get_training_run(run_id, user, db)
+
+
+# ============================================================
+# MODELS — 給登入時一次性還原前端 leaderboard / insights / what-if
+# ============================================================
+@app.get("/api/models")
+def list_models_endpoint(
+    trainingRunId: str | None = None,
+    datasetId: str | None = None,
+    limit: int = 200,
+    user = Depends(get_current_user),
+    db: DbSession = Depends(get_db),
+) -> dict[str, Any]:
+    """列出 user 的所有 sklearn 模型 — 輕量版,bundle 內含 metrics/featureImportance/testTrue/Pred,
+    不含 estimator pickle (那要用 SHAP/batch predict 時前端送 modelId 後端再載)。"""
+    return {"models": storage.list_models(
+        user, db, training_run_id=trainingRunId, dataset_id=datasetId, limit=limit,
+    )}
+
+
+# 下載 pipeline 的 submission CSV
+@app.get("/api/train/pipeline/runs/{run_id}/submission")
+def pipeline_run_submission_endpoint(
+    run_id: str,
+    kind: str = "submission_raw",  # submission_raw / submission_preprocessed / submission_upload
+    user = Depends(get_current_user),
+    db: DbSession = Depends(get_db),
+):
+    """下載某次 pipeline 訓練的預測結果 CSV。"""
+    artifact = storage.get_prediction_artifact(run_id, kind, user, db)
+    if not artifact:
+        raise HTTPException(status_code=404, detail=f"找不到 {kind} 預測結果")
+    return Response(
+        content=artifact["contentBytes"],
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{artifact["fileName"]}"'},
+    )
+
+
+def bundle_safe_name(s: str) -> str:
+    """把字串清成檔名安全:只留英數 + 底線。"""
+    import re
+    return re.sub(r"[^A-Za-z0-9_-]", "_", str(s))[:40] or "preprocessed"
 
 
 # ============================================================
@@ -489,38 +908,147 @@ def train_endpoint(
 def train_stream_endpoint(
     req: TrainRequest,
     user = Depends(get_current_user),
+    db: DbSession = Depends(get_db),
 ):
+    t_start = time.time()
+    run_id = storage.create_training_run(
+        dataset_id=req.datasetId, dataset_name="(loading)",
+        engine="sklearn", target=req.target,
+        task_type=req.options.get("taskType", "auto") if req.options else "auto",
+        sources=req.sources, options=req.options or {},
+        user=user, db=db,
+    )
+
     def event_stream():
         q: queue.Queue = queue.Queue()
-        result_box: dict[str, Any] = {"results": None, "error": None}
+        result_box: dict[str, Any] = {"results": None, "dataset_name": None, "error": None}
 
         def worker():
             try:
-                result_box["results"] = _run_sources(
-                    req, user, on_progress=lambda ev: q.put(ev),
+                results, ds_name = _run_sources(
+                    req, user, db, on_progress=lambda ev: q.put(ev),
                 )
+                result_box["results"] = results
+                result_box["dataset_name"] = ds_name
             except HTTPException as he:
                 result_box["error"] = str(he.detail)
             except Exception as e:
                 result_box["error"] = str(e)
             finally:
-                q.put(None)  # sentinel
+                q.put(None)
 
         threading.Thread(target=worker, daemon=True).start()
 
-        # 串流階段:把 worker thread 發的事件即時轉成 SSE
         while True:
             ev = q.get()
-            if ev is None:
-                break
+            if ev is None: break
             yield f"data: {json.dumps(ev, ensure_ascii=False)}\n\n"
 
-        # 訓練完成 — 存 estimator,把 model bundles 一次推回
         if result_box["error"]:
+            storage.finish_training_run(run_id, user, db, status="failed",
+                                        error_msg=result_box["error"],
+                                        elapsed_sec=round(time.time() - t_start, 2))
             yield f"data: {json.dumps({'type': 'error', 'message': result_box['error']}, ensure_ascii=False)}\n\n"
+        elif not result_box["results"]:
+            err = "訓練結束但沒收到任何結果 (內部錯誤,請重試)"
+            storage.finish_training_run(run_id, user, db, status="failed", error_msg=err,
+                                        elapsed_sec=round(time.time() - t_start, 2))
+            yield f"data: {json.dumps({'type': 'error', 'message': err}, ensure_ascii=False)}\n\n"
         else:
-            bundles = _store_models(result_box["results"], user)
-            yield f"data: {json.dumps({'type': 'done', 'models': bundles}, ensure_ascii=False)}\n\n"
+            # 存模型階段:用 commit=False 把 30 筆 INSERT 壓成 1 次 commit (省 N-1 次 round-trip 到 Supabase),
+            # 同時每 add 一個就 yield 一次,讓前端看到進度 + 保活 SSE 連線。
+            bundles = []
+            results = result_box["results"]
+            total = len(results)
+            for i, (bundle, estimator, scaler, X_test_df) in enumerate(results):
+                pct = 90 + int(6 * (i + 1) / max(total, 1))  # 90~96% 用於 add 階段
+                model_label = bundle.get("name") or bundle.get("type") or "model"
+                yield f"data: {json.dumps({'type': 'log', 'msg': f'準備儲存 {i+1}/{total} ({model_label})...', 'level': 'muted'}, ensure_ascii=False)}\n\n"
+                yield f"data: {json.dumps({'type': 'progress', 'pct': pct, 'step': f'準備儲存 {i+1}/{total}'}, ensure_ascii=False)}\n\n"
+                try:
+                    model_id = storage.save_model(
+                        bundle=bundle, estimator=estimator, scaler=scaler, X_test_df=X_test_df,
+                        user=user, db=db,
+                        preprocessor_id=bundle.get("preprocessorId"),
+                        dataset_id=req.datasetId,
+                        training_run_id=run_id,
+                        hyperparameters=bundle.get("hyperparameters", {}),
+                        commit=False,  # ← 關鍵:不要每個都 commit,跑完一起 commit
+                    )
+                    bundle["id"] = model_id
+                except Exception as e:
+                    import traceback as _tb
+                    print(f"[event_stream] save_model 第 {i+1}/{total} 筆 add 失敗 (algo={bundle.get('type')}): {type(e).__name__}: {e}", flush=True)
+                    _tb.print_exc()
+                    bundle["id"] = None
+                    bundle["_storeError"] = f"{type(e).__name__}: {e}"
+                    yield f"data: {json.dumps({'type': 'log', 'msg': f'✗ 準備第 {i+1} 筆失敗: {e}', 'level': 'warning'}, ensure_ascii=False)}\n\n"
+                bundles.append(bundle)
+
+            # 一次性 commit 所有 add — 比一筆一筆 commit 快數十倍
+            yield f"data: {json.dumps({'type': 'log', 'msg': f'⬆️ 一次上傳 {total} 個模型到 DB (Supabase 韓國機房,可能需要幾秒)...', 'level': 'info'}, ensure_ascii=False)}\n\n"
+            yield f"data: {json.dumps({'type': 'progress', 'pct': 97, 'step': '上傳到 DB'}, ensure_ascii=False)}\n\n"
+            commit_t = time.time()
+            try:
+                db.commit()
+                yield f"data: {json.dumps({'type': 'log', 'msg': f'✓ 全部上傳完成 ({round(time.time() - commit_t, 1)}s)', 'level': 'success'}, ensure_ascii=False)}\n\n"
+            except Exception as e:
+                import traceback as _tb
+                print(f"[event_stream] bulk commit 失敗: {type(e).__name__}: {e}", flush=True)
+                _tb.print_exc()
+                try: db.rollback()
+                except Exception: pass
+                # 失敗的話前端 bundle 的 id 都失效 (沒寫進 DB)
+                for b in bundles:
+                    b["id"] = None
+                    b.setdefault("_storeError", f"bulk commit 失敗: {type(e).__name__}: {e}")
+                yield f"data: {json.dumps({'type': 'log', 'msg': f'✗ DB commit 失敗: {e} (前端仍可顯示,但不能跑 SHAP)', 'level': 'warning'}, ensure_ascii=False)}\n\n"
+
+            yield f"data: {json.dumps({'type': 'log', 'msg': '更新訓練紀錄...', 'level': 'muted'}, ensure_ascii=False)}\n\n"
+            yield f"data: {json.dumps({'type': 'progress', 'pct': 99, 'step': '更新訓練紀錄'}, ensure_ascii=False)}\n\n"
+            try:
+                storage.finish_training_run(
+                    run_id, user, db, status="completed",
+                    results_summary={
+                        "topModels": [{"id": b.get("id"), "name": b.get("name"),
+                                       "score": b.get("metrics", {}).get("testScore", 0.0)}
+                                      for b in bundles[:5]],
+                        "datasetName": result_box["dataset_name"],
+                    },
+                    model_ids=[b.get("id") for b in bundles if b.get("id")],
+                    elapsed_sec=round(time.time() - t_start, 2),
+                )
+            except Exception as e:
+                print(f"[event_stream] finish_training_run 失敗 (繼續送 done): {type(e).__name__}: {e}", flush=True)
+                try: db.rollback()
+                except Exception: pass
+
+            yield f"data: {json.dumps({'type': 'progress', 'pct': 100, 'step': '完成'}, ensure_ascii=False)}\n\n"
+
+            # ★ 改:分批送 model 事件,每個 < 20 KB,避免「30 個 bundle 黏成 500KB 大 chunk」
+            #   被 SSE / browser buffer 切斷導致前端 JSON.parse 失敗 → 變成 models=[]。
+            #   每個 model 一個事件,最後送小小的 'done' sentinel 告訴前端「結束了,共 N 個」。
+            for b in bundles:
+                try:
+                    model_payload = json.dumps({'type': 'model', 'bundle': b},
+                                               ensure_ascii=False, default=str)
+                except Exception as e:
+                    print(f"[event_stream] 模型 {b.get('id')} JSON 化失敗,改送 minimal: {e}", flush=True)
+                    mini = {
+                        "id": b.get("id"), "name": b.get("name"),
+                        "type": b.get("type"),
+                        "dataSource": b.get("dataSource"),
+                        "metrics": {k: v for k, v in (b.get("metrics") or {}).items()
+                                    if isinstance(v, (str, int, float, bool, list)) or v is None},
+                        "trainTime": b.get("trainTime", 0),
+                        "_minimal": True,
+                    }
+                    model_payload = json.dumps({'type': 'model', 'bundle': mini},
+                                               ensure_ascii=False, default=str)
+                yield f"data: {model_payload}\n\n"
+
+            # 最後的 sentinel — 小小一個,前端用來知道「全部收完了」
+            yield f"data: {json.dumps({'type': 'done', 'count': len(bundles)}, ensure_ascii=False)}\n\n"
 
     return StreamingResponse(
         event_stream(),
@@ -542,8 +1070,9 @@ class VisualizeRequest(BaseModel):
 def visualize_endpoint(
     req: VisualizeRequest,
     user = Depends(get_current_user),
+    db: DbSession = Depends(get_db),
 ) -> dict[str, Any]:
-    entry = get_owned(MODELS, req.modelId, user, "modelId")
+    entry = storage.get_model(req.modelId, user, db)
     return visualize.run(entry["bundle"], req.chartType, req.options)
 
 
@@ -554,20 +1083,23 @@ class ShapRequest(BaseModel):
     modelId: str
     sampleIndex: int = 0
     targetFeature: str | None = None
-    maxSamples: int = 200  # SHAP 算太多會很慢,做個上限
+    maxSamples: int = 50  # SHAP 算太多會很慢 — 對 Tree/Linear 模型再大都秒級,但對 Permutation
+                          # fallback (SVC/Voting/Stacking/KNN) 一個樣本就要 3 秒,200 個會跑 10 分鐘。
+                          # 50 在大部分情況下圖夠穩,使用者要更穩可在系統設定調回 100~200。
 
 
 @app.post("/api/visualize/shap")
 def visualize_shap_endpoint(
     req: ShapRequest,
     user = Depends(get_current_user),
+    db: DbSession = Depends(get_db),
 ) -> dict[str, Any]:
     if AutoMLVisualizer is None:
         raise HTTPException(
             status_code=500,
             detail="AutoMLVisualizer 未啟用 — 請安裝 shap + plotly: pip install shap plotly",
         )
-    entry = get_owned(MODELS, req.modelId, user, "modelId")
+    entry = storage.get_model(req.modelId, user, db)
 
     estimator = entry.get("estimator")
     X_test_df = entry.get("X_test_df")
@@ -620,8 +1152,9 @@ class PredictRequest(BaseModel):
 def predict_endpoint(
     req: PredictRequest,
     user = Depends(get_current_user),
+    db: DbSession = Depends(get_db),
 ) -> dict[str, Any]:
-    entry = get_owned(MODELS, req.modelId, user, "modelId")
+    entry = storage.get_model(req.modelId, user, db)
 
     estimator = entry["estimator"]
     scaler = entry["scaler"]
@@ -653,10 +1186,11 @@ async def predict_batch_endpoint(
     file: UploadFile = File(...),
     sampleFile: UploadFile | None = File(None),
     user = Depends(get_current_user),
+    db: DbSession = Depends(get_db),
 ) -> Response:
     import pandas as pd
 
-    entry = get_owned(MODELS, modelId, user, "modelId")
+    entry = storage.get_model(modelId, user, db)
     estimator = entry["estimator"]
     scaler = entry["scaler"]
     feature_names = entry["featureNames"]
@@ -672,9 +1206,7 @@ async def predict_batch_endpoint(
 
     if preprocessor_id:
         # ── 預處理來源的模型 ──
-        # 上傳的 CSV 是「原始格式」(跟訓練資料同欄位),要先過同一個 preprocessor 轉換
-        # 同 user 的 preprocessor 才能拿;不是的話當作不存在 (404)
-        pp_entry = get_owned(PREPROCESSORS, preprocessor_id, user, "preprocessor")
+        pp_entry = storage.get_preprocessor(preprocessor_id, user, db)
         preprocessor = pp_entry["preprocessor"]
         pp_target = pp_entry["target"]
         # 丟掉目標欄 (CSV 若有帶),其餘原始欄位交給 preprocessor

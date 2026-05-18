@@ -453,6 +453,42 @@ def _train_one(
 
     importance = _feature_importance(estimator, X_test, y_test, len(feature_names))
 
+    # 撈超參數 — get_params() 是 sklearn 通用 API,catboost/xgboost/lgbm 都實作。
+    # 過濾 callable 跟 ndarray 之類沒法 JSON 序列化的;estimators list 縮成 name list。
+    # Stacking 的 final_estimator=LogisticRegression()、Voting 的 estimators 都會在這裡被處理。
+    try:
+        import json as _json
+
+        def _to_jsonable(val):
+            """把任意值轉成 JSON-safe 的東西。"""
+            if val is None or isinstance(val, (bool, int, float, str)):
+                return val
+            # 估算器物件 (sklearn estimator) — 顯示 class 名,不要塞物件
+            if hasattr(val, "get_params") and hasattr(val, "__class__"):
+                return val.__class__.__name__
+            if isinstance(val, (list, tuple)):
+                # voting/stacking 的 estimators=[(name, obj), ...] 只留 name
+                if val and all(isinstance(item, tuple) and len(item) == 2 for item in val):
+                    return [item[0] if isinstance(item[0], str) else str(item[0]) for item in val]
+                return [_to_jsonable(x) for x in val]
+            if isinstance(val, dict):
+                return {str(k): _to_jsonable(v) for k, v in val.items()}
+            # 最後保底:str()
+            try:
+                _json.dumps(val)
+                return val
+            except (TypeError, ValueError):
+                return str(val)
+
+        raw_params = estimator.get_params(deep=False)
+        hyperparameters = {}
+        for k, v in raw_params.items():
+            if callable(v):
+                continue
+            hyperparameters[k] = _to_jsonable(v)
+    except Exception:
+        hyperparameters = {}
+
     bundle = {
         "type": key,
         "name": _ALGO_LABELS[key],
@@ -470,6 +506,7 @@ def _train_one(
         "means": scaler.mean_.tolist(),
         "stds": scaler.scale_.tolist(),
         "featureStats": feature_stats,
+        "hyperparameters": hyperparameters,  # 給前端「訓練詳情」popover 顯示用
     }
     return bundle, estimator
 

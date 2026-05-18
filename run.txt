@@ -165,6 +165,38 @@ api/
   └── data_collect_time.py   # 時序數據收集
 
 ================================================================================
+【開發者工具】DB 資料清理 (給 dev 用,不對外暴露)
+================================================================================
+
+tools/wipe_data.py — 清空 DB 的 ML state (datasets / preprocessors / models /
+training_runs / prediction_artifacts)。給開發測試「排除舊資料干擾」用。
+
+# 預覽不執行 (推薦先跑一次,看會刪幾筆)
+python tools/wipe_data.py --all --dry-run
+
+# 清掉所有 user 的 ML 資料 (帳號保留)
+python tools/wipe_data.py --all
+
+# 只清指定 user (用 user_id)
+python tools/wipe_data.py --user 2
+
+# 用 email 找 user
+python tools/wipe_data.py --user denghongli1021@gmail.com
+
+# 連 users 表也清 (注意:會把所有帳號刪掉,登入要重註冊)
+python tools/wipe_data.py --all --include-users
+
+執行流程:
+  1. 印出連線目標 (從 .env 讀 DATABASE_URL)
+  2. 列出每張表預計刪除筆數
+  3. 等 user 輸入 'YES' (大寫) 才真的執行
+  4. 順序: prediction_artifacts → models → training_runs → preprocessors → datasets
+
+不會動的:
+  - users 表 (除非 --include-users)
+  - .env / 程式碼 / 設定
+
+================================================================================
 【常見命令速查表】
 ================================================================================
 

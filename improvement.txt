@@ -1,0 +1,45 @@
+API / backend improvement suggestions
+
+1. Split `api/main.py` into smaller routers
+   - Move preprocess, train, visualize, predict routes into separate `APIRouter` modules.
+   - Keep `main.py` as app setup / middleware / router registration only.
+
+2. Make in-memory stores thread-safe or persistent
+   - `api/store.py` currently uses global dicts (`DATASETS`, `MODELS`, `PREPROCESSORS`).
+   - Add a lock or migrate to Redis/SQLite if deploying beyond demo.
+
+3. Avoid repeated router execution in preprocess transform
+   - `preprocess_transform_endpoint` runs `preprocess_for_training()` then re-runs `AutoRouter`.
+   - Reuse the same router/feature groups to keep preview consistent with actual transformed output.
+
+
+
+5. Narrow CORS policy for production
+   - `allow_origins=["*"]` is too broad for deployed apps.
+   - Restrict origins to frontend domains when possible.
+
+6. Clarify task type detection in training
+   - Current heuristic uses `len(unique_y) <= 10` to infer classification.
+   - Prefer explicit `taskType` from frontend or stronger checks based on dtype/distribution.
+
+7. Improve prediction API consistency
+   - `predict_endpoint` expects raw numeric feature vector only.
+   - For preprocessed models, provide a single-row raw-input path that also applies the saved preprocessor.
+
+8. Add schema validation for inference inputs
+   - `preprocess_inference_endpoint` currently builds DataFrame directly from rows.
+   - Validate columns and data types before transformation.
+
+9. Refactor long return type annotations
+   - Use type aliases in `api/train/train.py` for readability, e.g. `ModelResult = tuple[dict[str, Any], Any, StandardScaler, pd.DataFrame]`.
+
+10. Organize optional dependencies
+    - Move optional packages (`xgboost`, `lightgbm`, `catboost`, `shap`, `plotly`) into separate optional requirements or extras.
+
+11. Expand visualization route support
+    - `api/visualize/visualize.py` currently only supports feature importance and predictions.
+    - Implement residuals/shap/confusion matrix support or improve chart type validation.
+
+12. Consider offloading large data from memory
+    - Storing full DataFrames in memory may be okay for demo but not for heavier use.
+    - Save datasets/preprocessed splits to temporary files and keep metadata in store.

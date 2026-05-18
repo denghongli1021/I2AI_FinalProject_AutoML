@@ -24,3 +24,11 @@ authlib>=1.3.0
 httpx>=0.27.0
 # Load env vars from .env file during local dev.
 python-dotenv>=1.0.0
+# ─────────────────────────────────────────────────────────────────────────────
+# Daniel pipeline (測試模式專用) — 需本機後端執行。Render free tier 太弱不建議啟用。
+# CPU-only torch: pip install torch --index-url https://download.pytorch.org/whl/cpu
+# 開啟時把下面三行 uncomment:
+# torch>=2.0.0
+# optuna>=3.5.0
+# scipy>=1.10.0
+# tqdm>=4.65.0

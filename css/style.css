@@ -2,6 +2,17 @@
 * { margin: 0; padding: 0; box-sizing: border-box; }
 body { font-family: 'Inter', system-ui, sans-serif; -webkit-font-smoothing: antialiased; }
 
+/* visually hidden helper for screen-reader-only labels */
+.sr-only {
+  position: absolute;
+  width: 1px; height: 1px;
+  padding: 0; margin: -1px;
+  overflow: hidden;
+  clip: rect(0,0,0,0);
+  white-space: nowrap;
+  border: 0;
+}
+
 /* Scrollbar */
 ::-webkit-scrollbar { width: 6px; height: 6px; }
 ::-webkit-scrollbar-track { background: transparent; }
@@ -241,14 +252,6 @@ body { font-family: 'Inter', system-ui, sans-serif; -webkit-font-smoothing: anti
 .toggle-switch input:checked + .toggle-slider { background: #3b82f6; }
 .toggle-switch input:checked + .toggle-slider:before { transform: translateX(20px); }
 
-/* ===== MODE TOGGLE ===== */
-#btn-mode-toggle {
-  transition: all 0.25s ease;
-}
-#btn-mode-toggle:hover {
-  background: rgba(59, 130, 246, 0.08);
-}
-
 /* Process log affected rows */
 #proc-affected-tbody tr:hover {
   background: rgba(59, 130, 246, 0.04);
@@ -355,14 +358,34 @@ body { font-family: 'Inter', system-ui, sans-serif; -webkit-font-smoothing: anti
 }
 
 /* ===== RESPONSIVE ===== */
-@media (max-width: 1024px) {
+@media (max-width: 1024px) and (min-width: 768px) {
   .sidebar { width: 60px; }
   .sidebar .nav-item span,
   .sidebar .step-label,
-  .sidebar p,
+  .sidebar p:not(.no-collapse),
   .sidebar h1 { display: none; }
   .sidebar .nav-item { justify-content: center; padding: 0.75rem; }
   main { margin-left: 60px; }
+}
+
+/* 手機:sidebar 改成抽屜,預設位移到畫面外,加 .open 才滑入 */
+@media (max-width: 767px) {
+  .hamburger-btn { display: inline-flex; }
+  .sidebar {
+    transform: translateX(-100%);
+    width: 16rem;
+    transition: transform 0.25s ease;
+    z-index: 40;
+    box-shadow: 8px 0 24px rgba(0, 0, 0, 0.5);
+  }
+  .sidebar.open { transform: translateX(0); }
+  main { margin-left: 0 !important; }
+  /* top bar 在手機上把中段的「系統就緒」膠囊收起來 */
+  #global-status { display: none; }
+  /* 對齊:auth guest section 縮短 */
+  #auth-guest-section .text-\[10px\] { display: none; }
+  /* 預設給內容區更少留白 */
+  main > .p-6 { padding: 1rem; }
 }
 
 /* ===== UPLOAD DRAG STATE ===== */
@@ -442,6 +465,301 @@ select {
 select option {
   background: #1e293b;
   color: #e2e8f0;
+}
+
+/* ===== BUTTON UTILITIES =====
+   抽出在 HTML 重複出現的長 class string,後續所有 CTA / 次要按鈕 / ghost 按鈕都靠這幾組 */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.375rem;
+  padding: 0.5rem 1rem;
+  font-size: 0.875rem;
+  font-weight: 500;
+  line-height: 1.25rem;
+  border-radius: 0.5rem;
+  border: 1px solid transparent;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  white-space: nowrap;
+}
+.btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.btn-sm { padding: 0.375rem 0.75rem; font-size: 0.75rem; }
+.btn-xs { padding: 0.25rem 0.5rem; font-size: 0.7rem; }
+.btn-lg { padding: 0.625rem 1.5rem; font-size: 0.875rem; font-weight: 600; }
+
+.btn-primary {
+  background: linear-gradient(90deg, #2563eb, #0891b2);
+  color: #fff;
+  font-weight: 600;
+  box-shadow: 0 8px 20px -8px rgba(59, 130, 246, 0.4);
+}
+.btn-primary:hover:not(:disabled) {
+  background: linear-gradient(90deg, #3b82f6, #06b6d4);
+  box-shadow: 0 10px 25px -8px rgba(59, 130, 246, 0.55);
+}
+
+.btn-secondary {
+  background: #334155;
+  color: #e2e8f0;
+}
+.btn-secondary:hover:not(:disabled) { background: #475569; }
+
+.btn-tertiary {
+  background: #1e293b;
+  color: #cbd5e1;
+  border-color: #334155;
+}
+.btn-tertiary:hover:not(:disabled) { background: #334155; border-color: #475569; }
+
+.btn-ghost {
+  background: transparent;
+  color: #94a3b8;
+}
+.btn-ghost:hover:not(:disabled) { background: rgba(148, 163, 184, 0.08); color: #e2e8f0; }
+
+.btn-danger {
+  background: rgba(220, 38, 38, 0.85);
+  color: #fff;
+}
+.btn-danger:hover:not(:disabled) { background: #dc2626; }
+
+.btn-success {
+  background: #059669;
+  color: #fff;
+}
+.btn-success:hover:not(:disabled) { background: #10b981; }
+
+/* ===== SETTINGS PAGE ROW ===== */
+.setting-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0.75rem;
+  border-radius: 0.5rem;
+  background: rgba(30, 41, 59, 0.5);
+}
+
+/* ===== SKELETON LOADERS ===== */
+.skeleton {
+  position: relative;
+  overflow: hidden;
+  background: rgba(30, 41, 59, 0.5);
+  border-radius: 0.5rem;
+}
+.skeleton::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    rgba(148, 163, 184, 0.06) 50%,
+    transparent 100%
+  );
+  animation: skeletonShimmer 1.4s ease-in-out infinite;
+}
+@keyframes skeletonShimmer {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(100%); }
+}
+.skeleton-row { height: 0.875rem; margin-bottom: 0.5rem; }
+.skeleton-row:last-child { margin-bottom: 0; }
+.skeleton-card { height: 100%; min-height: 8rem; }
+
+/* ===== TOAST SYSTEM ===== */
+#toast-container {
+  position: fixed;
+  bottom: 1.5rem;
+  right: 1.5rem;
+  z-index: 80;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  pointer-events: none;
+  max-width: calc(100vw - 3rem);
+}
+.toast {
+  pointer-events: auto;
+  display: flex;
+  align-items: flex-start;
+  gap: 0.625rem;
+  min-width: 16rem;
+  max-width: 22rem;
+  padding: 0.75rem 0.875rem;
+  background: #0f172a;
+  border: 1px solid rgba(51, 65, 85, 0.7);
+  border-radius: 0.625rem;
+  box-shadow: 0 12px 28px -8px rgba(0, 0, 0, 0.5);
+  font-size: 0.8125rem;
+  color: #e2e8f0;
+  animation: toastSlideIn 0.25s ease-out;
+}
+.toast.toast-leaving { animation: toastSlideOut 0.25s ease-in forwards; }
+.toast-icon { flex-shrink: 0; width: 1rem; height: 1rem; margin-top: 0.125rem; }
+.toast-body { flex: 1; min-width: 0; line-height: 1.35; }
+.toast-title { font-weight: 600; margin-bottom: 0.125rem; }
+.toast-msg { font-size: 0.75rem; color: #94a3b8; }
+.toast-close {
+  flex-shrink: 0;
+  background: transparent;
+  border: 0;
+  color: #64748b;
+  cursor: pointer;
+  padding: 0;
+  width: 1rem; height: 1rem;
+  line-height: 1;
+}
+.toast-close:hover { color: #e2e8f0; }
+.toast-success { border-left: 3px solid #10b981; }
+.toast-success .toast-icon { color: #34d399; }
+.toast-error { border-left: 3px solid #ef4444; }
+.toast-error .toast-icon { color: #f87171; }
+.toast-warning { border-left: 3px solid #f59e0b; }
+.toast-warning .toast-icon { color: #fbbf24; }
+.toast-info { border-left: 3px solid #3b82f6; }
+.toast-info .toast-icon { color: #60a5fa; }
+@keyframes toastSlideIn {
+  from { opacity: 0; transform: translateX(20px); }
+  to   { opacity: 1; transform: translateX(0); }
+}
+@keyframes toastSlideOut {
+  from { opacity: 1; transform: translateX(0); }
+  to   { opacity: 0; transform: translateX(20px); }
+}
+
+/* ===== DEMO MODE BADGE (top bar) ===== */
+.mode-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.375rem;
+  padding: 0.25rem 0.625rem;
+  border-radius: 9999px;
+  font-size: 0.6875rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  border: 1px solid;
+  user-select: none;
+}
+.mode-badge[data-mode='demo'] {
+  background: rgba(245, 158, 11, 0.12);
+  border-color: rgba(245, 158, 11, 0.35);
+  color: #fbbf24;
+}
+.mode-badge[data-mode='demo']:hover { background: rgba(245, 158, 11, 0.2); }
+.mode-badge[data-mode='real'] {
+  background: rgba(16, 185, 129, 0.12);
+  border-color: rgba(16, 185, 129, 0.35);
+  color: #34d399;
+}
+.mode-badge[data-mode='real']:hover { background: rgba(16, 185, 129, 0.2); }
+.mode-badge-dot {
+  width: 0.375rem;
+  height: 0.375rem;
+  border-radius: 9999px;
+  background: currentColor;
+}
+
+/* ===== MOBILE DRAWER (sidebar overlay on <768px) ===== */
+.drawer-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.5);
+  backdrop-filter: blur(2px);
+  z-index: 25;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.2s ease;
+}
+.drawer-backdrop.open {
+  opacity: 1;
+  pointer-events: auto;
+}
+.hamburger-btn {
+  display: none;
+  padding: 0.375rem;
+  border-radius: 0.5rem;
+  background: transparent;
+  border: 0;
+  color: #94a3b8;
+  cursor: pointer;
+  transition: background 0.2s;
+}
+.hamburger-btn:hover { background: rgba(148, 163, 184, 0.08); color: #e2e8f0; }
+
+/* ===== EMPTY STATE (reused across pages) ===== */
+.empty-state {
+  padding: 3rem 1.5rem;
+  text-align: center;
+}
+.empty-state-icon {
+  width: 4rem;
+  height: 4rem;
+  margin: 0 auto 1rem;
+  border-radius: 1rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.empty-state-title { font-size: 1.125rem; font-weight: 600; margin-bottom: 0.5rem; color: #f1f5f9; }
+.empty-state-desc { font-size: 0.875rem; color: #94a3b8; margin-bottom: 1rem; }
+
+/* ===== PIPELINE STAGE CARDS (測試模式專用) ===== */
+.pipeline-stage-card {
+  flex: 1;
+  min-width: 7rem;
+  max-width: 11rem;
+  padding: 0.75rem 0.625rem 0.875rem;
+  border: 1px solid rgba(51, 65, 85, 0.5);
+  border-radius: 0.75rem;
+  background: rgba(15, 23, 42, 0.6);
+  transition: all 0.3s ease;
+  position: relative;
+}
+.pipeline-stage-num {
+  font-size: 0.6875rem;
+  font-weight: 700;
+  color: #475569;
+  margin-bottom: 0.375rem;
+  letter-spacing: 0.05em;
+}
+.pipeline-stage-label {
+  font-size: 0.8125rem;
+  font-weight: 600;
+  color: #cbd5e1;
+  margin-bottom: 0.25rem;
+  line-height: 1.2;
+}
+.pipeline-stage-desc {
+  font-size: 0.6875rem;
+  color: #64748b;
+  line-height: 1.35;
+}
+
+.pipeline-stage-active {
+  background: rgba(245, 158, 11, 0.08);
+  border-color: rgba(245, 158, 11, 0.5);
+  box-shadow: 0 0 24px -4px rgba(245, 158, 11, 0.4);
+  transform: translateY(-2px);
+}
+.pipeline-stage-active .pipeline-stage-num { color: #fbbf24; }
+.pipeline-stage-active .pipeline-stage-label { color: #fde68a; }
+
+.pipeline-stage-done {
+  background: rgba(16, 185, 129, 0.06);
+  border-color: rgba(16, 185, 129, 0.4);
+}
+.pipeline-stage-done .pipeline-stage-num { color: #34d399; }
+.pipeline-stage-done .pipeline-stage-num::after { content: ' ✓'; }
+.pipeline-stage-done .pipeline-stage-label { color: #6ee7b7; }
+
+/* Upload drag-over for pipeline upload zone */
+#pipeline-upload-zone.drag-over {
+  border-color: #fbbf24;
+  background: rgba(245, 158, 11, 0.05);
 }
 
 /* ===== PROCESS LOG CATEGORIES ===== */

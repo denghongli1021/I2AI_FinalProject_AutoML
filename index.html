@@ -9,8 +9,9 @@
   <script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>
   <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
   <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="css/style.css?v=14">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="css/style.css?v=36">
   <script>
     tailwind.config = {
       theme: {
@@ -30,6 +31,66 @@
   </script>
 </head>
 <body class="bg-dark-950 text-dark-100 font-sans min-h-screen flex">
+
+  <!-- ===== SVG ICON SPRITE =====
+       後面用 <svg class="w-5 h-5"><use href="#i-XXX"/></svg> 引用,
+       fill/stroke/stroke-width 都已掛在 <path>,使用端不必再重複寫。 -->
+  <svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false">
+    <defs>
+      <symbol id="i-close" viewBox="0 0 24 24">
+        <path d="M6 18L18 6M6 6l12 12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+      </symbol>
+      <symbol id="i-eye" viewBox="0 0 24 24">
+        <path d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+        <path d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+      </symbol>
+      <symbol id="i-check-circle" viewBox="0 0 24 24">
+        <path d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+      </symbol>
+      <symbol id="i-arrow-up" viewBox="0 0 24 24">
+        <path d="M5 10l7-7m0 0l7 7m-7-7v18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+      </symbol>
+      <symbol id="i-arrow-right" viewBox="0 0 24 24">
+        <path d="M5 12h14M12 5l7 7-7 7" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+      </symbol>
+      <symbol id="i-code" viewBox="0 0 24 24">
+        <path d="M10 20l4-16m4 4l4 4-4 4M6 16l-4-4 4-4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+      </symbol>
+      <symbol id="i-download" viewBox="0 0 24 24">
+        <path d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+      </symbol>
+      <symbol id="i-plus" viewBox="0 0 24 24">
+        <path d="M12 4v16m8-8H4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+      </symbol>
+      <symbol id="i-database" viewBox="0 0 24 24">
+        <path d="M4 7v10c0 2.21 3.582 4 8 4s8-1.79 8-4V7M4 7c0 2.21 3.582 4 8 4s8-1.79 8-4M4 7c0-2.21 3.582-4 8-4s8 1.79 8 4m0 5c0 2.21-3.582 4-8 4s-8-1.79-8-4" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+      </symbol>
+      <symbol id="i-upload-cloud" viewBox="0 0 24 24">
+        <path d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+      </symbol>
+      <symbol id="i-flask" viewBox="0 0 24 24">
+        <path d="M19.428 15.428a2 2 0 00-1.022-.547l-2.387-.477a6 6 0 00-3.86.517l-.318.158a6 6 0 01-3.86.517L6.05 15.21a2 2 0 00-1.806.547M8 4h8l-1 1v5.172a2 2 0 00.586 1.414l5 5c1.26 1.26.367 3.414-1.415 3.414H4.828c-1.782 0-2.674-2.154-1.414-3.414l5-5A2 2 0 009 10.172V5L8 4z" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+      </symbol>
+      <symbol id="i-chart-bar" viewBox="0 0 24 24">
+        <path d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+      </symbol>
+      <symbol id="i-bulb" viewBox="0 0 24 24">
+        <path d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+      </symbol>
+      <symbol id="i-warning" viewBox="0 0 24 24">
+        <path d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+      </symbol>
+      <symbol id="i-info" viewBox="0 0 24 24">
+        <path d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+      </symbol>
+      <symbol id="i-menu" viewBox="0 0 24 24">
+        <path d="M4 6h16M4 12h16M4 18h16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+      </symbol>
+    </defs>
+  </svg>
+
+  <!-- ===== Mobile drawer backdrop ===== -->
+  <div id="drawer-backdrop" class="drawer-backdrop" aria-hidden="true"></div>
 
   <!-- ===== SIDEBAR ===== -->
   <aside id="sidebar" class="sidebar w-64 bg-dark-900 border-r border-dark-700/50 flex flex-col fixed h-full z-30">
@@ -60,6 +121,12 @@
         <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M4 6h16M4 12h16M4 18h7"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M14 18l2 2 4-4"/></svg>
         <span>預處理</span>
       </a>
+      <!-- AutoML Pipeline (測試模式專屬) — JS 會在 demo 模式時 unhide -->
+      <a href="#" class="nav-item nav-mode-demo hidden" data-page="pipeline">
+        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M13 10V3L4 14h7v7l9-11h-7z"/></svg>
+        <span>AutoML Pipeline</span>
+        <span class="ml-auto text-[9px] bg-warning-500/20 text-warning-400 px-1.5 py-0.5 rounded-full font-semibold">Pipeline</span>
+      </a>
       <a href="#" class="nav-item" data-page="experiments">
         <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M19.428 15.428a2 2 0 00-1.022-.547l-2.387-.477a6 6 0 00-3.86.517l-.318.158a6 6 0 01-3.86.517L6.05 15.21a2 2 0 00-1.806.547M8 4h8l-1 1v5.172a2 2 0 00.586 1.414l5 5c1.26 1.26.367 3.414-1.415 3.414H4.828c-1.782 0-2.674-2.154-1.414-3.414l5-5A2 2 0 009 10.172V5L8 4z"/></svg>
         <span>實驗室</span>
@@ -86,14 +153,7 @@
       </a>
     </nav>
 
-    <!-- Mode Toggle -->
-    <div class="px-3 pb-2">
-      <button id="btn-mode-toggle" class="w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-xs font-semibold transition-all bg-dark-800 border border-dark-700 hover:border-primary-500/40" title="切換 Demo / 實作模式">
-        <span id="mode-icon" class="flex items-center justify-center w-5 h-5 rounded-md bg-warning-500/15 text-warning-400 text-[10px] font-bold">D</span>
-        <span id="mode-label" class="flex-1 text-left text-dark-300">Demo 模式</span>
-        <svg class="w-3.5 h-3.5 text-dark-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 9l4-4 4 4m0 6l-4 4-4-4"/></svg>
-      </button>
-    </div>
+    <!-- Mode toggle 已搬到 top bar 的 #mode-badge,sidebar 不再重複放 -->
 
     <!-- User -->
     <!-- <div class="p-4 border-t border-dark-700/50">
@@ -110,14 +170,23 @@
   <!-- ===== MAIN CONTENT ===== -->
   <main class="flex-1 min-w-0 ml-64">
     <!-- Top Bar -->
-    <header class="sticky top-0 z-20 bg-dark-950/80 backdrop-blur-xl border-b border-dark-700/50 px-6 py-3">
-      <div class="flex items-center justify-between">
-        <div class="flex items-center gap-2 text-sm">
-          <span class="text-dark-400">AutoML Pro</span>
-          <svg class="w-4 h-4 text-dark-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/></svg>
-          <span id="breadcrumb-current" class="text-dark-100 font-medium">總覽儀表板</span>
+    <header class="sticky top-0 z-20 bg-dark-950/80 backdrop-blur-xl border-b border-dark-700/50 px-4 sm:px-6 py-3">
+      <div class="flex items-center justify-between gap-3">
+        <div class="flex items-center gap-2 text-sm min-w-0">
+          <!-- 手機才出現的選單按鈕 — 開啟側欄抽屜 -->
+          <button id="btn-sidebar-toggle" class="hamburger-btn" aria-label="開啟側邊選單" aria-controls="sidebar" aria-expanded="false">
+            <svg class="w-5 h-5"><use href="#i-menu"/></svg>
+          </button>
+          <span class="text-dark-400 hidden sm:inline">AutoML Pro</span>
+          <svg class="w-4 h-4 text-dark-600 hidden sm:inline" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/></svg>
+          <span id="breadcrumb-current" class="text-dark-100 font-medium truncate">總覽儀表板</span>
         </div>
-        <div class="flex items-center gap-4">
+        <div class="flex items-center gap-2 sm:gap-3">
+          <!-- Demo / Real 模式徽章 — 整個 app 最重要的全域開關,從 sidebar 底部移到這裡才不會被忽略 -->
+          <button id="mode-badge" class="mode-badge" data-mode="real" title="點擊切換 測試 / 實作模式">
+            <span class="mode-badge-dot"></span>
+            <span id="mode-badge-label">實作模式</span>
+          </button>
           <!-- Global Pipeline Status -->
           <div id="global-status" class="flex items-center gap-2 bg-dark-800 rounded-lg px-3 py-1.5 text-xs whitespace-nowrap">
             <span id="global-status-dot" class="relative flex h-2 w-2 flex-shrink-0">
@@ -128,9 +197,10 @@
           </div>
           <!-- Notification -->
           <div class="relative">
-            <button id="btn-notification" class="relative p-2 text-dark-400 hover:text-dark-100 transition-colors">
+            <button id="btn-notification" class="relative p-2 text-dark-400 hover:text-dark-100 transition-colors" aria-label="通知">
               <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M15 17h5l-1.405-1.405A2.032 2.032 0 0118 14.158V11a6.002 6.002 0 00-4-5.659V5a2 2 0 10-4 0v.341C7.67 6.165 6 8.388 6 11v3.159c0 .538-.214 1.055-.595 1.436L4 17h5m6 0v1a3 3 0 11-6 0v-1m6 0H9"/></svg>
-              <span id="notification-badge" class="absolute top-0.5 right-0.5 min-w-[16px] h-4 px-1 bg-danger-500 rounded-full text-[10px] font-bold text-white items-center justify-center hidden">0</span>
+              <!-- 修掉原本兩個 hidden + 缺 inline-flex 的問題: JS toggle 時切 inline-flex/hidden -->
+              <span id="notification-badge" class="absolute top-0.5 right-0.5 min-w-[16px] h-4 px-1 bg-danger-500 rounded-full text-[10px] font-bold text-white hidden items-center justify-center">0</span>
             </button>
             <!-- Notification dropdown -->
             <div id="notification-panel" class="hidden absolute right-0 mt-2 w-80 bg-dark-900 border border-dark-700 rounded-xl shadow-2xl z-50 overflow-hidden">
@@ -148,7 +218,7 @@
 
           <!-- 使用者區塊 — guest 顯示登入按鈕,登入後顯示頭像 + 名稱 + 登出 -->
           <div id="auth-guest-section" class="flex items-center gap-2">
-            <button id="btn-auth-open" class="px-3 py-1.5 text-xs font-medium bg-primary-600 hover:bg-primary-500 text-white rounded-lg transition-colors">登入 / 註冊</button>
+            <button id="btn-auth-open" class="btn btn-sm btn-primary">登入 / 註冊</button>
             <span class="text-[10px] text-dark-500">匯名訪客模式</span>
           </div>
           <div id="auth-user-section" class="hidden relative">
@@ -177,13 +247,13 @@
       <section id="page-dashboard" class="page-section">
         <!-- Real mode empty state -->
         <div id="dashboard-real-empty" class="hidden">
-          <div class="card p-12 text-center">
-            <div class="w-16 h-16 mx-auto mb-4 rounded-2xl bg-primary-500/10 flex items-center justify-center">
-              <svg class="w-8 h-8 text-primary-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"/></svg>
+          <div class="card empty-state">
+            <div class="empty-state-icon bg-primary-500/10 text-primary-400">
+              <svg class="w-8 h-8"><use href="#i-chart-bar"/></svg>
             </div>
-            <h3 class="text-lg font-semibold mb-2">尚無實驗數據</h3>
-            <p class="text-sm text-dark-400 mb-4">請先上傳數據集並完成模型訓練，儀表板將顯示即時數據</p>
-            <button onclick="navigateTo('datasets')" class="px-4 py-2 bg-primary-600 hover:bg-primary-500 rounded-lg text-sm font-medium transition-colors">前往上傳數據集</button>
+            <h3 class="empty-state-title">尚無實驗數據</h3>
+            <p class="empty-state-desc">請先上傳數據集並完成模型訓練，儀表板將顯示即時數據</p>
+            <button onclick="navigateTo('datasets')" class="btn btn-primary">前往上傳數據集</button>
           </div>
         </div>
         <div id="dashboard-demo-content">
@@ -195,7 +265,7 @@
               <div class="w-8 h-8 rounded-lg bg-primary-500/10 flex items-center justify-center"><svg class="w-4 h-4 text-primary-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 7v10c0 2.21 3.582 4 8 4s8-1.79 8-4V7"/></svg></div>
             </div>
             <div class="text-3xl font-bold">12</div>
-            <div class="flex items-center gap-1 mt-1 text-xs text-success-400"><svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 10l7-7m0 0l7 7m-7-7v18"/></svg>+3 本月新增</div>
+            <div class="flex items-center gap-1 mt-1 text-xs text-success-400"><svg class="w-3 h-3"><use href="#i-arrow-up"/></svg>+3 本月新增</div>
           </div>
           <div class="metric-card">
             <div class="flex items-center justify-between mb-3">
@@ -203,7 +273,7 @@
               <div class="w-8 h-8 rounded-lg bg-accent-500/10 flex items-center justify-center"><svg class="w-4 h-4 text-accent-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19.428 15.428a2 2 0 00-1.022-.547l-2.387-.477a6 6 0 00-3.86.517l-.318.158a6 6 0 01-3.86.517L6.05 15.21a2 2 0 00-1.806.547M8 4h8l-1 1v5.172a2 2 0 00.586 1.414l5 5c1.26 1.26.367 3.414-1.415 3.414H4.828c-1.782 0-2.674-2.154-1.414-3.414l5-5A2 2 0 009 10.172V5L8 4z"/></svg></div>
             </div>
             <div class="text-3xl font-bold">47</div>
-            <div class="flex items-center gap-1 mt-1 text-xs text-success-400"><svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 10l7-7m0 0l7 7m-7-7v18"/></svg>+8 本週</div>
+            <div class="flex items-center gap-1 mt-1 text-xs text-success-400"><svg class="w-3 h-3"><use href="#i-arrow-up"/></svg>+8 本週</div>
           </div>
           <div class="metric-card">
             <div class="flex items-center justify-between mb-3">
@@ -211,7 +281,7 @@
               <div class="w-8 h-8 rounded-lg bg-success-500/10 flex items-center justify-center"><svg class="w-4 h-4 text-success-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/></svg></div>
             </div>
             <div class="text-3xl font-bold">96.8<span class="text-lg text-dark-400">%</span></div>
-            <div class="flex items-center gap-1 mt-1 text-xs text-success-400"><svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 10l7-7m0 0l7 7m-7-7v18"/></svg>+1.2% 較上次</div>
+            <div class="flex items-center gap-1 mt-1 text-xs text-success-400"><svg class="w-3 h-3"><use href="#i-arrow-up"/></svg>+1.2% 較上次</div>
           </div>
           <div class="metric-card">
             <div class="flex items-center justify-between mb-3">
@@ -219,7 +289,7 @@
               <div class="w-8 h-8 rounded-lg bg-warning-500/10 flex items-center justify-center"><svg class="w-4 h-4 text-warning-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 12h14M12 5l7 7-7 7"/></svg></div>
             </div>
             <div class="text-3xl font-bold">5</div>
-            <div class="flex items-center gap-1 mt-1 text-xs text-dark-400">3 正在服務中</div>
+            <div class="flex items-center gap-1 mt-1 text-xs text-dark-400"></div>
           </div>
         </div>
 
@@ -249,7 +319,15 @@
           <div class="card">
             <div class="card-header">
               <h3 class="card-title">最近實驗</h3>
-              <a href="#" class="text-primary-400 text-sm hover:text-primary-300" data-page="experiments" onclick="navigateTo('experiments')">查看全部</a>
+              <div class="flex items-center gap-2">
+                <select id="recent-exp-filter-ds" class="bg-dark-800 border border-dark-700 rounded px-2 py-1 text-xs focus:border-primary-500 outline-none max-w-[140px]">
+                  <option value="">所有資料集</option>
+                </select>
+                <select id="recent-exp-filter-target" class="bg-dark-800 border border-dark-700 rounded px-2 py-1 text-xs focus:border-primary-500 outline-none max-w-[120px]">
+                  <option value="">所有 target</option>
+                </select>
+                <a href="#" class="text-primary-400 text-sm hover:text-primary-300 ml-1" data-page="experiments" onclick="navigateTo('experiments'); return false;">查看全部</a>
+              </div>
             </div>
             <div class="space-y-3">
               <div class="flex items-center gap-3 p-3 rounded-lg bg-dark-800/50 hover:bg-dark-800 transition-colors">
@@ -318,7 +396,7 @@
         <div id="dataset-list-bar" class="card mb-6 hidden">
           <div class="card-header">
             <h3 class="card-title">已載入的數據集</h3>
-            <button id="btn-upload-new" class="px-3 py-1.5 bg-primary-600 hover:bg-primary-500 rounded-lg text-xs font-medium transition-colors flex items-center gap-1.5">
+            <button id="btn-upload-new" class="btn btn-sm btn-primary">
               <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"/></svg>
               上傳新數據集
             </button>
@@ -335,7 +413,7 @@
             <p class="text-lg font-semibold mb-1">拖拽 CSV 檔案至此或點擊上傳</p>
             <p class="text-sm text-dark-400">支援 CSV / TSV 格式，系統將自動分析數據結構</p>
             <div class="flex items-center justify-center gap-4 mt-4">
-              <button id="btn-choose-file" class="px-4 py-2 bg-primary-600 hover:bg-primary-500 rounded-lg text-sm font-medium transition-colors">選擇檔案</button>
+              <button id="btn-choose-file" class="btn btn-primary">選擇檔案</button>
             </div>
           </div>
         </div>
@@ -350,11 +428,11 @@
               <p class="text-sm font-semibold truncate" id="file-info-name">—</p>
               <p class="text-xs text-dark-400" id="file-info-meta">—</p>
             </div>
-            <button id="btn-reupload" class="px-3 py-1.5 bg-dark-700 hover:bg-dark-600 rounded-lg text-xs font-medium transition-colors flex items-center gap-1.5">
+            <button id="btn-reupload" class="btn btn-sm btn-secondary">
               <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12"/></svg>
               重新上傳
             </button>
-            <button id="btn-export-csv" class="px-3 py-1.5 bg-dark-700 hover:bg-dark-600 rounded-lg text-xs font-medium transition-colors flex items-center gap-1.5">
+            <button id="btn-export-csv" class="btn btn-sm btn-secondary">
               <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/></svg>
               匯出清洗後數據
             </button>
@@ -467,7 +545,7 @@
                 <p class="text-xs text-dark-400 mt-0.5" id="proc-modal-subtitle">欄位: —</p>
               </div>
               <button id="close-process-modal" class="p-1.5 hover:bg-dark-700 rounded-lg transition-colors">
-                <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>
+                <svg class="w-5 h-5"><use href="#i-close"/></svg>
               </button>
             </div>
 
@@ -483,9 +561,7 @@
                   <div class="flex items-center gap-3">
                     <select id="proc-method-select" class="bg-dark-700 border border-dark-600 rounded-lg px-3 py-2 text-sm focus:border-primary-500 outline-none min-w-[180px]">
                     </select>
-                    <button id="btn-apply-method" class="px-4 py-2 bg-gradient-to-r from-primary-600 to-accent-600 hover:from-primary-500 hover:to-accent-500 rounded-lg text-sm font-semibold transition-all shadow-lg shadow-primary-500/20">
-                      套用此方法
-                    </button>
+                    <button id="btn-apply-method" class="btn btn-primary">套用此方法</button>
                   </div>
                 </div>
               </div>
@@ -561,13 +637,13 @@
       <!-- ===== PAGE: PREPROCESSING (隊友模組) ===== -->
       <section id="page-preprocessing" class="page-section hidden">
         <!-- No dataset state -->
-        <div id="pp-no-data" class="card p-12 text-center hidden">
-          <div class="w-16 h-16 mx-auto mb-4 rounded-2xl bg-accent-500/10 flex items-center justify-center">
-            <svg class="w-8 h-8 text-accent-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12"/></svg>
+        <div id="pp-no-data" class="card empty-state hidden">
+          <div class="empty-state-icon bg-accent-500/10 text-accent-400">
+            <svg class="w-8 h-8"><use href="#i-upload-cloud"/></svg>
           </div>
-          <h3 class="text-lg font-semibold mb-2">尚未上傳數據集</h3>
-          <p class="text-sm text-dark-400 mb-4">請先前往數據集管理頁面上傳 CSV 檔案</p>
-          <button onclick="navigateTo('datasets')" class="px-4 py-2 bg-primary-600 hover:bg-primary-500 rounded-lg text-sm font-medium transition-colors">前往上傳數據集</button>
+          <h3 class="empty-state-title">尚未上傳數據集</h3>
+          <p class="empty-state-desc">請先前往數據集管理頁面上傳 CSV 檔案</p>
+          <button onclick="navigateTo('datasets')" class="btn btn-primary">前往上傳數據集</button>
         </div>
 
         <!-- Configuration -->
@@ -592,10 +668,8 @@
                 <p class="text-xs text-dark-500 mt-1.5">train_test_split 切分比例,固定 random_state=42。</p>
               </div>
               <div class="flex items-end gap-2">
-                <button id="btn-pp-audit" class="flex-1 px-4 py-2.5 bg-dark-700 hover:bg-dark-600 border border-dark-600 rounded-lg text-sm font-medium transition-colors">
-                  快速健檢
-                </button>
-                <button id="btn-pp-run" class="flex-1 px-4 py-2.5 bg-gradient-to-r from-primary-600 to-accent-600 hover:from-primary-500 hover:to-accent-500 rounded-lg text-sm font-semibold transition-all shadow-lg shadow-primary-500/20">
+                <button id="btn-pp-audit" class="btn btn-tertiary flex-1">快速健檢</button>
+                <button id="btn-pp-run" class="btn btn-primary flex-1">
                   執行預處理
                 </button>
               </div>
@@ -889,7 +963,7 @@
                   </div>
                 </div>
               </div>
-              <button id="btn-pp-inference" class="px-4 py-2 bg-accent-600 hover:bg-accent-500 rounded-lg text-sm font-medium transition-colors">
+              <button id="btn-pp-inference" class="btn btn-primary">
                 轉換這筆資料
               </button>
             </div>
@@ -902,13 +976,13 @@
         <!-- Real mode experiment UI -->
         <div id="experiments-real-empty" class="hidden">
           <!-- No dataset uploaded state -->
-          <div id="exp-no-data" class="card p-12 text-center">
-            <div class="w-16 h-16 mx-auto mb-4 rounded-2xl bg-accent-500/10 flex items-center justify-center">
-              <svg class="w-8 h-8 text-accent-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12"/></svg>
+          <div id="exp-no-data" class="card empty-state">
+            <div class="empty-state-icon bg-accent-500/10 text-accent-400">
+              <svg class="w-8 h-8"><use href="#i-upload-cloud"/></svg>
             </div>
-            <h3 class="text-lg font-semibold mb-2">尚未上傳數據集</h3>
-            <p class="text-sm text-dark-400 mb-4">請先前往數據集管理頁面上傳 CSV 檔案</p>
-            <button onclick="navigateTo('datasets')" class="px-4 py-2 bg-primary-600 hover:bg-primary-500 rounded-lg text-sm font-medium transition-colors">前往上傳數據集</button>
+            <h3 class="empty-state-title">尚未上傳數據集</h3>
+            <p class="empty-state-desc">請先前往數據集管理頁面上傳 CSV 檔案</p>
+            <button onclick="navigateTo('datasets')" class="btn btn-primary">前往上傳數據集</button>
           </div>
 
           <!-- Experiment config (shown when dataset is loaded) -->
@@ -963,6 +1037,105 @@
                     </div>
                   </label>
                 </div>
+                <!-- Training Engine — sklearn vs pipeline -->
+                <div class="md:col-span-2">
+                  <label class="block text-sm font-medium text-dark-300 mb-2">
+                    訓練引擎 <span class="text-dark-500 font-normal text-xs">— sklearn (快) vs pipeline (深度,需 torch)</span>
+                  </label>
+                  <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <label class="flex items-start gap-3 px-3 py-2.5 rounded-lg bg-dark-800 border border-dark-600 cursor-pointer hover:border-primary-500 transition-colors has-[:checked]:border-primary-500 has-[:checked]:bg-primary-500/10">
+                      <input type="radio" name="exp-engine" value="sklearn" checked class="accent-primary-500 mt-0.5">
+                      <div>
+                        <p class="text-sm font-medium">sklearn</p>
+                        <p class="text-xs text-dark-400">同時跑多個演算法,秒級到分鐘級。可勾選下方演算法。</p>
+                      </div>
+                    </label>
+                    <label class="flex items-start gap-3 px-3 py-2.5 rounded-lg bg-dark-800 border border-dark-600 cursor-pointer hover:border-warning-500 transition-colors has-[:checked]:border-warning-500 has-[:checked]:bg-warning-500/10">
+                      <input type="radio" name="exp-engine" value="daniel" class="accent-warning-500 mt-0.5">
+                      <div>
+                        <p class="text-sm font-medium">pipeline</p>
+                        <p class="text-xs text-dark-400">HPO + NAS + 5-Fold CV + 雙層 Ensemble。**僅分類**,數分鐘起跳。</p>
+                      </div>
+                    </label>
+                  </div>
+                </div>
+
+                <!-- Pipeline engine options — 只在引擎=daniel 顯示 -->
+                <div id="exp-daniel-options" class="md:col-span-2 hidden">
+                  <label class="block text-sm font-medium text-dark-300 mb-2">
+                    Pipeline 選項 <span class="text-dark-500 font-normal text-xs">— 預設 fast 模式縮減 HPO trials</span>
+                  </label>
+                  <div class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-3">
+                    <label class="setting-row cursor-pointer">
+                      <div>
+                        <p class="text-xs font-medium">快速模式</p>
+                        <p class="text-[10px] text-dark-500">縮減 trials</p>
+                      </div>
+                      <label class="toggle-switch">
+                        <input type="checkbox" id="exp-daniel-fast" checked>
+                        <span class="toggle-slider"></span>
+                      </label>
+                    </label>
+                    <label class="setting-row cursor-pointer">
+                      <div>
+                        <p class="text-xs font-medium">跳過 DL</p>
+                        <p class="text-[10px] text-dark-500">只跑傳統 ML</p>
+                      </div>
+                      <label class="toggle-switch">
+                        <input type="checkbox" id="exp-daniel-skip-dl">
+                        <span class="toggle-slider"></span>
+                      </label>
+                    </label>
+                    <label class="setting-row cursor-pointer">
+                      <div>
+                        <p class="text-xs font-medium">跳過 NAS</p>
+                        <p class="text-[10px] text-dark-500">用預設架構</p>
+                      </div>
+                      <label class="toggle-switch">
+                        <input type="checkbox" id="exp-daniel-no-nas">
+                        <span class="toggle-slider"></span>
+                      </label>
+                    </label>
+                    <label class="setting-row cursor-pointer">
+                      <div>
+                        <p class="text-xs font-medium">最佳化指標</p>
+                        <p class="text-[10px] text-dark-500">CV 內部評分</p>
+                      </div>
+                      <select id="exp-daniel-metric" class="bg-dark-700 border border-dark-600 rounded px-2 py-1 text-xs">
+                        <option value="f1">F1 (macro)</option>
+                        <option value="accuracy">Accuracy</option>
+                      </select>
+                    </label>
+                    <label class="setting-row cursor-pointer">
+                      <div>
+                        <p class="text-xs font-medium">時間上限</p>
+                        <p class="text-[10px] text-dark-500">秒,0=無限</p>
+                      </div>
+                      <input type="number" id="exp-daniel-time-limit" value="0" min="0" step="60"
+                             class="w-20 bg-dark-700 border border-dark-600 rounded px-2 py-1 text-xs text-right focus:border-warning-500 outline-none">
+                    </label>
+                  </div>
+                  <!-- Option B: 上傳預測 CSV (Kaggle 風,無 label OK) — 訓練完直接給 submission.csv 下載 -->
+                  <div class="mt-3 p-3 rounded-lg bg-dark-800/40 border border-dark-700/50">
+                    <div class="flex items-center justify-between gap-3 flex-wrap">
+                      <div class="flex-1 min-w-0">
+                        <p class="text-xs font-medium text-dark-200">📄 預測 CSV (可選)</p>
+                        <p class="text-[10px] text-dark-500 mt-0.5">訓練完成後將用 pipeline 對此檔案做預測,結果可直接下載成 submission.csv</p>
+                      </div>
+                      <div class="flex items-center gap-2 shrink-0">
+                        <input type="file" id="exp-pipeline-predict-csv" accept=".csv"
+                               class="text-xs text-dark-300 file:mr-2 file:py-1 file:px-2 file:rounded file:border-0 file:bg-dark-700 file:text-dark-200 file:text-xs file:cursor-pointer hover:file:bg-dark-600 max-w-[280px]">
+                        <button type="button" id="exp-pipeline-predict-clear" class="btn btn-xs btn-ghost" title="清除選擇">✕</button>
+                      </div>
+                    </div>
+                    <p id="exp-pipeline-predict-info" class="text-[10px] text-dark-500 mt-1.5 hidden"></p>
+                  </div>
+                  <p class="text-[11px] text-warning-400 mt-2">
+                    <svg class="inline w-3 h-3 mb-0.5"><use href="#i-warning"/></svg>
+                    Pipeline 僅支援分類,需後端裝 torch+optuna+lgbm/xgb/catboost。任務類型若被偵測為回歸會 reject。
+                  </p>
+                </div>
+
                 <!-- Data Source (multi-select) -->
                 <div class="md:col-span-2">
                   <label class="block text-sm font-medium text-dark-300 mb-2">
@@ -1022,9 +1195,7 @@
                 </div>
               </div>
               <div class="px-4 pb-4 flex justify-end">
-                <button id="btn-real-train" class="px-6 py-2 bg-gradient-to-r from-primary-600 to-accent-600 hover:from-primary-500 hover:to-accent-500 rounded-lg text-sm font-semibold transition-all shadow-lg shadow-primary-500/20">
-                  開始訓練
-                </button>
+                <button id="btn-real-train" class="btn btn-lg btn-primary">開始訓練</button>
               </div>
             </div>
 
@@ -1069,14 +1240,14 @@
                 </div>
               </div>
 
-              <!-- Model selector for the two charts -->
-              <div class="flex items-center gap-2 mb-3 text-sm">
+              <!-- Model selector for the two charts (Daniel pipeline 跑出來的模型不適用,會被隱藏) -->
+              <div id="exp-chart-model-selector-wrap" class="flex items-center gap-2 mb-3 text-sm">
                 <span class="text-dark-400">檢視模型圖表:</span>
                 <select id="exp-chart-model-select" class="bg-dark-800 border border-dark-600 rounded-lg px-3 py-1.5 text-sm focus:border-primary-500 outline-none min-w-[18rem]"></select>
               </div>
 
               <!-- Charts row -->
-              <div class="grid grid-cols-1 lg:grid-cols-2 gap-4 mb-6">
+              <div id="exp-charts-row" class="grid grid-cols-1 lg:grid-cols-2 gap-4 mb-6">
                 <div class="card">
                   <div class="card-header"><h3 class="card-title">特徵重要性 <span id="exp-chart-importance-sub" class="text-xs text-dark-400 font-normal"></span></h3></div>
                   <div id="chart-exp-importance" class="h-64"></div>
@@ -1088,7 +1259,7 @@
               </div>
 
               <!-- 批次預測 — 上傳 test.csv,用訓練好的模型整批預測並下載結果 -->
-              <div class="card mb-6">
+              <div id="exp-batch-predict-card" class="card mb-6">
                 <div class="card-header">
                   <h3 class="card-title">批次預測 (Batch Predict)</h3>
                   <span class="text-xs text-dark-400">上傳一份 CSV (例如預處理頁下載的 test.csv),用模型整批預測</span>
@@ -1107,9 +1278,7 @@
                     <input type="file" id="batch-sample-input" accept=".csv" class="w-full text-xs text-dark-300 file:mr-3 file:py-1.5 file:px-3 file:rounded-lg file:border-0 file:bg-dark-700 file:text-dark-200 file:text-xs file:cursor-pointer hover:file:bg-dark-600">
                   </div>
                   <div>
-                    <button id="btn-batch-predict" class="w-full px-4 py-2 bg-gradient-to-r from-primary-600 to-accent-600 hover:from-primary-500 hover:to-accent-500 rounded-lg text-sm font-semibold transition-all shadow-lg shadow-primary-500/20">
-                      執行預測並下載
-                    </button>
+                    <button id="btn-batch-predict" class="btn btn-primary w-full">執行預測並下載</button>
                   </div>
                 </div>
                 <p class="px-4 text-[11px] text-dark-500">
@@ -1119,10 +1288,8 @@
               </div>
 
               <div class="flex justify-center gap-3">
-                <button id="btn-view-leaderboard" onclick="navigateTo('leaderboard')" class="px-4 py-2 bg-dark-700 hover:bg-dark-600 rounded-lg text-sm font-medium transition-colors">
-                  查看模型排行榜
-                </button>
-                <button id="btn-view-insights" onclick="navigateTo('insights')" class="px-4 py-2 bg-primary-600 hover:bg-primary-500 rounded-lg text-sm font-medium transition-colors flex items-center gap-1.5">
+                <button id="btn-view-leaderboard" onclick="navigateTo('leaderboard')" class="btn btn-secondary">查看模型排行榜</button>
+                <button id="btn-view-insights" onclick="navigateTo('insights')" class="btn btn-primary">
                   <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z"/></svg>
                   洞察與 What-If 模擬
                 </button>
@@ -1217,8 +1384,8 @@
             </div>
           </div>
           <div class="px-4 pb-4 flex justify-end gap-3">
-            <button class="px-4 py-2 bg-dark-700 hover:bg-dark-600 rounded-lg text-sm font-medium transition-colors">進階設定</button>
-            <button id="btn-start-training" class="px-6 py-2 bg-gradient-to-r from-primary-600 to-accent-600 hover:from-primary-500 hover:to-accent-500 rounded-lg text-sm font-semibold transition-all shadow-lg shadow-primary-500/20">開始訓練</button>
+            <button class="btn btn-secondary">進階設定</button>
+            <button id="btn-start-training" class="btn btn-lg btn-primary">開始訓練</button>
           </div>
         </div>
 
@@ -1307,13 +1474,13 @@
       <section id="page-leaderboard" class="page-section hidden">
         <!-- Real mode empty state -->
         <div id="leaderboard-real-empty" class="hidden">
-          <div class="card p-12 text-center">
-            <div class="w-16 h-16 mx-auto mb-4 rounded-2xl bg-warning-500/10 flex items-center justify-center">
-              <svg class="w-8 h-8 text-warning-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"/></svg>
+          <div class="card empty-state">
+            <div class="empty-state-icon bg-warning-500/10 text-warning-400">
+              <svg class="w-8 h-8"><use href="#i-chart-bar"/></svg>
             </div>
-            <h3 class="text-lg font-semibold mb-2">尚無模型排名</h3>
-            <p class="text-sm text-dark-400 mb-4">完成模型訓練後，排行榜將自動產生</p>
-            <button onclick="navigateTo('experiments')" class="px-4 py-2 bg-primary-600 hover:bg-primary-500 rounded-lg text-sm font-medium transition-colors">前往建立實驗</button>
+            <h3 class="empty-state-title">尚無模型排名</h3>
+            <p class="empty-state-desc">完成模型訓練後，排行榜將自動產生</p>
+            <button onclick="navigateTo('experiments')" class="btn btn-primary">前往建立實驗</button>
           </div>
         </div>
         <div id="leaderboard-demo-content">
@@ -1322,7 +1489,7 @@
             <h3 class="card-title">模型排行榜</h3>
             <div class="flex items-center gap-3">
               <div id="lb-history-cascade" class="history-cascade flex items-center gap-2"></div>
-              <button id="btn-compare" class="px-3 py-1.5 bg-primary-600 hover:bg-primary-500 rounded-lg text-xs font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed" disabled>比較選取的模型</button>
+              <button id="btn-compare" class="btn btn-sm btn-primary" disabled>比較選取的模型</button>
             </div>
           </div>
           <div class="overflow-x-auto">
@@ -1356,7 +1523,7 @@
           <div class="bg-dark-900 border border-dark-700 rounded-2xl w-[90%] max-w-5xl max-h-[85vh] overflow-y-auto shadow-2xl">
             <div class="sticky top-0 bg-dark-900 border-b border-dark-700/50 px-6 py-4 flex items-center justify-between z-10">
               <h3 class="text-lg font-semibold">模型比較</h3>
-              <button id="close-compare" class="p-1 hover:bg-dark-700 rounded-lg transition-colors"><svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg></button>
+              <button id="close-compare" class="p-1 hover:bg-dark-700 rounded-lg transition-colors"><svg class="w-5 h-5"><use href="#i-close"/></svg></button>
             </div>
             <div class="p-6">
               <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
@@ -1383,13 +1550,13 @@
       <section id="page-insights" class="page-section hidden">
         <!-- Real mode empty state -->
         <div id="insights-real-empty" class="hidden">
-          <div class="card p-12 text-center">
-            <div class="w-16 h-16 mx-auto mb-4 rounded-2xl bg-success-500/10 flex items-center justify-center">
-              <svg class="w-8 h-8 text-success-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z"/></svg>
+          <div class="card empty-state">
+            <div class="empty-state-icon bg-success-500/10 text-success-400">
+              <svg class="w-8 h-8"><use href="#i-bulb"/></svg>
             </div>
-            <h3 class="text-lg font-semibold mb-2">尚無模型洞察</h3>
-            <p class="text-sm text-dark-400 mb-4">訓練完成後，系統將自動產生特徵重要性、SHAP 分析等洞察</p>
-            <button onclick="navigateTo('experiments')" class="px-4 py-2 bg-primary-600 hover:bg-primary-500 rounded-lg text-sm font-medium transition-colors">前往建立實驗</button>
+            <h3 class="empty-state-title">尚無模型洞察</h3>
+            <p class="empty-state-desc">訓練完成後，系統將自動產生特徵重要性、SHAP 分析等洞察</p>
+            <button onclick="navigateTo('experiments')" class="btn btn-primary">前往建立實驗</button>
           </div>
         </div>
         <!-- Real insights content (shown after training) -->
@@ -1705,13 +1872,13 @@
       <section id="page-deployments" class="page-section hidden">
         <!-- Real mode empty state -->
         <div id="deployments-real-empty" class="hidden">
-          <div class="card p-12 text-center">
-            <div class="w-16 h-16 mx-auto mb-4 rounded-2xl bg-accent-500/10 flex items-center justify-center">
-              <svg class="w-8 h-8 text-accent-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M5 12h14M12 5l7 7-7 7"/></svg>
+          <div class="card empty-state">
+            <div class="empty-state-icon bg-accent-500/10 text-accent-400">
+              <svg class="w-8 h-8"><use href="#i-arrow-right"/></svg>
             </div>
-            <h3 class="text-lg font-semibold mb-2">尚無部署</h3>
-            <p class="text-sm text-dark-400 mb-4">選擇最佳模型後，可在此部署為 API 服務</p>
-            <button onclick="navigateTo('leaderboard')" class="px-4 py-2 bg-primary-600 hover:bg-primary-500 rounded-lg text-sm font-medium transition-colors">前往模型排行榜</button>
+            <h3 class="empty-state-title">尚無部署</h3>
+            <p class="empty-state-desc">選擇最佳模型後，可在此部署為 API 服務</p>
+            <button onclick="navigateTo('leaderboard')" class="btn btn-primary">前往模型排行榜</button>
           </div>
         </div>
         <div id="deployments-demo-content">
@@ -1729,7 +1896,7 @@
               <span class="text-dark-400 text-sm">今日 API 呼叫</span>
             </div>
             <div class="text-3xl font-bold">14.2<span class="text-lg text-dark-400">K</span></div>
-            <div class="flex items-center gap-1 mt-1 text-xs text-success-400"><svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 10l7-7m0 0l7 7m-7-7v18"/></svg>+12% 較昨日</div>
+            <div class="flex items-center gap-1 mt-1 text-xs text-success-400"><svg class="w-3 h-3"><use href="#i-arrow-up"/></svg>+12% 較昨日</div>
           </div>
           <div class="metric-card">
             <div class="flex items-center justify-between mb-3">
@@ -1760,8 +1927,8 @@
                 <p class="text-xs text-dark-400">部署於 2024-03-15</p>
               </div>
               <div class="flex items-center gap-2">
-                <button class="p-2 hover:bg-dark-700 rounded-lg transition-colors" title="查看詳情"><svg class="w-4 h-4 text-dark-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"/></svg></button>
-                <button class="p-2 hover:bg-dark-700 rounded-lg transition-colors" title="API 文件"><svg class="w-4 h-4 text-dark-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 20l4-16m4 4l4 4-4 4M6 16l-4-4 4-4"/></svg></button>
+                <button class="p-2 hover:bg-dark-700 rounded-lg transition-colors" title="查看詳情"><svg class="w-4 h-4 text-dark-400"><use href="#i-eye"/></svg></button>
+                <button class="p-2 hover:bg-dark-700 rounded-lg transition-colors" title="API 文件"><svg class="w-4 h-4 text-dark-400"><use href="#i-code"/></svg></button>
               </div>
             </div>
           </div>
@@ -1784,8 +1951,8 @@
                 <p class="text-xs text-dark-400">部署於 2024-03-10</p>
               </div>
               <div class="flex items-center gap-2">
-                <button class="p-2 hover:bg-dark-700 rounded-lg transition-colors" title="查看詳情"><svg class="w-4 h-4 text-dark-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"/></svg></button>
-                <button class="p-2 hover:bg-dark-700 rounded-lg transition-colors" title="API 文件"><svg class="w-4 h-4 text-dark-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 20l4-16m4 4l4 4-4 4M6 16l-4-4 4-4"/></svg></button>
+                <button class="p-2 hover:bg-dark-700 rounded-lg transition-colors" title="查看詳情"><svg class="w-4 h-4 text-dark-400"><use href="#i-eye"/></svg></button>
+                <button class="p-2 hover:bg-dark-700 rounded-lg transition-colors" title="API 文件"><svg class="w-4 h-4 text-dark-400"><use href="#i-code"/></svg></button>
               </div>
             </div>
           </div>
@@ -1808,8 +1975,8 @@
                 <p class="text-xs text-dark-400">部署於 2024-02-28</p>
               </div>
               <div class="flex items-center gap-2">
-                <button class="p-2 hover:bg-dark-700 rounded-lg transition-colors" title="查看詳情"><svg class="w-4 h-4 text-dark-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"/></svg></button>
-                <button class="p-2 hover:bg-dark-700 rounded-lg transition-colors" title="API 文件"><svg class="w-4 h-4 text-dark-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 20l4-16m4 4l4 4-4 4M6 16l-4-4 4-4"/></svg></button>
+                <button class="p-2 hover:bg-dark-700 rounded-lg transition-colors" title="查看詳情"><svg class="w-4 h-4 text-dark-400"><use href="#i-eye"/></svg></button>
+                <button class="p-2 hover:bg-dark-700 rounded-lg transition-colors" title="API 文件"><svg class="w-4 h-4 text-dark-400"><use href="#i-code"/></svg></button>
               </div>
             </div>
           </div>
@@ -1832,7 +1999,7 @@
                 <p class="text-xs text-dark-400">部署於 2024-03-18</p>
               </div>
               <div class="flex items-center gap-2">
-                <button class="p-2 hover:bg-dark-700 rounded-lg transition-colors" title="查看詳情"><svg class="w-4 h-4 text-dark-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"/></svg></button>
+                <button class="p-2 hover:bg-dark-700 rounded-lg transition-colors" title="查看詳情"><svg class="w-4 h-4 text-dark-400"><use href="#i-eye"/></svg></button>
                 <button class="px-3 py-1 bg-success-600 hover:bg-success-500 rounded-lg text-xs font-medium transition-colors">升級至生產</button>
               </div>
             </div>
@@ -1856,7 +2023,7 @@
                 <p class="text-xs text-dark-400">部署於 2024-03-20</p>
               </div>
               <div class="flex items-center gap-2">
-                <button class="p-2 hover:bg-dark-700 rounded-lg transition-colors" title="查看詳情"><svg class="w-4 h-4 text-dark-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"/></svg></button>
+                <button class="p-2 hover:bg-dark-700 rounded-lg transition-colors" title="查看詳情"><svg class="w-4 h-4 text-dark-400"><use href="#i-eye"/></svg></button>
                 <button class="px-3 py-1 bg-success-600 hover:bg-success-500 rounded-lg text-xs font-medium transition-colors">升級至生產</button>
               </div>
             </div>
@@ -1874,6 +2041,303 @@
       </section>
 
       <!-- ===== PAGE: SETTINGS ===== -->
+      <!-- ===== PAGE: PIPELINE (測試模式專用) =====
+           整個區塊只在 appMode === 'demo' 時顯示;呼叫 Daniel 的 AutoML pipeline。 -->
+      <section id="page-pipeline" class="page-section hidden">
+        <!-- Hero -->
+        <div class="card mb-6 overflow-hidden relative">
+          <div class="absolute inset-0 bg-gradient-to-br from-primary-600/10 via-accent-500/5 to-warning-500/10 pointer-events-none"></div>
+          <div class="relative p-6 lg:p-8">
+            <div class="flex items-start justify-between flex-wrap gap-4">
+              <div class="flex-1 min-w-0">
+                <div class="flex items-center gap-2 mb-2">
+                  <span class="text-[10px] font-bold tracking-widest text-warning-400 uppercase">AutoML</span>
+                </div>
+                <h1 class="text-2xl lg:text-3xl font-bold mb-2 bg-gradient-to-r from-primary-300 to-accent-300 bg-clip-text text-transparent">
+                  完整 AutoML Pipeline
+                </h1>
+                <p class="text-sm text-dark-300 max-w-2xl leading-relaxed">
+                  HPO (Optuna TPE) <span class="text-dark-500">·</span> NAS (MLP / TSNet 共享權重超網路)
+                  <span class="text-dark-500">·</span> 5-Fold CV <span class="text-dark-500">·</span>
+                  Nelder-Mead Blender + Meta-Learner Stacking — 一站式跑完 7 種傳統 ML +
+                  MLP / CNN1D / TCN / Transformer / PatchTST 共 12 個模型,
+                  在 OpenML-CC18 + UCR 80 上跑出 +3~12% 超越 AutoGluon medium_quality 基線。
+                </p>
+              </div>
+              <div class="flex flex-col items-end gap-2 shrink-0">
+                <span class="text-[10px] text-dark-400 uppercase tracking-wider">Reference</span>
+                <code class="text-xs text-accent-400 font-mono bg-dark-900/60 px-2 py-1 rounded border border-accent-500/20">pipeline.py</code>
+                <span class="text-[10px] text-dark-500">classification only · 數分鐘~小時級</span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- 9-Step Pipeline Flow -->
+        <div class="card mb-6">
+          <div class="card-header">
+            <h3 class="card-title">9 階段流程</h3>
+            <span class="text-xs text-dark-400">每階段都會回報進度到下方 log</span>
+          </div>
+          <div class="p-4 overflow-x-auto">
+            <div id="pipeline-stages" class="flex items-stretch gap-3 min-w-fit"></div>
+          </div>
+        </div>
+
+        <!-- 上傳 + 設定 + 執行 -->
+        <div class="grid grid-cols-1 lg:grid-cols-3 gap-4 mb-6">
+          <!-- 左:設定 -->
+          <div class="card lg:col-span-2">
+            <div class="card-header">
+              <h3 class="card-title">在你的 CSV 上跑 Pipeline</h3>
+              <span class="text-xs text-dark-400" id="pipeline-status">就緒</span>
+            </div>
+            <div class="p-4 space-y-4">
+              <!-- Upload zone -->
+              <div id="pipeline-upload-zone" class="border-2 border-dashed border-dark-600 rounded-xl p-6 text-center hover:border-warning-500/50 transition-colors cursor-pointer">
+                <input type="file" id="pipeline-csv-input" accept=".csv" class="hidden">
+                <div class="flex items-center justify-center gap-3">
+                  <svg class="w-8 h-8 text-warning-400"><use href="#i-upload-cloud"/></svg>
+                  <div class="text-left">
+                    <p class="text-sm font-medium" id="pipeline-file-label">點擊或拖拽 CSV 檔案</p>
+                    <p class="text-[11px] text-dark-500" id="pipeline-file-meta">分類任務 · 數值欄位 · 目標欄會自動偵測</p>
+                  </div>
+                </div>
+              </div>
+
+              <!-- Options -->
+              <div class="grid grid-cols-2 md:grid-cols-4 gap-3">
+                <label class="setting-row cursor-pointer">
+                  <div>
+                    <p class="text-xs font-medium">快速模式</p>
+                    <p class="text-[10px] text-dark-500">縮減 HPO trials</p>
+                  </div>
+                  <label class="toggle-switch">
+                    <input type="checkbox" id="pipeline-fast" checked>
+                    <span class="toggle-slider"></span>
+                  </label>
+                </label>
+                <label class="setting-row cursor-pointer">
+                  <div>
+                    <p class="text-xs font-medium">跳過 DL</p>
+                    <p class="text-[10px] text-dark-500">只跑傳統 ML</p>
+                  </div>
+                  <label class="toggle-switch">
+                    <input type="checkbox" id="pipeline-skip-dl">
+                    <span class="toggle-slider"></span>
+                  </label>
+                </label>
+                <label class="setting-row cursor-pointer">
+                  <div>
+                    <p class="text-xs font-medium">跳過 NAS</p>
+                    <p class="text-[10px] text-dark-500">用預設架構</p>
+                  </div>
+                  <label class="toggle-switch">
+                    <input type="checkbox" id="pipeline-no-nas">
+                    <span class="toggle-slider"></span>
+                  </label>
+                </label>
+                <label class="setting-row cursor-pointer">
+                  <div>
+                    <p class="text-xs font-medium">時序模式</p>
+                    <p class="text-[10px] text-dark-500">TCN/PatchTST</p>
+                  </div>
+                  <label class="toggle-switch">
+                    <input type="checkbox" id="pipeline-ts">
+                    <span class="toggle-slider"></span>
+                  </label>
+                </label>
+              </div>
+
+              <div class="grid grid-cols-1 md:grid-cols-3 gap-3 items-end">
+                <div>
+                  <label class="block text-xs font-medium text-dark-400 mb-1.5">目標欄 (可選)</label>
+                  <input type="text" id="pipeline-target" placeholder="auto: target/label/class/最後一欄"
+                         class="w-full bg-dark-800 border border-dark-600 rounded-lg px-3 py-2 text-sm focus:border-warning-500 outline-none">
+                </div>
+                <div>
+                  <label class="block text-xs font-medium text-dark-400 mb-1.5">最佳化指標</label>
+                  <select id="pipeline-metric" class="w-full bg-dark-800 border border-dark-600 rounded-lg px-3 py-2 text-sm focus:border-warning-500 outline-none">
+                    <option value="f1">F1 (macro)</option>
+                    <option value="accuracy">Accuracy</option>
+                  </select>
+                </div>
+                <div>
+                  <label class="block text-xs font-medium text-dark-400 mb-1.5">時間上限 (秒)</label>
+                  <input type="number" id="pipeline-time-limit" value="0" min="0" step="60"
+                         class="w-full bg-dark-800 border border-dark-600 rounded-lg px-3 py-2 text-sm focus:border-warning-500 outline-none">
+                </div>
+              </div>
+
+              <div class="flex items-center justify-between gap-3 pt-2 border-t border-dark-700/50">
+                <p class="text-[11px] text-dark-500">
+                  <svg class="inline w-3 h-3 mb-0.5"><use href="#i-warning"/></svg>
+                  此功能需本機後端 (torch+optuna+lgbm/xgb/catboost),Render free tier 會超時。
+                </p>
+                <button id="btn-pipeline-run" class="btn btn-primary">
+                  <svg class="w-4 h-4"><use href="#i-arrow-right"/></svg>
+                  執行 Pipeline
+                </button>
+              </div>
+            </div>
+          </div>
+
+          <!-- 右:結果 -->
+          <div class="card">
+            <div class="card-header">
+              <h3 class="card-title">最佳分數</h3>
+              <span id="pipeline-result-metric" class="text-xs text-dark-400">—</span>
+            </div>
+            <div class="p-5 space-y-3" id="pipeline-result-panel">
+              <div class="text-center py-6">
+                <p class="text-[10px] text-dark-500 uppercase tracking-wider mb-2">尚未執行</p>
+                <p class="text-4xl font-bold text-dark-600 mb-1">—</p>
+                <p class="text-xs text-dark-500">執行後會顯示 Blend / Stack 分數</p>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Progress + Log -->
+        <div id="pipeline-runtime" class="card mb-6 hidden">
+          <div class="card-header">
+            <h3 class="card-title">執行進度</h3>
+            <span id="pipeline-progress-step" class="text-xs text-warning-400 font-mono">準備中...</span>
+          </div>
+          <div class="px-4 pb-2">
+            <div class="w-full bg-dark-800 rounded-full h-2.5 mb-3">
+              <div id="pipeline-progress-bar" class="bg-gradient-to-r from-warning-500 to-accent-500 h-2.5 rounded-full transition-all duration-500" style="width: 0%"></div>
+            </div>
+          </div>
+          <div class="px-4 pb-4">
+            <div id="pipeline-log" class="bg-dark-900 rounded-lg p-3 h-64 overflow-y-auto font-mono text-xs space-y-0.5"></div>
+          </div>
+        </div>
+
+        <!-- Benchmark Table -->
+        <div class="card mb-6">
+          <div class="card-header">
+            <h3 class="card-title">Pipeline vs AutoGluon Baseline</h3>
+            <div class="flex items-center gap-2">
+              <span class="text-xs text-dark-400" id="pipeline-bench-meta">載入中...</span>
+              <button id="btn-pipeline-bench-reload" class="btn btn-xs btn-ghost">重新載入</button>
+            </div>
+          </div>
+          <div class="overflow-x-auto">
+            <table class="w-full text-sm">
+              <thead>
+                <tr class="text-dark-400 text-xs border-b border-dark-700/50">
+                  <th class="py-2.5 px-4 text-left font-medium">資料集</th>
+                  <th class="py-2.5 px-3 text-left font-medium">類型</th>
+                  <th class="py-2.5 px-3 text-right font-medium">n_train</th>
+                  <th class="py-2.5 px-3 text-right font-medium">n_test</th>
+                  <th class="py-2.5 px-3 text-right font-medium">
+                    <span class="text-warning-400">Pipeline</span> F1
+                  </th>
+                  <th class="py-2.5 px-3 text-right font-medium">
+                    <span class="text-dark-300">Baseline</span> F1
+                  </th>
+                  <th class="py-2.5 px-3 text-right font-medium">Δ</th>
+                  <th class="py-2.5 px-3 text-right font-medium">耗時 (s)</th>
+                </tr>
+              </thead>
+              <tbody id="pipeline-bench-tbody"></tbody>
+            </table>
+          </div>
+        </div>
+
+        <!-- 模型池說明 -->
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6">
+          <div class="card p-4">
+            <h4 class="text-sm font-semibold mb-3 text-dark-200 flex items-center gap-2">
+              <span class="w-1.5 h-1.5 rounded-full bg-primary-400"></span>
+              傳統 ML 模型池 (HPO)
+            </h4>
+            <div class="flex flex-wrap gap-1.5 text-[11px]">
+              <span class="px-2 py-0.5 bg-primary-500/10 border border-primary-500/30 rounded text-primary-300">LightGBM</span>
+              <span class="px-2 py-0.5 bg-primary-500/10 border border-primary-500/30 rounded text-primary-300">XGBoost</span>
+              <span class="px-2 py-0.5 bg-primary-500/10 border border-primary-500/30 rounded text-primary-300">CatBoost</span>
+              <span class="px-2 py-0.5 bg-primary-500/10 border border-primary-500/30 rounded text-primary-300">Random Forest</span>
+              <span class="px-2 py-0.5 bg-primary-500/10 border border-primary-500/30 rounded text-primary-300">Extra Trees</span>
+              <span class="px-2 py-0.5 bg-primary-500/10 border border-primary-500/30 rounded text-primary-300">LogReg</span>
+              <span class="px-2 py-0.5 bg-primary-500/10 border border-primary-500/30 rounded text-primary-300">KNN</span>
+            </div>
+            <p class="text-[10px] text-dark-500 mt-3 leading-relaxed">Scout HPO 先快篩 → Full HPO (Optuna TPE,5-Fold CV) → 黃金預設值保底。每模型保留 top_k 組超參。</p>
+          </div>
+          <div class="card p-4">
+            <h4 class="text-sm font-semibold mb-3 text-dark-200 flex items-center gap-2">
+              <span class="w-1.5 h-1.5 rounded-full bg-accent-400"></span>
+              深度學習模型 (NAS + HPO)
+            </h4>
+            <div class="space-y-2 text-[11px]">
+              <div class="flex items-center gap-2">
+                <span class="text-dark-500 w-16">表格:</span>
+                <span class="px-2 py-0.5 bg-accent-500/10 border border-accent-500/30 rounded text-accent-300">MLP (NAS)</span>
+                <span class="px-2 py-0.5 bg-accent-500/10 border border-accent-500/30 rounded text-accent-300">CNN1D / ResNet1D</span>
+                <span class="px-2 py-0.5 bg-accent-500/10 border border-accent-500/30 rounded text-accent-300">Transformer</span>
+              </div>
+              <div class="flex items-center gap-2">
+                <span class="text-dark-500 w-16">時序:</span>
+                <span class="px-2 py-0.5 bg-warning-500/10 border border-warning-500/30 rounded text-warning-300">TSNet (NAS)</span>
+                <span class="px-2 py-0.5 bg-warning-500/10 border border-warning-500/30 rounded text-warning-300">TCN</span>
+                <span class="px-2 py-0.5 bg-warning-500/10 border border-warning-500/30 rounded text-warning-300">PatchTST</span>
+              </div>
+            </div>
+            <p class="text-[10px] text-dark-500 mt-3 leading-relaxed">MLP NAS 在 OneShotSupernet 上共享權重搜尋;TSNet 搜尋 4 種算子 (conv_k3/k5/tcn_d2/d4)。所有 DL 模型再各自跑 HPO。</p>
+          </div>
+        </div>
+
+        <!-- Feature sets 卡片 -->
+        <div class="card mb-6">
+          <div class="card-header">
+            <h3 class="card-title">10 種特徵集 (FeatureBuilder)</h3>
+            <span class="text-xs text-dark-400">每個模型只用相容的特徵集,HPO 期間鎖定最佳組合</span>
+          </div>
+          <div class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-2 p-4 text-[11px]">
+            <div class="bg-dark-800/50 rounded p-2 border border-dark-700">
+              <p class="font-mono text-primary-300 mb-0.5">raw</p>
+              <p class="text-dark-500 text-[10px]">StandardScaler</p>
+            </div>
+            <div class="bg-dark-800/50 rounded p-2 border border-dark-700">
+              <p class="font-mono text-primary-300 mb-0.5">raw_stat</p>
+              <p class="text-dark-500 text-[10px]">+ 全域/局部統計 + KMeans</p>
+            </div>
+            <div class="bg-dark-800/50 rounded p-2 border border-dark-700">
+              <p class="font-mono text-primary-300 mb-0.5">raw_stat_fft</p>
+              <p class="text-dark-500 text-[10px]">+ FFT 頻域</p>
+            </div>
+            <div class="bg-dark-800/50 rounded p-2 border border-dark-700">
+              <p class="font-mono text-primary-300 mb-0.5">poly2</p>
+              <p class="text-dark-500 text-[10px]">Top-N 二階交互</p>
+            </div>
+            <div class="bg-dark-800/50 rounded p-2 border border-dark-700">
+              <p class="font-mono text-primary-300 mb-0.5">signal</p>
+              <p class="text-dark-500 text-[10px]">+ L2 row-norm</p>
+            </div>
+            <div class="bg-dark-800/50 rounded p-2 border border-dark-700">
+              <p class="font-mono text-primary-300 mb-0.5">pca64 / svd64</p>
+              <p class="text-dark-500 text-[10px]">線性降維 64</p>
+            </div>
+            <div class="bg-dark-800/50 rounded p-2 border border-dark-700">
+              <p class="font-mono text-primary-300 mb-0.5">kpca32</p>
+              <p class="text-dark-500 text-[10px]">RBF Kernel PCA</p>
+            </div>
+            <div class="bg-dark-800/50 rounded p-2 border border-warning-700/40">
+              <p class="font-mono text-warning-300 mb-0.5">ts_tabular</p>
+              <p class="text-dark-500 text-[10px]">Lag + Rolling</p>
+            </div>
+            <div class="bg-dark-800/50 rounded p-2 border border-warning-700/40">
+              <p class="font-mono text-warning-300 mb-0.5">ts_tabular_fft</p>
+              <p class="text-dark-500 text-[10px]">+ FFT</p>
+            </div>
+            <div class="bg-dark-800/50 rounded p-2 border border-dark-700">
+              <p class="font-mono text-success-300 mb-0.5">Ensemble</p>
+              <p class="text-dark-500 text-[10px]">Nelder-Mead + Stacking</p>
+            </div>
+          </div>
+        </div>
+      </section>
+
       <section id="page-settings" class="page-section hidden">
         <div class="card">
           <div class="card-header">
@@ -1883,7 +2347,7 @@
             <div>
               <h4 class="text-sm font-medium text-dark-300 mb-3">後端串接</h4>
               <div class="space-y-4">
-                <div class="flex items-center justify-between p-3 rounded-lg bg-dark-800/50">
+                <div class="setting-row">
                   <div>
                     <p class="text-sm font-medium">使用 Python 後端 API</p>
                     <p class="text-xs text-dark-400">開啟後,預處理 / 訓練 / 可視化將呼叫隊友的 FastAPI 服務</p>
@@ -1893,19 +2357,19 @@
                     <span class="toggle-slider"></span>
                   </label>
                 </div>
-                <div class="flex items-center justify-between p-3 rounded-lg bg-dark-800/50">
+                <div class="setting-row">
                   <div>
                     <p class="text-sm font-medium">API Base URL</p>
                     <p class="text-xs text-dark-400">FastAPI 監聽位址,預設 <code class="text-primary-400">https://i2ai-automl-api.onrender.com</code></p>
                   </div>
                   <input type="text" id="setting-api-url" class="w-64 bg-dark-700 border border-dark-600 rounded-lg px-3 py-1.5 text-sm focus:border-primary-500 outline-none">
                 </div>
-                <div class="flex items-center justify-between p-3 rounded-lg bg-dark-800/50">
+                <div class="setting-row">
                   <div>
                     <p class="text-sm font-medium">連線測試</p>
                     <p class="text-xs text-dark-400" id="setting-api-status">尚未測試</p>
                   </div>
-                  <button id="btn-api-ping" class="px-3 py-1.5 bg-primary-600 hover:bg-primary-500 rounded-lg text-xs font-medium transition-colors">測試連線</button>
+                  <button id="btn-api-ping" class="btn btn-sm btn-primary">測試連線</button>
                 </div>
               </div>
             </div>
@@ -1913,7 +2377,7 @@
             <div>
               <h4 class="text-sm font-medium text-dark-300 mb-3">訓練預設值 <span class="text-xs text-dark-500 font-normal">— 實驗室建立新實驗時會自動套用</span></h4>
               <div class="space-y-4">
-                <div class="flex items-center justify-between p-3 rounded-lg bg-dark-800/50">
+                <div class="setting-row">
                   <div>
                     <p class="text-sm font-medium">預設測試集比例</p>
                     <p class="text-xs text-dark-400">train_test_split 的 test_size,套用於「原始資料集」訓練</p>
@@ -1923,14 +2387,14 @@
                     <span id="setting-test-size-label" class="text-sm font-mono text-primary-400 w-12 text-right">20%</span>
                   </div>
                 </div>
-                <div class="flex items-center justify-between p-3 rounded-lg bg-dark-800/50">
+                <div class="setting-row">
                   <div>
                     <p class="text-sm font-medium">隨機種子 (random_state)</p>
                     <p class="text-xs text-dark-400">固定種子讓切分與模型結果可重現,改了就會得到不同切分</p>
                   </div>
                   <input type="number" id="setting-seed" value="42" min="0" class="w-24 bg-dark-700 border border-dark-600 rounded-lg px-3 py-1.5 text-sm text-right focus:border-primary-500 outline-none">
                 </div>
-                <div class="flex items-center justify-between p-3 rounded-lg bg-dark-800/50">
+                <div class="setting-row">
                   <div>
                     <p class="text-sm font-medium">預設任務類型</p>
                     <p class="text-xs text-dark-400">實驗室「任務類型」的預設選項</p>
@@ -1941,7 +2405,7 @@
                     <option value="classification">分類</option>
                   </select>
                 </div>
-                <div class="flex items-center justify-between p-3 rounded-lg bg-dark-800/50">
+                <div class="setting-row">
                   <div>
                     <p class="text-sm font-medium">預設資料來源</p>
                     <p class="text-xs text-dark-400">實驗室「資料來源」預先勾選哪些</p>
@@ -1964,30 +2428,29 @@
             <div>
               <h4 class="text-sm font-medium text-dark-300 mb-3">視覺化</h4>
               <div class="space-y-4">
-                <div class="flex items-center justify-between p-3 rounded-lg bg-dark-800/50">
+                <div class="setting-row">
                   <div>
                     <p class="text-sm font-medium">SHAP 最大樣本數</p>
-                    <p class="text-xs text-dark-400">洞察頁 SHAP 計算的樣本上限,越大越準但越慢</p>
+                    <p class="text-xs text-dark-400">洞察頁 SHAP 計算的樣本上限。樹/線性模型秒級無感,但 SVC/Voting/Stacking 走 Permutation 一個樣本約 3 秒 (50 樣本 ≈ 2-3 分鐘,200 樣本 ≈ 10 分鐘)</p>
                   </div>
-                  <input type="number" id="setting-shap-samples" value="200" min="20" max="2000" step="20" class="w-24 bg-dark-700 border border-dark-600 rounded-lg px-3 py-1.5 text-sm text-right focus:border-primary-500 outline-none">
+                  <input type="number" id="setting-shap-samples" value="50" min="20" max="2000" step="10" class="w-24 bg-dark-700 border border-dark-600 rounded-lg px-3 py-1.5 text-sm text-right focus:border-primary-500 outline-none">
                 </div>
               </div>
             </div>
 
             <div>
               <h4 class="text-sm font-medium text-dark-300 mb-3">其他</h4>
-              <div class="flex items-center justify-between p-3 rounded-lg bg-dark-800/50">
+              <div class="setting-row">
                 <div>
                   <p class="text-sm font-medium">重置所有設定</p>
                   <p class="text-xs text-dark-400">清除瀏覽器儲存的設定,回到預設值</p>
                 </div>
-                <button id="btn-reset-settings" class="px-3 py-1.5 bg-danger-600/80 hover:bg-danger-500 rounded-lg text-xs font-medium text-white transition-colors">重置</button>
+                <button id="btn-reset-settings" class="btn btn-sm btn-danger">重置</button>
               </div>
             </div>
           </div>
           <div class="px-4 pb-4 flex justify-end gap-3 mt-2 border-t border-dark-700/50 pt-4">
-            <span id="settings-save-toast" class="text-success-400 text-sm font-medium self-center opacity-0 transition-opacity">設定已儲存</span>
-            <button id="btn-save-settings" class="px-6 py-2 bg-gradient-to-r from-primary-600 to-accent-600 hover:from-primary-500 hover:to-accent-500 rounded-lg text-sm font-semibold transition-all shadow-lg shadow-primary-500/20">儲存設定</button>
+            <button id="btn-save-settings" class="btn btn-lg btn-primary">儲存設定</button>
           </div>
         </div>
       </section>
@@ -2036,7 +2499,7 @@
             <input id="auth-input-password" type="password" required minlength="6" class="w-full bg-dark-800 border border-dark-600 rounded-lg px-3 py-2 text-sm focus:border-primary-500 outline-none">
           </div>
           <div id="auth-form-error" class="hidden text-xs text-danger-400 px-3 py-2 bg-danger-500/10 border-l-2 border-danger-500 rounded-r"></div>
-          <button type="submit" id="auth-form-submit" class="w-full px-4 py-2.5 bg-gradient-to-r from-primary-600 to-accent-600 hover:from-primary-500 hover:to-accent-500 rounded-lg text-sm font-semibold text-white transition-all">登入</button>
+          <button type="submit" id="auth-form-submit" class="btn btn-primary w-full">登入</button>
         </form>
         <p class="text-[10px] text-dark-500 text-center">登入是選用 — 不登入也能使用所有功能,但資料只存在本機</p>
       </div>
@@ -2044,12 +2507,12 @@
   </div>
 
   <!-- ?v= 是 cache-busting:改 JS 後把版本號 +1,瀏覽器就會強制重抓,不用手動硬重整 -->
-  <script src="js/data-engine.js?v=19"></script>
-  <script src="js/ml-engine.js?v=19"></script>
-  <script src="js/mock-data.js?v=19"></script>
-  <script src="js/charts.js?v=19"></script>
-  <script src="js/auth.js?v=19"></script>
-  <script src="js/api.js?v=19"></script>
-  <script src="js/app.js?v=19"></script>
+  <script src="js/data-engine.js?v=36"></script>
+  <script src="js/ml-engine.js?v=36"></script>
+  <script src="js/mock-data.js?v=36"></script>
+  <script src="js/charts.js?v=36"></script>
+  <script src="js/auth.js?v=36"></script>
+  <script src="js/api.js?v=36"></script>
+  <script src="js/app.js?v=36"></script>
 </body>
 </html>

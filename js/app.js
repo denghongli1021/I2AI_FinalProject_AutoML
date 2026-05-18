@@ -4,6 +4,9 @@
 let appMode = 'real'; // 'demo' | 'real' — 預設實作模式
 
 document.addEventListener('DOMContentLoaded', () => {
+  initToast();
+  initSidebarDrawer();
+  initModalA11y();
   initNavigation();
   initModeToggle();
   initLeaderboard();
@@ -16,6 +19,7 @@ document.addEventListener('DOMContentLoaded', () => {
   initSettings();
   initApiKeepAlive();
   initNotifications();
+  initPipelinePage();
   loadTrainingHistory();
   // Auth — 讀 localStorage / 接 OAuth callback,後續所有 ApiClient fetch 自動帶 token
   if (typeof AuthClient !== 'undefined') AuthClient.init();
@@ -29,13 +33,18 @@ document.addEventListener('DOMContentLoaded', () => {
     clearAllUserState();
     // 2. 載入新使用者的訓練歷史 (per-user localStorage key)
     loadTrainingHistory();
-    // 2a. 若有歷史,自動套用最新一筆 — dashboard 跟 leaderboard 才有東西可顯示
+    // 3. 抓 datasets
+    await restoreUserDatasets();
+    // 4. 登入 user → 從 DB 還原訓練歷史 + 模型 (跨瀏覽器/裝置可看到歷史)
+    //    沒有 _trainingHistory 在 localStorage 但 DB 有時,這步補上;有時跟 DB 合併。
+    if (ev.detail?.user && typeof ApiClient !== 'undefined' && ApiClient.enabled) {
+      await hydrateUserHistoryFromDb();
+    }
+    // 5. 若有歷史,自動套用最新一筆 — dashboard 跟 leaderboard 才有東西可顯示
     if (_trainingHistory.length > 0) {
       _activeHistoryRunId = _trainingHistory[0].id;
       MLEngine.trainedModels = _trainingHistory[0].models || [];
     }
-    // 3. 抓 datasets
-    await restoreUserDatasets();
     // 4. 重新渲染當前頁面 (不然會卡在舊資料的 render)
     const visiblePage = document.querySelector('.page-section:not(.hidden)');
     if (visiblePage) {
@@ -52,6 +61,154 @@ document.addEventListener('DOMContentLoaded', () => {
   showDemoDataset();
   setTimeout(() => renderPageCharts('dashboard'), 100);
 });
+
+// ===== TOAST SYSTEM =====
+// 全域 toast — 取代各區塊散落的 status span,所有非阻塞通知都走這裡。
+// showToast('已儲存', { type: 'success', msg: '可選副標', duration: 3000 })
+function initToast() {
+  if (document.getElementById('toast-container')) return;
+  const container = document.createElement('div');
+  container.id = 'toast-container';
+  container.setAttribute('role', 'status');
+  container.setAttribute('aria-live', 'polite');
+  document.body.appendChild(container);
+}
+
+function showToast(title, opts = {}) {
+  const container = document.getElementById('toast-container');
+  if (!container) return;
+  const { type = 'info', msg = '', duration = 3500 } = opts;
+  const iconHref = {
+    success: '#i-check-circle',
+    error:   '#i-warning',
+    warning: '#i-warning',
+    info:    '#i-info',
+  }[type] || '#i-info';
+
+  const toast = document.createElement('div');
+  toast.className = `toast toast-${type}`;
+  toast.innerHTML = `
+    <svg class="toast-icon"><use href="${iconHref}"/></svg>
+    <div class="toast-body">
+      <div class="toast-title">${_escapeText(title)}</div>
+      ${msg ? `<div class="toast-msg">${_escapeText(msg)}</div>` : ''}
+    </div>
+    <button class="toast-close" aria-label="關閉">
+      <svg viewBox="0 0 24 24" width="16" height="16"><use href="#i-close"/></svg>
+    </button>
+  `;
+  container.appendChild(toast);
+
+  const dismiss = () => {
+    if (toast.classList.contains('toast-leaving')) return;
+    toast.classList.add('toast-leaving');
+    toast.addEventListener('animationend', () => toast.remove(), { once: true });
+  };
+  toast.querySelector('.toast-close').addEventListener('click', dismiss);
+  if (duration > 0) setTimeout(dismiss, duration);
+  return { dismiss };
+}
+
+function _escapeText(s) {
+  return String(s)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+
+// ===== MOBILE SIDEBAR DRAWER =====
+// 手機 / 平板 (<768px) 把 sidebar 收進抽屜,header 的漢堡按鈕負責開合,
+// 點 backdrop 或選了 nav-item 都會關掉。
+function initSidebarDrawer() {
+  const sidebar = document.getElementById('sidebar');
+  const toggle = document.getElementById('btn-sidebar-toggle');
+  const backdrop = document.getElementById('drawer-backdrop');
+  if (!sidebar || !toggle || !backdrop) return;
+
+  const openDrawer = () => {
+    sidebar.classList.add('open');
+    backdrop.classList.add('open');
+    toggle.setAttribute('aria-expanded', 'true');
+    document.body.style.overflow = 'hidden';
+  };
+  const closeDrawer = () => {
+    sidebar.classList.remove('open');
+    backdrop.classList.remove('open');
+    toggle.setAttribute('aria-expanded', 'false');
+    document.body.style.overflow = '';
+  };
+
+  toggle.addEventListener('click', () => {
+    sidebar.classList.contains('open') ? closeDrawer() : openDrawer();
+  });
+  backdrop.addEventListener('click', closeDrawer);
+  // 點任一 nav-item 後自動收起 (手機才需要,desktop 沒影響因為 .open 在 ≥768px 不會被套用 transform)
+  sidebar.querySelectorAll('.nav-item').forEach(item => {
+    item.addEventListener('click', () => {
+      if (window.matchMedia('(max-width: 767px)').matches) closeDrawer();
+    });
+  });
+  // 視窗放大到 desktop 時順手收掉 inline overflow lock
+  window.addEventListener('resize', () => {
+    if (window.matchMedia('(min-width: 768px)').matches) closeDrawer();
+  });
+}
+
+// ===== MODAL A11Y HELPER =====
+// 把每個 .hidden fixed inset-0 ... 的 modal 補上 dialog role / aria 屬性,
+// 並掛 ESC 全域監聽 (關閉最上層那一個 modal)。
+// 焦點陷阱:打開時把焦點丟進去,Tab 出去會繞回來。
+function initModalA11y() {
+  const modalIds = ['process-detail-modal', 'compare-modal', 'auth-modal'];
+  modalIds.forEach(id => {
+    const m = document.getElementById(id);
+    if (!m) return;
+    m.setAttribute('role', 'dialog');
+    m.setAttribute('aria-modal', 'true');
+    // 找第一個 h3 當 label
+    const heading = m.querySelector('h3, h4');
+    if (heading) {
+      if (!heading.id) heading.id = `${id}-title`;
+      m.setAttribute('aria-labelledby', heading.id);
+    }
+    // 觀察 hidden class 變化,開啟時把焦點丟進去
+    const observer = new MutationObserver(() => {
+      if (!m.classList.contains('hidden')) {
+        _trapFocus(m);
+      }
+    });
+    observer.observe(m, { attributes: true, attributeFilter: ['class'] });
+  });
+
+  // ESC 全域關閉最上層 modal
+  document.addEventListener('keydown', e => {
+    if (e.key !== 'Escape') return;
+    // 由上而下找第一個可見的 modal
+    const visible = modalIds
+      .map(id => document.getElementById(id))
+      .filter(el => el && !el.classList.contains('hidden'))
+      .pop();
+    if (visible) visible.classList.add('hidden');
+  });
+}
+
+function _trapFocus(modal) {
+  const focusables = modal.querySelectorAll(
+    'a[href], button:not([disabled]), textarea, input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])'
+  );
+  if (!focusables.length) return;
+  const first = focusables[0];
+  const last = focusables[focusables.length - 1];
+  // 焦點放到第一個可互動元素 (跳過視覺裝飾)
+  setTimeout(() => first.focus(), 50);
+  modal.addEventListener('keydown', e => {
+    if (e.key !== 'Tab') return;
+    if (e.shiftKey && document.activeElement === first) {
+      e.preventDefault(); last.focus();
+    } else if (!e.shiftKey && document.activeElement === last) {
+      e.preventDefault(); first.focus();
+    }
+  });
+}
 
 // ===== API KEEP-ALIVE =====
 // 每 30 秒 ping 一次後端 /api/health,避免 Render 免費方案 15 分鐘無請求就睡眠。
@@ -177,6 +334,117 @@ async function restoreUserDatasets() {
     console.warn('restoreUserDatasets 失敗:', e.message);
   }
 }
+
+// 登入後從 DB 還原訓練歷史 + 模型 — 這是「跨瀏覽器/裝置看到歷史」的關鍵 hook。
+// 流程:
+//   1. fetch /api/training-runs   → 取得 user 所有訓練紀錄 (含 results_summary)
+//   2. fetch /api/models          → 取得所有 sklearn 模型的 bundle (含 metrics/featureImportance/...)
+//   3. 把 models 依 trainingRunId 分組,套到對應的 training run 上
+//   4. 重建 _trainingHistory (跟 localStorage 既有格式相容)
+//   5. _trainingHistory 加進 DB 來源後,以 timestamp 排序
+// Pipeline runs (engine='pipeline') 因為沒存 model bundles 到 DB,只還原 summary
+// (沒法重做 SHAP/predict,但歷史紀錄看得到)
+async function hydrateUserHistoryFromDb() {
+  try {
+    const baseUrl = ApiClient.baseUrl;
+    const headers = {};
+    if (typeof AuthClient !== 'undefined' && AuthClient.token) {
+      headers['Authorization'] = `Bearer ${AuthClient.token}`;
+    }
+    const [runsResp, modelsResp] = await Promise.all([
+      fetch(`${baseUrl}/api/training-runs?limit=100`, { headers }),
+      fetch(`${baseUrl}/api/models?limit=500`, { headers }),
+    ]);
+    if (!runsResp.ok || !modelsResp.ok) {
+      console.warn('[hydrate] training-runs / models fetch 失敗', runsResp.status, modelsResp.status);
+      return;
+    }
+    const { runs } = await runsResp.json();
+    const { models } = await modelsResp.json();
+
+    // models 依 trainingRunId 分組
+    const modelsByRun = {};
+    for (const m of models) {
+      const rid = m.trainingRunId;
+      if (!rid) continue;
+      (modelsByRun[rid] = modelsByRun[rid] || []).push({
+        ...m.bundle,
+        id: m.id,
+        hyperparameters: m.hyperparameters || {},
+        preprocessorId: m.preprocessorId,
+        // 標記:這個 model 的重 blob (estimator/scaler/X_test) 在 DB,前端用 modelId 跟後端要
+        _fromDb: true,
+      });
+    }
+
+    // 把 DB runs 轉成 _trainingHistory 格式 (跟 localStorage push 出來的格式一致)
+    const dbHistory = [];
+    for (const r of runs) {
+      const runModels = modelsByRun[r.id] || [];
+      // sklearn: 若有對應 models 才能完整重建;pipeline: 沒 models,用 resultsSummary 重建顯示用 bundle
+      let modelList = runModels;
+      if (r.engine === 'pipeline' && modelList.length === 0 && r.resultsSummary?.perSource) {
+        // pipeline run → 用 summary 假造 bundle (跟既有 danielResultToModel 邏輯一致)
+        modelList = r.resultsSummary.perSource.map((p, i) => ({
+          id: `daniel_db_${r.id}_${i}`,
+          name: `[${p.label || p.source}] Pipeline (${(p.bestScore != null && p.scoreStack === p.bestScore) ? 'Stack' : 'Blend'})`,
+          type: 'daniel_pipeline',
+          taskType: 'classification',
+          targetName: r.target,
+          dataSource: p.source,
+          dataSourceLabel: p.label,
+          metrics: {
+            taskType: 'classification',
+            testAccuracy: p.accuracy ?? 0,
+            f1: p.f1 ?? 0,
+            precision: p.f1 ?? 0,
+            recall: p.f1 ?? 0,
+            testScore: p.bestScore ?? 0,
+            testScoreLabel: (p.metric || 'F1').toUpperCase(),
+            scoreBlend: p.scoreBlend,
+            scoreStack: p.scoreStack,
+          },
+          trainTime: (p.elapsedSec || 0) * 1000,
+          _fromDb: true,
+        }));
+      }
+      if (modelList.length === 0) continue;  // 沒模型沒法顯示,跳過
+
+      // 找最佳 model
+      modelList.sort((a, b) => (b.metrics?.testScore || 0) - (a.metrics?.testScore || 0));
+      const best = modelList[0];
+      const isReg = r.taskType === 'regression';
+      const metric = isReg ? 'R²' : 'Accuracy';
+
+      dbHistory.push({
+        id: r.id,
+        timestamp: r.startedAt ? r.startedAt * 1000 : Date.now(),
+        datasetId: r.datasetId,
+        datasetName: r.datasetName || r.resultsSummary?.datasetName || '(未知)',
+        target: r.target,
+        taskType: r.taskType,
+        sources: r.sources || [],
+        modelCount: modelList.length,
+        metric,
+        bestModel: { name: best.name, score: best.metrics?.testScore || 0 },
+        options: r.options || {},
+        models: modelList,
+        engine: r.engine,
+        _fromDb: true,
+      });
+    }
+
+    // 合併 DB 跟 localStorage — 以 id 去重,DB 為主 (有同 id 用 DB 的)
+    const byId = {};
+    for (const h of _trainingHistory) byId[h.id] = h;
+    for (const h of dbHistory) byId[h.id] = h;  // overwrite
+    _trainingHistory = Object.values(byId).sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
+    console.log(`[hydrate] DB 還原 ${dbHistory.length} 個 training runs,合併後共 ${_trainingHistory.length} 筆`);
+  } catch (e) {
+    console.warn('[hydrate] 從 DB 還原歷史失敗:', e.message);
+  }
+}
+
 
 // stub dataset 點擊時 lazy fetch — 把 rows/analysis 補齊
 async function hydrateDatasetIfStub(ds) {
@@ -659,6 +927,38 @@ function renderNotificationDetailContent(details) {
     const rankIcon = i === 0
       ? '<span class="text-warning-400">🏆</span>'
       : `<span class="text-dark-500">${i + 1}</span>`;
+
+    // 超參數行 — 有資料才插
+    const hp = m.hyperparameters;
+    let hpRow = '';
+    if (hp && Object.keys(hp).length) {
+      // 過濾掉值為 null / undefined / 空 list 的;依 key 排序;最多顯示 12 個
+      const entries = Object.entries(hp)
+        .filter(([_, v]) => v !== null && v !== undefined && !(Array.isArray(v) && v.length === 0))
+        .sort((a, b) => a[0].localeCompare(b[0]))
+        .slice(0, 12);
+      if (entries.length) {
+        const items = entries.map(([k, v]) => {
+          const valStr = typeof v === 'number'
+            ? (Number.isInteger(v) ? String(v) : v.toFixed(4))
+            : (typeof v === 'object' ? JSON.stringify(v) : String(v));
+          const valTrunc = valStr.length > 24 ? valStr.slice(0, 22) + '…' : valStr;
+          return `<span class="inline-block text-[10px] px-1.5 py-0.5 rounded bg-dark-800 text-dark-300 mr-1 mb-1" title="${escapeHtml(k)} = ${escapeHtml(valStr)}"><span class="text-dark-500">${escapeHtml(k)}</span>=<span class="font-mono">${escapeHtml(valTrunc)}</span></span>`;
+        }).join('');
+        hpRow = `
+          <tr class="bg-dark-900/30">
+            <td></td>
+            <td colspan="4" class="py-1 px-1">
+              <details>
+                <summary class="text-[10px] text-dark-400 cursor-pointer hover:text-dark-200 select-none">超參數 (${entries.length})</summary>
+                <div class="mt-1 leading-relaxed">${items}</div>
+              </details>
+            </td>
+          </tr>
+        `;
+      }
+    }
+
     return `
       <tr class="border-b border-dark-800/40">
         <td class="py-1 pr-2 text-center w-6">${rankIcon}</td>
@@ -667,6 +967,7 @@ function renderNotificationDetailContent(details) {
         <td class="py-1 px-1 text-right font-mono text-success-400 text-[11px]">${scoreStr}</td>
         <td class="py-1 pl-2 text-right text-[10px] text-dark-500">${m.trainTime.toFixed(0)}ms</td>
       </tr>
+      ${hpRow}
     `;
   }).join('');
 
@@ -723,36 +1024,62 @@ function initNotifications() {
 }
 
 // ===== MODE TOGGLE =====
+// Mode 徽章已移到 top bar #mode-badge,讓使用者一眼看到目前是 Demo 還是 Real。
 function initModeToggle() {
-  const btn = document.getElementById('btn-mode-toggle');
-  if (!btn) return;
-  btn.addEventListener('click', () => {
-    appMode = appMode === 'demo' ? 'real' : 'demo';
-    updateModeUI();
-    // Re-render the currently visible page
-    const visiblePage = document.querySelector('.page-section:not(.hidden)');
-    if (visiblePage) {
-      const pageId = visiblePage.id.replace('page-', '');
-      renderPageCharts(pageId);
-    }
+  const badge = document.getElementById('mode-badge');
+  if (!badge) {
+    console.warn('[mode] #mode-badge 不在 DOM 中,切換按鈕綁不上');
+    return;
+  }
+  // 統一用 type=button 避免任何 form-submit 行為
+  badge.setAttribute('type', 'button');
+  badge.addEventListener('click', (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setAppMode(appMode === 'demo' ? 'real' : 'demo', { showToast: true });
   });
+  updateModeUI();  // 初始 sync 文字 / 顏色 / nav 顯示
+}
+
+// 切換模式的單一入口 — 改 appMode + 同步 UI + 自動導頁
+function setAppMode(next, opts = {}) {
+  if (next !== 'demo' && next !== 'real') return;
+  const prev = appMode;
+  appMode = next;
+  console.log(`[mode] ${prev} → ${next}`);
   updateModeUI();
+
+  // 自動導頁:進測試模式跳到 pipeline,退出時若在 pipeline 跳回 dashboard
+  const cur = document.querySelector('.page-section:not(.hidden)');
+  const curId = cur ? cur.id : null;
+  if (next === 'demo' && curId !== 'page-pipeline' && curId !== 'page-settings') {
+    navigateTo('pipeline');
+  } else if (next === 'real' && curId === 'page-pipeline') {
+    navigateTo('dashboard');
+  } else if (cur) {
+    // 同頁但模式變了 → 重新 render (demo/real 內容會切換)
+    renderPageCharts(cur.id.replace('page-', ''));
+  }
+
+  if (opts.showToast && typeof window.showToast === 'function') {
+    window.showToast(next === 'demo' ? '已切換到 測試模式' : '已切換到 實作模式', {
+      type: 'info',
+      msg: next === 'demo' ? '可上傳 CSV 跑完整 AutoML pipeline' : '需要先上傳資料 / 訓練模型才會有內容',
+    });
+  }
 }
 
 function updateModeUI() {
-  const icon = document.getElementById('mode-icon');
-  const label = document.getElementById('mode-label');
-  if (appMode === 'demo') {
-    icon.textContent = 'D';
-    icon.className = 'flex items-center justify-center w-5 h-5 rounded-md bg-warning-500/15 text-warning-400 text-[10px] font-bold';
-    label.textContent = 'Demo 模式';
-    label.className = 'flex-1 text-left text-dark-300';
-  } else {
-    icon.textContent = 'R';
-    icon.className = 'flex items-center justify-center w-5 h-5 rounded-md bg-success-500/15 text-success-400 text-[10px] font-bold';
-    label.textContent = '實作模式';
-    label.className = 'flex-1 text-left text-dark-300';
-  }
+  const badge = document.getElementById('mode-badge');
+  const label = document.getElementById('mode-badge-label');
+  if (!badge || !label) return;
+  badge.dataset.mode = appMode;
+  label.textContent = appMode === 'demo' ? '測試模式' : '實作模式';
+  // 測試模式專屬 nav (Daniel pipeline) 只在 demo 顯示
+  // 用自訂 display 屬性而不是 .hidden,避開 .nav-item { display: flex } 跟 .hidden 的 specificity 平手問題
+  document.querySelectorAll('.nav-mode-demo').forEach(el => {
+    el.style.display = (appMode === 'demo') ? '' : 'none';
+  });
 }
 
 // ===== NAVIGATION =====
@@ -760,6 +1087,7 @@ const PAGE_NAMES = {
   dashboard: '總覽儀表板',
   datasets: '數據集管理',
   preprocessing: '預處理',
+  pipeline: 'AutoML Pipeline (測試模式)',
   experiments: '實驗室',
   leaderboard: '模型排行榜',
   insights: '洞察與決策',
@@ -840,6 +1168,9 @@ function renderPageCharts(page) {
       break;
     case 'deployments':
       if (appMode === 'demo') renderApiUsage();
+      break;
+    case 'pipeline':
+      renderPipelinePage();
       break;
   }
 }
@@ -933,8 +1264,7 @@ function handleFile(file) {
 
   // Switch to real mode automatically
   if (appMode === 'demo') {
-    appMode = 'real';
-    updateModeUI();
+    setAppMode('real');
   }
 
   // Show loading state
@@ -2011,6 +2341,21 @@ function renderAffectedRows(colName, ba) {
 function escapeHtml(str) {
   if (typeof str !== 'string') return str;
   return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+// 預處理下拉的時間顯示 — 今天的給 HH:MM,昨天前給 MM/DD HH:MM
+function _formatPreprocessTime(ms) {
+  const d = new Date(ms);
+  const now = new Date();
+  const sameDay = d.getFullYear() === now.getFullYear()
+                && d.getMonth() === now.getMonth()
+                && d.getDate() === now.getDate();
+  const hh = String(d.getHours()).padStart(2, '0');
+  const mm = String(d.getMinutes()).padStart(2, '0');
+  if (sameDay) return `今天 ${hh}:${mm}`;
+  const mo = String(d.getMonth() + 1).padStart(2, '0');
+  const dy = String(d.getDate()).padStart(2, '0');
+  return `${mo}/${dy} ${hh}:${mm}`;
 }
 
 // ===== LEADERBOARD =====
@@ -3121,7 +3466,10 @@ function renderRealExperimentsPage() {
       ppMatches.forEach(p => {
         const opt = document.createElement('option');
         opt.value = p.id;
-        opt.textContent = `${p.id} — target=${p.target}, ${p.featureCount} 特徵 (train ${p.trainSize}/test ${p.testSize})`;
+        // 用建立時間取代 ID 顯示 (人讀友善);沒 createdAt 的舊資料退回到 ID 顯示
+        const stamp = p.createdAt ? _formatPreprocessTime(p.createdAt * 1000) : p.id;
+        opt.textContent = `${stamp} — target=${p.target}, ${p.featureCount} 特徵 (train ${p.trainSize}/test ${p.testSize})`;
+        opt.title = `preprocessorId: ${p.id}`;  // hover 還是看得到 ID
         ppSelect.appendChild(opt);
       });
       ppSelect.disabled = !srcPp.checked;
@@ -3144,6 +3492,55 @@ function renderRealExperimentsPage() {
   if (!srcPp.disabled) srcPp.checked = _settings.srcPp;
   ppSelect.disabled = !srcPp.checked;
 
+  // --- Pipeline 的 predict CSV picker — 顯示檔名 + 清除按鈕 ---
+  const predictInputEl = document.getElementById('exp-pipeline-predict-csv');
+  const predictInfoEl = document.getElementById('exp-pipeline-predict-info');
+  const predictClearBtn = document.getElementById('exp-pipeline-predict-clear');
+  if (predictInputEl && !predictInputEl.__wired) {
+    predictInputEl.__wired = true;
+    predictInputEl.addEventListener('change', () => {
+      const f = predictInputEl.files?.[0];
+      if (f && predictInfoEl) {
+        predictInfoEl.textContent = `✓ ${f.name} (${(f.size / 1024).toFixed(1)} KB) — 訓練完成後將自動產生 submission.csv`;
+        predictInfoEl.classList.remove('hidden');
+      } else if (predictInfoEl) {
+        predictInfoEl.classList.add('hidden');
+      }
+    });
+    if (predictClearBtn) {
+      predictClearBtn.addEventListener('click', () => {
+        predictInputEl.value = '';
+        predictInfoEl?.classList.add('hidden');
+      });
+    }
+  }
+
+  // --- 訓練引擎切換 (sklearn / daniel) ---
+  // daniel 引擎:隱藏「演算法選擇」(Daniel 自己挑),顯示 daniel options;特徵欄位仍顯示但會
+  // 註記「不適用」— Daniel 直接吃 raw 資料,內部做 select_dtypes(numeric)。
+  const applyEngineUI = () => {
+    const engineRadio = document.querySelector('input[name="exp-engine"]:checked');
+    const engine = engineRadio ? engineRadio.value : 'sklearn';
+    const danielOpts = document.getElementById('exp-daniel-options');
+    const algoSection = algoBox.closest('.md\\:col-span-2');
+    const featSection = featBox.closest('.md\\:col-span-2');
+    if (engine === 'daniel') {
+      danielOpts?.classList.remove('hidden');
+      algoSection?.classList.add('hidden');
+      featSection?.classList.add('opacity-50');
+      featSection?.setAttribute('title', 'Pipeline 引擎不使用此選項 — 自己挑特徵');
+    } else {
+      danielOpts?.classList.add('hidden');
+      algoSection?.classList.remove('hidden');
+      featSection?.classList.remove('opacity-50');
+      featSection?.removeAttribute('title');
+    }
+  };
+  document.querySelectorAll('input[name="exp-engine"]').forEach(r => {
+    r.addEventListener('change', applyEngineUI);
+  });
+  applyEngineUI();
+
   // Train button — 用 cloneNode 重置 click handler。複製完後同步當下訓練狀態,
   // 避免切頁回來看到的是舊狀態 (cloneNode 雖會複製 innerHTML/disabled,但訓練中途
   // 完成時舊參考已被孤立、寫不到新 btn,所以這裡顯式 set 一次最安全)
@@ -3152,14 +3549,13 @@ function renderRealExperimentsPage() {
   btn.parentNode.replaceChild(newBtn, btn);
   setTrainBtnState(_trainingState);
   newBtn.addEventListener('click', () => {
-    // Collect options from UI
-    const selectedFeatures = [...featBox.querySelectorAll('.exp-feat-cb:checked')].map(cb => cb.value);
-    const selectedAlgos = [...algoBox.querySelectorAll('.exp-algo-cb:checked')].map(cb => cb.value);
+    const engineRadio = document.querySelector('input[name="exp-engine"]:checked');
+    const engine = engineRadio ? engineRadio.value : 'sklearn';
     const taskTypeRadio = document.querySelector('input[name="exp-task-type"]:checked');
     const taskType = taskTypeRadio ? taskTypeRadio.value : 'auto';
     const timeSeries = document.getElementById('exp-time-series').checked;
 
-    // 資料來源 (多選)
+    // 資料來源 (多選) — 兩個引擎共用
     const sources = [];
     if (srcRaw.checked) sources.push('raw');
     if (srcPp.checked) sources.push('preprocessed');
@@ -3168,12 +3564,37 @@ function renderRealExperimentsPage() {
     const preprocessorId = srcPp.checked ? ppSelect.value : null;
     if (srcPp.checked && !preprocessorId) { alert('已勾選「已預處理資料」,請選擇一個預處理結果'); return; }
 
+    if (engine === 'daniel') {
+      // Daniel 引擎:走 /api/train/pipeline/stream
+      if (typeof ApiClient === 'undefined' || !ApiClient.enabled) {
+        alert('Pipeline 引擎需要 Python 後端 API,請先在系統設定開啟「使用 Python 後端 API」'); return;
+      }
+      const predictInput = document.getElementById('exp-pipeline-predict-csv');
+      const predictFile = predictInput?.files?.[0] || null;
+      const danielOptions = {
+        fast: document.getElementById('exp-daniel-fast')?.checked ?? true,
+        skipDl: document.getElementById('exp-daniel-skip-dl')?.checked ?? false,
+        noNas: document.getElementById('exp-daniel-no-nas')?.checked ?? false,
+        metric: document.getElementById('exp-daniel-metric')?.value || 'f1',
+        timeLimit: parseFloat(document.getElementById('exp-daniel-time-limit')?.value) || 0,
+        timeSeries: timeSeries,
+        target: targetSel.value,
+        sources: sources,
+        preprocessorId: preprocessorId,
+        predictFile: predictFile,  // Option B:上傳的 Kaggle test.csv,可選
+      };
+      startDanielExperimentTraining(ds, targetSel.value, danielOptions);
+      return;
+    }
+
+    // === sklearn 引擎(原本流程) ===
+    const selectedFeatures = [...featBox.querySelectorAll('.exp-feat-cb:checked')].map(cb => cb.value);
+    const selectedAlgos = [...algoBox.querySelectorAll('.exp-algo-cb:checked')].map(cb => cb.value);
     if (sources.includes('raw') && selectedFeatures.length === 0) {
       alert('「原始資料集」需至少選擇一個特徵欄位'); return;
     }
     if (selectedAlgos.length === 0) { alert('請至少選擇一個演算法'); return; }
 
-    // 測試集比例 / 隨機種子 來自系統設定
     const s = getSettings();
     const options = {
       features: selectedFeatures,
@@ -3362,6 +3783,7 @@ async function startRealTraining(ds, targetCol, options = {}) {
           source: m.dataSource === 'preprocessed' ? '預處理' : '原始',
           score: isReg ? m.metrics.testR2 : m.metrics.testAccuracy,
           trainTime: m.trainTime || 0,
+          hyperparameters: m.hyperparameters || null,
         })),
         totalTime: models.reduce((sum, m) => sum + (m.trainTime || 0), 0),
       }
@@ -3375,8 +3797,352 @@ async function startRealTraining(ds, targetCol, options = {}) {
   }
 }
 
+// ============================================================
+// DANIEL PIPELINE training (in 實驗室) — 走 /api/train/pipeline/stream
+// 支援多 source (raw / preprocessed),每個 source 跑一次,結果合併進 leaderboard
+// ============================================================
+async function startDanielExperimentTraining(ds, targetCol, options) {
+  setTrainBtnState('training');
+  setGlobalStatus('running', `Pipeline 訓練中 — ${ds.fileName || 'Dataset'}`);
+
+  const progressCard = document.getElementById('exp-training-progress');
+  const resultsCard = document.getElementById('exp-results');
+  progressCard.classList.remove('hidden');
+  resultsCard.classList.add('hidden');
+
+  const logEl = document.getElementById('exp-training-log');
+  logEl.innerHTML = '';
+
+  const addLog = (msg, level = 'info') => {
+    const colorMap = { info: 'text-dark-500', muted: 'text-dark-600', success: 'text-success-400', warning: 'text-warning-400', error: 'text-danger-400' };
+    const now = new Date();
+    const ts = `${String(now.getHours()).padStart(2,'0')}:${String(now.getMinutes()).padStart(2,'0')}:${String(now.getSeconds()).padStart(2,'0')}`;
+    const p = document.createElement('p');
+    p.className = colorMap[level] || 'text-dark-400';
+    p.textContent = `[${ts}] ${msg}`;
+    logEl.appendChild(p);
+    logEl.scrollTop = logEl.scrollHeight;
+    // 防爆:超過 800 行就 trim
+    if (logEl.children.length > 800) {
+      while (logEl.children.length > 600) logEl.removeChild(logEl.firstChild);
+    }
+  };
+
+  try {
+    addLog(`啟動 AutoML Pipeline (來源: ${options.sources.join(' + ')})...`, 'info');
+    if (options.timeSeries) addLog('時間序列模式:會跑 TCN / PatchTST', 'info');
+    if (options.fast) addLog('快速模式:HPO trials 縮減', 'muted');
+
+    // 組 form data
+    const form = new FormData();
+    form.append('datasetId', ds.id);
+    form.append('sources', JSON.stringify(options.sources));
+    if (options.preprocessorId) form.append('preprocessorId', options.preprocessorId);
+    form.append('target', options.target);
+    form.append('timeSeries', options.timeSeries ? 'true' : 'false');
+    form.append('metric', options.metric);
+    form.append('fast', options.fast ? 'true' : 'false');
+    form.append('skipDl', options.skipDl ? 'true' : 'false');
+    form.append('noNas', options.noNas ? 'true' : 'false');
+    form.append('timeLimit', String(options.timeLimit || 0));
+    // Option B:訓練時上傳的 predict.csv (可選)
+    if (options.predictFile) {
+      form.append('predictFile', options.predictFile);
+      addLog(`已附加預測 CSV: ${options.predictFile.name} (${(options.predictFile.size / 1024).toFixed(1)} KB)`, 'info');
+    }
+
+    const headers = {};
+    if (typeof AuthClient !== 'undefined' && AuthClient.token) {
+      headers['Authorization'] = `Bearer ${AuthClient.token}`;
+    }
+
+    const resp = await fetch(`${ApiClient.baseUrl}/api/train/pipeline/stream`, {
+      method: 'POST', body: form, headers,
+    });
+    if (!resp.ok) throw new Error(`HTTP ${resp.status} ${resp.statusText}`);
+
+    // SSE 解析
+    const reader = resp.body.getReader();
+    const decoder = new TextDecoder('utf-8');
+    let buf = '';
+    let finalResults = null;
+    let runId = null;
+    let errorMsg = null;
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      let idx;
+      while ((idx = buf.indexOf('\n\n')) !== -1) {
+        const chunk = buf.slice(0, idx);
+        buf = buf.slice(idx + 2);
+        for (const line of chunk.split('\n')) {
+          if (!line.startsWith('data: ')) continue;
+          let ev;
+          try { ev = JSON.parse(line.slice(6)); } catch { continue; }
+          if (ev.type === 'log') {
+            addLog(ev.msg, ev.level || 'info');
+          } else if (ev.type === 'progress') {
+            document.getElementById('exp-progress-bar').style.width = ev.pct + '%';
+            document.getElementById('exp-progress-step').textContent = ev.step;
+          } else if (ev.type === 'done') {
+            finalResults = ev.results || [];
+            runId = ev.runId || null;
+          } else if (ev.type === 'error') {
+            errorMsg = ev.message;
+          }
+        }
+      }
+    }
+
+    if (errorMsg) throw new Error(errorMsg);
+    if (!finalResults || finalResults.length === 0) throw new Error('未收到 pipeline 結果');
+
+    // 把 Daniel result 包成「假 model bundle」塞進現有 leaderboard,共用 renderExperimentResults
+    const models = finalResults.map((r, i) => danielResultToModel(r, i));
+    const sortedModels = models.sort((a, b) => (b.metrics.testScore || 0) - (a.metrics.testScore || 0));
+    MLEngine.trainedModels = sortedModels;
+
+    resultsCard.classList.remove('hidden');
+    renderExperimentResults(sortedModels, { taskType: 'classification', target: targetCol });
+
+    // 在訓練結果區插一張 Daniel 專屬詳細卡片 (perModel / Blend vs Stack 切換指標)
+    insertDanielDetailCard(finalResults, targetCol);
+
+    // Option B:有上傳 predict.csv + 後端有產出 submission → 加下載按鈕
+    insertPipelineSubmissionCard(finalResults, runId);
+
+    setTrainBtnState('completed');
+    setGlobalStatus('success', `Pipeline 完成 — ${finalResults.length} 個 source`);
+
+    // 推進歷史
+    const best = sortedModels[0];
+    pushTrainingHistory({
+      timestamp: Date.now(),
+      datasetId: ds.id,
+      datasetName: ds.fileName || 'Dataset',
+      target: targetCol,
+      taskType: 'classification',
+      sources: options.sources,
+      modelCount: sortedModels.length,
+      metric: best.metrics.testScoreLabel || 'F1',
+      bestModel: { name: best.name, score: best.metrics.testScore },
+      options: { engine: 'daniel', fast: options.fast, skipDl: options.skipDl, noNas: options.noNas },
+      models: sortedModels,
+      engine: 'daniel',  // 標記是 Daniel 跑的,洞察頁可以判斷
+    });
+
+    notify(
+      'Pipeline 完成 ✓',
+      `${ds.fileName || 'Dataset'} — 最佳: ${best.name} (${best.metrics.testScoreLabel}=${best.metrics.testScore.toFixed(4)})`,
+      'success',
+      {
+        type: 'training',
+        dataset: ds.fileName || 'Dataset',
+        target: targetCol,
+        taskType: 'classification',
+        sources: options.sources,
+        modelCount: sortedModels.length,
+        metric: best.metrics.testScoreLabel,
+        topModels: sortedModels.map(m => ({
+          name: m.name.replace(/^\[(原始|預處理)\]\s*/, ''),
+          source: m.dataSource === 'preprocessed' ? '預處理' : '原始',
+          score: m.metrics.testScore,
+          trainTime: m.trainTime || 0,
+        })),
+        totalTime: sortedModels.reduce((sum, m) => sum + (m.trainTime || 0), 0),
+      },
+    );
+
+  } catch (err) {
+    addLog(`錯誤: ${err.message}`, 'error');
+    setTrainBtnState('failed');
+    setGlobalStatus('error', 'Pipeline 失敗');
+    notify('Pipeline 失敗', err.message, 'error');
+  }
+}
+
+// 把 Daniel pipeline 的 result 物件轉成 sklearn-bundle 的形狀,
+// 讓現有 renderExperimentResults / leaderboard 直接吃。
+function danielResultToModel(r, rank) {
+  const sourceLabel = r.dataSourceLabel || (r.dataSource === 'preprocessed' ? '預處理' : '原始');
+  const ensembleName = r.bestEnsemble === 'stack' ? 'Stack' : 'Blend';
+  const fakeName = `[${sourceLabel}] Pipeline (${ensembleName})`;
+  // testScore 用 bestScore (Daniel 自己挑 Blend vs Stack 較佳者)
+  const scoreLabel = (r.metric || 'F1').toUpperCase();
+  return {
+    id: `daniel_${rank}_${Date.now()}`,
+    name: fakeName,
+    type: 'daniel_pipeline',
+    taskType: 'classification',
+    targetName: r.target,
+    featureNames: [],  // Daniel pipeline 不揭露最終特徵集 (內部做了 PCA/FFT/KMeans...)
+    metrics: {
+      taskType: 'classification',
+      testAccuracy: r.accuracy ?? 0,
+      f1: r.f1 ?? 0,
+      precision: r.f1 ?? 0,    // Daniel 不單獨回報 precision/recall,用 f1 當 placeholder
+      recall: r.f1 ?? 0,
+      testScore: r.bestScore ?? 0,
+      testScoreLabel: scoreLabel,
+      scoreBlend: r.scoreBlend,
+      scoreStack: r.scoreStack,
+      bestEnsemble: r.bestEnsemble,
+      classes: r.classes || [],
+    },
+    featureImportance: [],
+    testTrue: [],
+    testPred: [],
+    trainTime: (r.elapsedSec || 0) * 1000,
+    inferLatency: 0,
+    trainSize: r.nTrain || 0,
+    testSize: r.nTest || 0,
+    means: [],
+    stds: [],
+    featureStats: [],
+    dataSource: r.dataSource,
+    dataSourceLabel: sourceLabel,
+    preprocessorId: r.preprocessorId,
+    // Daniel-specific
+    danielPerModel: r.perModel || [],
+    danielSplitMode: r.splitMode,
+    danielIsTs: r.isTimeSeries,
+    danielDevice: r.device,
+    danielNFeatures: r.nFeatures,
+    danielNClasses: r.nClasses,
+  };
+}
+
+// 在「訓練結果」卡片下方插一張 Daniel 專屬詳細卡 (per-source perModel breakdown + Blend/Stack)
+function insertDanielDetailCard(results, targetCol) {
+  const old = document.getElementById('exp-daniel-detail');
+  if (old) old.remove();
+
+  const wrap = document.createElement('div');
+  wrap.id = 'exp-daniel-detail';
+  wrap.className = 'card mb-6';
+  wrap.innerHTML = `
+    <div class="card-header">
+      <h3 class="card-title">Pipeline 詳細</h3>
+      <span class="text-xs text-dark-400">每個 source 列出 Blend / Stack / 各模型 OOF 分數</span>
+    </div>
+    <div class="grid grid-cols-1 ${results.length > 1 ? 'lg:grid-cols-2' : ''} gap-4 p-4">
+      ${results.map(r => {
+        const label = r.dataSourceLabel || (r.dataSource === 'preprocessed' ? '預處理' : '原始');
+        const accent = r.dataSource === 'preprocessed' ? 'accent' : 'primary';
+        const bestEns = r.bestEnsemble === 'stack' ? 'Stack' : 'Blend';
+        const perModel = (r.perModel || []).filter(m => m.oofScore != null)
+          .sort((a, b) => (b.oofScore || 0) - (a.oofScore || 0));
+        return `
+          <div class="bg-dark-900/40 rounded-lg border border-${accent}-500/20 p-4">
+            <div class="flex items-center justify-between mb-3">
+              <p class="text-sm font-semibold text-${accent}-300">${escapeHtml(label)} 資料來源</p>
+              <span class="text-[10px] px-1.5 py-0.5 rounded bg-${accent}-500/15 text-${accent}-400">最佳: ${bestEns}</span>
+            </div>
+            <div class="grid grid-cols-3 gap-2 text-center mb-3">
+              <div>
+                <p class="text-[10px] text-dark-500">Blend</p>
+                <p class="text-sm font-mono ${r.bestEnsemble === 'blend' ? 'text-warning-300' : 'text-dark-300'}">${(r.scoreBlend ?? 0).toFixed(4)}</p>
+              </div>
+              <div>
+                <p class="text-[10px] text-dark-500">Stack</p>
+                <p class="text-sm font-mono ${r.bestEnsemble === 'stack' ? 'text-warning-300' : 'text-dark-300'}">${(r.scoreStack ?? 0).toFixed(4)}</p>
+              </div>
+              <div>
+                <p class="text-[10px] text-dark-500">耗時</p>
+                <p class="text-sm font-mono text-dark-200">${(r.elapsedSec ?? 0).toFixed(0)}s</p>
+              </div>
+            </div>
+            <p class="text-[10px] text-dark-500 mb-2 pb-2 border-b border-dark-700/50">
+              ${r.nTrain}/${r.nTest} · ${r.nClasses} class · ${r.nFeatures} features · ${escapeHtml(r.splitMode || '')} · ${escapeHtml(r.device || '')}
+            </p>
+            ${perModel.length ? `
+              <details>
+                <summary class="text-[11px] text-dark-400 cursor-pointer hover:text-dark-200">各模型 OOF (${perModel.length})</summary>
+                <div class="mt-2 space-y-1 max-h-48 overflow-y-auto">
+                  ${perModel.map(m => `
+                    <div class="flex items-center justify-between text-[11px]">
+                      <span class="font-mono text-dark-300 truncate" title="${escapeHtml(m.tag)}">${escapeHtml(m.tag)}</span>
+                      <span class="font-mono text-${accent}-300 ml-2 shrink-0">${(m.oofScore ?? 0).toFixed(4)}</span>
+                    </div>
+                  `).join('')}
+                </div>
+              </details>
+            ` : ''}
+          </div>
+        `;
+      }).join('')}
+    </div>
+  `;
+  // 插在訓練結果卡片下方
+  const resultsCard = document.getElementById('exp-results');
+  resultsCard.appendChild(wrap);
+}
+
+
+// Option B 專用 — 訓練時有上傳 predict.csv,訓練完顯示「下載 submission.csv」按鈕
+function insertPipelineSubmissionCard(results, runId) {
+  // 移除舊的 (重訓會重新插入)
+  document.getElementById('exp-pipeline-submission')?.remove();
+
+  const withSubmission = (results || []).filter(r => r.submissionAvailable && r.submissionKind);
+  if (withSubmission.length === 0 || !runId) return;
+  // 不確定 ApiClient 是否啟用
+  const apiBase = (typeof ApiClient !== 'undefined' && ApiClient.baseUrl) ? ApiClient.baseUrl : '';
+  if (!apiBase) return;
+
+  const wrap = document.createElement('div');
+  wrap.id = 'exp-pipeline-submission';
+  wrap.className = 'card mb-6 border border-warning-500/30';
+  wrap.innerHTML = `
+    <div class="card-header">
+      <h3 class="card-title flex items-center gap-2">
+        <svg class="w-4 h-4 text-warning-400"><use href="#i-download"/></svg>
+        預測結果下載 (submission.csv)
+      </h3>
+      <span class="text-xs text-dark-400">${withSubmission.length} 個 source 已產出</span>
+    </div>
+    <div class="p-4 space-y-2">
+      <p class="text-[11px] text-dark-400 leading-relaxed">
+        每筆預測 CSV 第一欄當 ID,接上預測標籤 → 可直接交 Kaggle / 其他評分系統。
+      </p>
+      <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
+        ${withSubmission.map(r => {
+          const label = r.dataSourceLabel || (r.dataSource === 'preprocessed' ? '預處理' : (r.dataSource === 'raw' ? '原始' : '上傳'));
+          const accent = r.dataSource === 'preprocessed' ? 'accent' : 'primary';
+          return `
+            <a href="${apiBase}/api/train/pipeline/runs/${encodeURIComponent(runId)}/submission?kind=${encodeURIComponent(r.submissionKind)}"
+               class="flex items-center justify-between p-3 rounded-lg bg-dark-800/60 hover:bg-dark-800 border border-${accent}-500/20 hover:border-${accent}-500/50 transition-colors group"
+               download="submission_${encodeURIComponent(r.dataSource)}.csv">
+              <div class="flex-1 min-w-0">
+                <p class="text-sm font-medium text-${accent}-300">${escapeHtml(label)} 來源</p>
+                <p class="text-[10px] text-dark-500 mt-0.5">submission_${escapeHtml(r.dataSource)}.csv</p>
+              </div>
+              <svg class="w-4 h-4 text-dark-400 group-hover:text-${accent}-300 ml-2 shrink-0"><use href="#i-download"/></svg>
+            </a>
+          `;
+        }).join('')}
+      </div>
+    </div>
+  `;
+  const resultsCard = document.getElementById('exp-results');
+  resultsCard.appendChild(wrap);
+}
+
+
 function renderExperimentResults(models, data) {
   const isReg = data.taskType === 'regression';
+
+  // Daniel pipeline 跑出來的 model 沒有 per-feature importance / per-sample 預測 / 後端 estimator,
+  // 顯示這些區塊只會看到「不支援」訊息或空下拉,直接隱藏更乾淨。
+  const isPipelineRun = models.length > 0 && models.every(m => m.type === 'daniel_pipeline');
+  const togglePipelineSections = (hidden) => {
+    ['exp-chart-model-selector-wrap', 'exp-charts-row', 'exp-batch-predict-card'].forEach(id => {
+      const el = document.getElementById(id);
+      if (el) el.classList.toggle('hidden', hidden);
+    });
+  };
+  togglePipelineSections(isPipelineRun);
 
   // Table headers
   if (isReg) {
@@ -3493,8 +4259,8 @@ function initBatchPredict(models) {
   const statusEl = document.getElementById('batch-predict-status');
   if (!modelSel || !btn) return;
 
-  // 只列有 id 的模型 (訓練成功、後端有存)
-  const usable = models.filter(m => m.id);
+  // 只列有 id 且後端有對應 estimator 的模型 — Daniel pipeline 沒在 MODELS store,跳過
+  const usable = models.filter(m => m.id && m.type !== 'daniel_pipeline');
   modelSel.innerHTML = '';
   if (usable.length === 0) {
     modelSel.innerHTML = '<option value="">無可用模型 (需後端 API 模式訓練)</option>';
@@ -3564,6 +4330,15 @@ function renderExpFeatureImportance(model) {
   const chart = initChart('chart-exp-importance');
   if (!chart) return;
 
+  // Daniel pipeline 不提供 per-feature importance — 顯示提示文字
+  if (model.type === 'daniel_pipeline') {
+    chart.clear();
+    chart.setOption({
+      title: { text: 'Pipeline 不揭露單一特徵重要性', subtext: '內部做了 PCA / FFT / KMeans 等變換', left: 'center', top: '40%', textStyle: { color: '#94a3b8', fontSize: 12 }, subtextStyle: { color: '#64748b', fontSize: 10 } },
+    });
+    return;
+  }
+
   const names = model.featureNames || [];
   const values = model.featureImportance || [];
   // Sort descending
@@ -3593,6 +4368,17 @@ function renderExpFeatureImportance(model) {
 function renderExpPredictionChart(model, data) {
   const chart = initChart('chart-exp-scatter');
   if (!chart) return;
+
+  // Daniel pipeline 不回 testTrue/testPred per-sample,沒法畫散佈圖
+  if (model.type === 'daniel_pipeline' || !model.testTrue || model.testTrue.length === 0) {
+    chart.clear();
+    if (model.type === 'daniel_pipeline') {
+      chart.setOption({
+        title: { text: 'Pipeline 不回傳 per-sample 預測', subtext: '只回最終 ensemble 的 OOF + 測試分數', left: 'center', top: '40%', textStyle: { color: '#94a3b8', fontSize: 12 }, subtextStyle: { color: '#64748b', fontSize: 10 } },
+      });
+      return;
+    }
+  }
 
   if (data.taskType === 'regression') {
     // Scatter: predicted vs actual
@@ -4528,9 +5314,10 @@ function renderSystemNotificationsCard() {
   });
 }
 
+// 全域:當前的最近實驗 filter (空字串 = 不篩選)
+let _recentExpFilter = { datasetName: '', target: '' };
+
 function renderRecentExperimentsCard() {
-  // 找到 dashboard 上「最近實驗」卡片的 space-y-3 內容區
-  // 簡單作法:找第一個 card-title 文字是「最近實驗」的卡片
   const cards = document.querySelectorAll('#page-dashboard .card');
   let targetCard = null;
   cards.forEach(c => {
@@ -4540,12 +5327,27 @@ function renderRecentExperimentsCard() {
   if (!targetCard) return;
   const body = targetCard.querySelector('.space-y-3');
   if (!body) return;
+
+  // 套用篩選 — 永遠依時間新→舊排序
+  const filtered = _trainingHistory.filter(h => {
+    if (_recentExpFilter.datasetName && h.datasetName !== _recentExpFilter.datasetName) return false;
+    if (_recentExpFilter.target && h.target !== _recentExpFilter.target) return false;
+    return true;
+  });
+
+  // 同步更新兩個下拉選單的選項 (datasets / targets) — 從整個歷史抓 unique
+  syncRecentExperimentFilters();
+
   body.innerHTML = '';
-  if (_trainingHistory.length === 0) {
-    body.innerHTML = '<p class="text-xs text-dark-500 py-6 text-center">尚未有訓練紀錄</p>';
+  if (filtered.length === 0) {
+    const emptyMsg = _trainingHistory.length === 0
+      ? '尚未有訓練紀錄'
+      : '篩選條件下沒有結果';
+    body.innerHTML = `<p class="text-xs text-dark-500 py-6 text-center">${emptyMsg}</p>`;
     return;
   }
-  _trainingHistory.slice(0, 5).forEach((h, i) => {
+
+  filtered.slice(0, 5).forEach((h, i) => {
     const elapsedMin = Math.floor((Date.now() - h.timestamp) / 60000);
     const elapsedStr = elapsedMin < 1 ? '剛剛' : elapsedMin < 60 ? `${elapsedMin} 分鐘前` : `${Math.floor(elapsedMin/60)} 小時前`;
     const isReg = h.taskType === 'regression';
@@ -4571,6 +5373,55 @@ function renderRecentExperimentsCard() {
   });
 }
 
+// 重新填兩個 filter 下拉 (datasets / targets),保留目前選的值
+function syncRecentExperimentFilters() {
+  const dsSel = document.getElementById('recent-exp-filter-ds');
+  const tgtSel = document.getElementById('recent-exp-filter-target');
+  if (!dsSel || !tgtSel) return;
+
+  // 一次性 wire listener
+  if (!dsSel.__wired) {
+    dsSel.__wired = true;
+    dsSel.addEventListener('change', () => {
+      _recentExpFilter.datasetName = dsSel.value;
+      renderRecentExperimentsCard();
+    });
+    tgtSel.addEventListener('change', () => {
+      _recentExpFilter.target = tgtSel.value;
+      renderRecentExperimentsCard();
+    });
+  }
+
+  // 從目前歷史抓 unique datasets / targets
+  const allDatasets = [...new Set(_trainingHistory.map(h => h.datasetName).filter(Boolean))];
+  // target 列表跟隨 dataset 篩選 — 選了 dataset 後 target 只列那個 dataset 出現過的
+  const targetPool = _recentExpFilter.datasetName
+    ? _trainingHistory.filter(h => h.datasetName === _recentExpFilter.datasetName)
+    : _trainingHistory;
+  const allTargets = [...new Set(targetPool.map(h => h.target).filter(Boolean))];
+
+  // 重建 options 但保留 selected value
+  const rebuildOptions = (sel, items, allLabel) => {
+    const cur = sel.value;
+    sel.innerHTML = `<option value="">${allLabel}</option>`;
+    items.forEach(v => {
+      const opt = document.createElement('option');
+      opt.value = v;
+      opt.textContent = v;
+      sel.appendChild(opt);
+    });
+    // 還原 selection (如果 value 還在新列表中)
+    if (cur && items.includes(cur)) sel.value = cur;
+    else { sel.value = ''; }
+  };
+  rebuildOptions(dsSel, allDatasets, '所有資料集');
+  rebuildOptions(tgtSel, allTargets, '所有 target');
+
+  // 同步 internal state 跟 DOM (處理「dataset 變了之後 target 不在新列表中」的情況)
+  if (dsSel.value !== _recentExpFilter.datasetName) _recentExpFilter.datasetName = dsSel.value;
+  if (tgtSel.value !== _recentExpFilter.target)    _recentExpFilter.target = tgtSel.value;
+}
+
 // ===== SYSTEM SETTINGS =====
 // ===== SETTINGS — 全域存取 =====
 // 預設值 (localStorage 沒有時用這套)
@@ -4587,7 +5438,7 @@ const DEFAULT_SETTINGS = {
                 'hist_gradient_boosting', 'xgboost', 'lightgbm', 'catboost',
                 'naive_bayes', 'logistic', 'svr', 'svc',
                 'voting', 'stacking'],
-  shapSamples: 200,
+  shapSamples: 50,
 };
 
 // 其他頁面要讀設定就呼叫這個 — 一律回傳完整物件 (缺的欄位用預設補)
@@ -4610,7 +5461,6 @@ function initSettings() {
   const algoContainer = document.getElementById('setting-algos-container');
   const saveBtn = document.getElementById('btn-save-settings');
   const resetBtn = document.getElementById('btn-reset-settings');
-  const toast = document.getElementById('settings-save-toast');
 
   // ---- API 區 (本來就有效,保留) ----
   const apiToggle = document.getElementById('setting-use-api');
@@ -4692,13 +5542,10 @@ function initSettings() {
         srcRaw: srcRawCb ? srcRawCb.checked : true,
         srcPp: srcPpCb ? srcPpCb.checked : false,
         activeAlgos: activeAlgos.slice(),
-        shapSamples: shapSamplesInput ? (parseInt(shapSamplesInput.value) || 200) : 200,
+        shapSamples: shapSamplesInput ? (parseInt(shapSamplesInput.value) || 50) : 50,
       };
       localStorage.setItem('automl_settings', JSON.stringify(cfg));
-      if (toast) {
-        toast.style.opacity = '1';
-        setTimeout(() => { toast.style.opacity = '0'; }, 2000);
-      }
+      showToast('設定已儲存', { type: 'success' });
     });
   }
 
@@ -4708,14 +5555,355 @@ function initSettings() {
       if (!confirm('確定要清除所有已儲存的設定,回到預設值嗎?')) return;
       localStorage.removeItem('automl_settings');
       applyToUI({ ...DEFAULT_SETTINGS });
-      if (toast) {
-        toast.textContent = '已重置為預設值';
-        toast.style.opacity = '1';
-        setTimeout(() => { toast.style.opacity = '0'; toast.textContent = '設定已儲存'; }, 2000);
-      }
+      showToast('已重置為預設值', { type: 'info' });
     });
   }
+
 }
+
+// ============================================================
+// PIPELINE PAGE (測試模式專用) — 跑 Daniel 的 AutoML pipeline
+// ============================================================
+
+// 9 個階段的卡片資料 — 對應 daniel_runner.py 的 _STAGE_PATTERNS
+const PIPELINE_STAGES = [
+  { id: 'scout',     label: 'Scout HPO',           desc: '單次 holdout 快篩弱模型',          pct: 5,  color: 'primary' },
+  { id: 'full-hpo',  label: 'Full HPO',            desc: 'Optuna TPE × 5-Fold CV',          pct: 15, color: 'primary' },
+  { id: 'nas',       label: 'MLP / TSNet NAS',     desc: 'OneShot 共享權重超網路',          pct: 35, color: 'accent'  },
+  { id: 'mlp-hpo',   label: 'MLP Training HPO',    desc: 'lr / dropout / wd 搜尋',          pct: 50, color: 'accent'  },
+  { id: 'cnn-hpo',   label: 'CNN1D / TCN HPO',     desc: '時序模式跑 TCN (擴張因果卷積)',   pct: 65, color: 'accent'  },
+  { id: 'tx-hpo',    label: 'Transformer HPO',     desc: '時序模式跑 PatchTST',             pct: 78, color: 'accent'  },
+  { id: '5fold',     label: '5-Fold CV',           desc: 'OOF + Test 預測 (含快取)',        pct: 88, color: 'warning' },
+  { id: 'blend',     label: 'Nelder-Mead Blend',   desc: 'log-space softmax 權重最佳化',    pct: 93, color: 'warning' },
+  { id: 'stack',     label: 'Meta-Learner Stack',  desc: 'OOF 拼接 → LGBM/XGB meta',        pct: 97, color: 'success' },
+];
+
+let _pipelineState = {
+  file: null,
+  running: false,
+  reader: null,         // ReadableStreamDefaultReader,給取消用
+  abortController: null,
+};
+
+function renderPipelinePage() {
+  renderPipelineStages();
+  loadPipelineBenchmark();
+}
+
+function renderPipelineStages() {
+  const wrap = document.getElementById('pipeline-stages');
+  if (!wrap) return;
+  // 已渲染過就不重複渲染 (狀態 class 由 progress 事件動態切)
+  if (wrap.children.length) return;
+  wrap.innerHTML = PIPELINE_STAGES.map((s, i) => `
+    <div class="pipeline-stage-card" data-stage="${s.id}" data-color="${s.color}">
+      <div class="pipeline-stage-num">${i + 1}</div>
+      <p class="pipeline-stage-label">${s.label}</p>
+      <p class="pipeline-stage-desc">${s.desc}</p>
+    </div>
+  `).join('');
+}
+
+function updateStageProgress(pct) {
+  // 依目前進度標亮對應 stage
+  document.querySelectorAll('.pipeline-stage-card').forEach(card => {
+    const stageId = card.dataset.stage;
+    const stage = PIPELINE_STAGES.find(s => s.id === stageId);
+    if (!stage) return;
+    card.classList.remove('pipeline-stage-active', 'pipeline-stage-done');
+    if (pct >= stage.pct + 8) card.classList.add('pipeline-stage-done');
+    else if (pct >= stage.pct - 2) card.classList.add('pipeline-stage-active');
+  });
+}
+
+async function loadPipelineBenchmark() {
+  const tbody = document.getElementById('pipeline-bench-tbody');
+  const meta = document.getElementById('pipeline-bench-meta');
+  if (!tbody) return;
+  if (typeof ApiClient === 'undefined' || !ApiClient.enabled) {
+    tbody.innerHTML = `<tr><td colspan="8" class="text-center py-6 text-xs text-dark-500">請先在系統設定開啟「使用 Python 後端 API」</td></tr>`;
+    if (meta) meta.textContent = '需要後端 API';
+    return;
+  }
+  tbody.innerHTML = `<tr><td colspan="8" class="text-center py-6 text-xs text-dark-500">載入中...</td></tr>`;
+  try {
+    const resp = await fetch(`${ApiClient.baseUrl}/api/train/pipeline/benchmark`);
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    const data = await resp.json();
+    renderBenchmarkRows(data.rows || []);
+    if (meta) meta.textContent = `${data.count || 0} 筆評估 (OpenML-CC18 + UCR 80)`;
+  } catch (e) {
+    tbody.innerHTML = `<tr><td colspan="8" class="text-center py-6 text-xs text-danger-400">載入失敗: ${escapeHtml(e.message)}</td></tr>`;
+    if (meta) meta.textContent = '載入失敗';
+  }
+}
+
+function renderBenchmarkRows(rows) {
+  const tbody = document.getElementById('pipeline-bench-tbody');
+  if (!tbody) return;
+  if (!rows.length) {
+    tbody.innerHTML = `<tr><td colspan="8" class="text-center py-6 text-xs text-dark-500">尚無評估結果</td></tr>`;
+    return;
+  }
+  // 依 dataset 配對 pipeline / baseline
+  const byDataset = {};
+  rows.forEach(r => {
+    const key = r.dataset;
+    byDataset[key] = byDataset[key] || { dataset: key, type: r.type };
+    byDataset[key][r.source] = r;
+  });
+  const html = Object.values(byDataset).map(grp => {
+    const p = grp.pipeline || {};
+    const b = grp.baseline || {};
+    const pF1 = p.f1_macro ?? null;
+    const bF1 = b.f1_macro ?? null;
+    const delta = (pF1 != null && bF1 != null) ? (pF1 - bF1) : null;
+    const dColor = delta == null ? 'text-dark-500'
+                  : delta > 0  ? 'text-success-400'
+                  :              'text-danger-400';
+    const dSign = delta == null ? '—' : (delta > 0 ? '+' : '') + delta.toFixed(4);
+    const typeColor = grp.type === 'TS' ? 'bg-warning-500/10 text-warning-300 border-warning-500/30'
+                                        : 'bg-primary-500/10 text-primary-300 border-primary-500/30';
+    return `
+      <tr class="border-b border-dark-700/30 hover:bg-dark-800/30">
+        <td class="py-2 px-4 font-mono text-xs">${escapeHtml(grp.dataset)}</td>
+        <td class="py-2 px-3"><span class="text-[10px] px-1.5 py-0.5 rounded border ${typeColor}">${grp.type || '—'}</span></td>
+        <td class="py-2 px-3 text-right text-xs text-dark-300">${p.n_train ?? '—'}</td>
+        <td class="py-2 px-3 text-right text-xs text-dark-300">${p.n_test ?? '—'}</td>
+        <td class="py-2 px-3 text-right font-mono text-warning-300">${pF1 != null ? pF1.toFixed(4) : '—'}</td>
+        <td class="py-2 px-3 text-right font-mono text-dark-300">${bF1 != null ? bF1.toFixed(4) : '—'}</td>
+        <td class="py-2 px-3 text-right font-mono ${dColor}">${dSign}</td>
+        <td class="py-2 px-3 text-right text-xs text-dark-400">${p.elapsed_s != null ? p.elapsed_s.toFixed(1) : '—'}</td>
+      </tr>
+    `;
+  }).join('');
+  tbody.innerHTML = html;
+}
+
+function initPipelinePage() {
+  // File picker
+  const zone = document.getElementById('pipeline-upload-zone');
+  const input = document.getElementById('pipeline-csv-input');
+  const label = document.getElementById('pipeline-file-label');
+  const meta = document.getElementById('pipeline-file-meta');
+  if (!zone || !input) return;
+
+  zone.addEventListener('click', () => input.click());
+  zone.addEventListener('dragover', e => { e.preventDefault(); zone.classList.add('drag-over'); });
+  zone.addEventListener('dragleave', () => zone.classList.remove('drag-over'));
+  zone.addEventListener('drop', e => {
+    e.preventDefault();
+    zone.classList.remove('drag-over');
+    const f = e.dataTransfer.files[0];
+    if (f) setPipelineFile(f);
+  });
+  input.addEventListener('change', () => {
+    if (input.files.length > 0) setPipelineFile(input.files[0]);
+  });
+
+  function setPipelineFile(f) {
+    _pipelineState.file = f;
+    if (label) label.textContent = f.name;
+    if (meta) meta.textContent = `${(f.size / 1024).toFixed(1)} KB · 點擊「執行 Pipeline」開始`;
+  }
+
+  // Run button
+  document.getElementById('btn-pipeline-run')?.addEventListener('click', runPipelineFlow);
+  document.getElementById('btn-pipeline-bench-reload')?.addEventListener('click', loadPipelineBenchmark);
+}
+
+async function runPipelineFlow() {
+  if (_pipelineState.running) {
+    showToast('Pipeline 正在執行中', { type: 'warning' });
+    return;
+  }
+  const file = _pipelineState.file;
+  if (!file) {
+    showToast('請先選擇 CSV 檔案', { type: 'warning' });
+    return;
+  }
+  if (typeof ApiClient === 'undefined' || !ApiClient.enabled) {
+    showToast('請先在系統設定開啟 Python 後端 API', { type: 'error' });
+    return;
+  }
+
+  // Reset UI
+  const runtime = document.getElementById('pipeline-runtime');
+  const logEl = document.getElementById('pipeline-log');
+  const bar = document.getElementById('pipeline-progress-bar');
+  const stepEl = document.getElementById('pipeline-progress-step');
+  const statusEl = document.getElementById('pipeline-status');
+  const runBtn = document.getElementById('btn-pipeline-run');
+  runtime?.classList.remove('hidden');
+  if (logEl) logEl.innerHTML = '';
+  if (bar) bar.style.width = '0%';
+  if (stepEl) stepEl.textContent = '上傳中...';
+  if (statusEl) statusEl.textContent = '執行中';
+  if (runBtn) { runBtn.disabled = true; runBtn.textContent = '執行中...'; }
+  updateStageProgress(0);
+  _pipelineState.running = true;
+
+  const form = new FormData();
+  form.append('file', file);
+  const target = document.getElementById('pipeline-target')?.value.trim();
+  if (target) form.append('target', target);
+  form.append('timeSeries', document.getElementById('pipeline-ts')?.checked ? 'true' : 'false');
+  form.append('metric', document.getElementById('pipeline-metric')?.value || 'f1');
+  form.append('fast', document.getElementById('pipeline-fast')?.checked ? 'true' : 'false');
+  form.append('timeLimit', document.getElementById('pipeline-time-limit')?.value || '0');
+  form.append('skipDl', document.getElementById('pipeline-skip-dl')?.checked ? 'true' : 'false');
+  form.append('noNas', document.getElementById('pipeline-no-nas')?.checked ? 'true' : 'false');
+
+  try {
+    const ctrl = new AbortController();
+    _pipelineState.abortController = ctrl;
+    const headers = {};
+    if (typeof AuthClient !== 'undefined' && AuthClient.token) {
+      headers['Authorization'] = `Bearer ${AuthClient.token}`;
+    }
+    const resp = await fetch(`${ApiClient.baseUrl}/api/train/pipeline/stream`, {
+      method: 'POST', body: form, headers, signal: ctrl.signal,
+    });
+    if (!resp.ok) throw new Error(`HTTP ${resp.status} ${resp.statusText}`);
+
+    // SSE parse
+    const reader = resp.body.getReader();
+    _pipelineState.reader = reader;
+    const decoder = new TextDecoder('utf-8');
+    let buf = '';
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      // 每段以 "\n\n" 分隔
+      let idx;
+      while ((idx = buf.indexOf('\n\n')) !== -1) {
+        const chunk = buf.slice(0, idx);
+        buf = buf.slice(idx + 2);
+        for (const line of chunk.split('\n')) {
+          if (!line.startsWith('data: ')) continue;
+          let ev;
+          try { ev = JSON.parse(line.slice(6)); } catch { continue; }
+          handlePipelineEvent(ev);
+        }
+      }
+    }
+  } catch (e) {
+    appendPipelineLog(`連線中斷: ${e.message}`, 'error');
+    showToast('Pipeline 中斷', { type: 'error', msg: e.message });
+  } finally {
+    _pipelineState.running = false;
+    _pipelineState.abortController = null;
+    _pipelineState.reader = null;
+    if (runBtn) { runBtn.disabled = false; runBtn.innerHTML = '<svg class="w-4 h-4"><use href="#i-arrow-right"/></svg>執行 Pipeline'; }
+    if (statusEl) statusEl.textContent = '完成';
+  }
+}
+
+function handlePipelineEvent(ev) {
+  if (ev.type === 'log') {
+    appendPipelineLog(ev.msg, ev.level || 'info');
+  } else if (ev.type === 'progress') {
+    const bar = document.getElementById('pipeline-progress-bar');
+    const step = document.getElementById('pipeline-progress-step');
+    if (bar) bar.style.width = `${ev.pct}%`;
+    if (step) step.textContent = `${ev.step} (${ev.pct}%)`;
+    updateStageProgress(ev.pct);
+  } else if (ev.type === 'done') {
+    appendPipelineLog('Pipeline 完成', 'success');
+    // endpoint 統一回傳 results: [],測試模式單一 upload 也是 list 長度 1
+    const results = ev.results || (ev.result ? [ev.result] : []);
+    const r = results[0] || {};
+    renderPipelineResult(r);
+    showToast('Pipeline 完成', { type: 'success', msg: `bestScore=${r.bestScore ?? '—'}` });
+  } else if (ev.type === 'error') {
+    appendPipelineLog(`錯誤: ${ev.message}`, 'error');
+    showToast('Pipeline 失敗', { type: 'error', msg: ev.message });
+  }
+}
+
+function appendPipelineLog(msg, level = 'info') {
+  const logEl = document.getElementById('pipeline-log');
+  if (!logEl) return;
+  const colorMap = {
+    info:    'text-dark-300',
+    muted:   'text-dark-500',
+    success: 'text-success-300',
+    warning: 'text-warning-300',
+    error:   'text-danger-300',
+  };
+  const p = document.createElement('p');
+  p.className = colorMap[level] || colorMap.info;
+  p.textContent = msg;
+  logEl.appendChild(p);
+  logEl.scrollTop = logEl.scrollHeight;
+  // 防爆:超過 500 行就 trim 前面
+  if (logEl.children.length > 500) {
+    while (logEl.children.length > 400) logEl.removeChild(logEl.firstChild);
+  }
+}
+
+function renderPipelineResult(r) {
+  const panel = document.getElementById('pipeline-result-panel');
+  const metricEl = document.getElementById('pipeline-result-metric');
+  if (!panel) return;
+  if (!r.ok) {
+    panel.innerHTML = `
+      <div class="text-center py-6">
+        <p class="text-xs text-danger-400 uppercase tracking-wider mb-2">執行失敗</p>
+        <p class="text-sm text-dark-300">${escapeHtml(r.error || '未知錯誤')}</p>
+      </div>`;
+    if (metricEl) metricEl.textContent = '失敗';
+    return;
+  }
+  if (metricEl) metricEl.textContent = r.metric || '—';
+  const perModel = (r.perModel || []).filter(m => m.oofScore != null)
+    .sort((a, b) => (b.oofScore || 0) - (a.oofScore || 0));
+  panel.innerHTML = `
+    <div class="text-center">
+      <p class="text-[10px] text-dark-500 uppercase tracking-wider mb-1">Best (${escapeHtml(r.metric || 'score')})</p>
+      <p class="text-5xl font-bold text-warning-300 mb-2 leading-none">${(r.bestScore ?? 0).toFixed(4)}</p>
+      <div class="flex items-center justify-center gap-3 text-[11px] mt-3">
+        <span class="text-dark-400">Blend</span><span class="font-mono text-dark-200">${(r.scoreBlend ?? 0).toFixed(4)}</span>
+        <span class="text-dark-600">|</span>
+        <span class="text-dark-400">Stack</span><span class="font-mono text-dark-200">${(r.scoreStack ?? 0).toFixed(4)}</span>
+      </div>
+    </div>
+    <div class="grid grid-cols-3 gap-2 text-center pt-3 border-t border-dark-700/50">
+      <div>
+        <p class="text-[10px] text-dark-500">Accuracy</p>
+        <p class="text-sm font-mono text-dark-100">${(r.accuracy ?? 0).toFixed(4)}</p>
+      </div>
+      <div>
+        <p class="text-[10px] text-dark-500">F1</p>
+        <p class="text-sm font-mono text-dark-100">${(r.f1 ?? 0).toFixed(4)}</p>
+      </div>
+      <div>
+        <p class="text-[10px] text-dark-500">耗時</p>
+        <p class="text-sm font-mono text-dark-100">${(r.elapsedSec ?? 0).toFixed(0)}s</p>
+      </div>
+    </div>
+    <div class="text-[10px] text-dark-500 space-y-0.5 pt-3 border-t border-dark-700/50">
+      <p>target: <code class="text-dark-300">${escapeHtml(r.target || '—')}</code></p>
+      <p>split: ${escapeHtml(r.splitMode || '—')} · ${r.nTrain}/${r.nTest} · ${r.nClasses} class · ${r.nFeatures} features</p>
+      <p>device: ${escapeHtml(r.device || '—')}</p>
+    </div>
+    ${perModel.length ? `
+      <details class="pt-3 border-t border-dark-700/50">
+        <summary class="text-[11px] text-dark-400 cursor-pointer hover:text-dark-200">各模型 OOF 分數 (${perModel.length})</summary>
+        <div class="mt-2 space-y-1 max-h-40 overflow-y-auto">
+          ${perModel.map(m => `
+            <div class="flex items-center justify-between text-[11px]">
+              <span class="font-mono text-dark-300 truncate" title="${escapeHtml(m.tag)}">${escapeHtml(m.tag)}</span>
+              <span class="font-mono text-warning-300 ml-2 shrink-0">${(m.oofScore ?? 0).toFixed(4)}</span>
+            </div>
+          `).join('')}
+        </div>
+      </details>
+    ` : ''}
+  `;
+}
+
 
 // ===== EXPOSE navigateTo globally =====
 window.navigateTo = navigateTo;

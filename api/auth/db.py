@@ -12,8 +12,11 @@ import os
 from contextlib import contextmanager
 from datetime import datetime
 
-from sqlalchemy import Column, DateTime, Integer, String, create_engine
-from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
+from sqlalchemy import (
+    Boolean, Column, DateTime, Float, ForeignKey, Integer,
+    LargeBinary, String, Text, create_engine, Index,
+)
+from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker, relationship
 
 
 def _get_database_url() -> str:
@@ -67,6 +70,95 @@ class User(Base):
             "avatarUrl": self.avatar_url,
             "createdAt": self.created_at.isoformat() if self.created_at else None,
         }
+
+
+# ============================================================
+# ML state tables — authed users 的 dataset / preprocessor / model / 訓練紀錄
+# Guests 走 api/store.py 的 in-memory dict,不會碰這些表
+# ============================================================
+
+class Dataset(Base):
+    __tablename__ = "datasets"
+    id              = Column(String(36), primary_key=True)
+    user_id         = Column(Integer, ForeignKey("users.id"), index=True, nullable=False)
+    file_name       = Column(String(255))
+    row_count       = Column(Integer)
+    col_count       = Column(Integer)
+    headers_json    = Column(Text)                     # JSON list of column names
+    csv_blob        = Column(LargeBinary)              # 原始 CSV bytes (使用時 pd.read_csv 還原)
+    analysis_json   = Column(Text, nullable=True)      # 欄位 type / missing / unique 等快取
+    extras_json     = Column(Text, nullable=True)      # health_score, correlation, processing_log
+    created_at      = Column(DateTime, default=datetime.utcnow, index=True, nullable=False)
+
+    __table_args__ = (Index("ix_datasets_user_created", "user_id", "created_at"),)
+
+
+class Preprocessor(Base):
+    __tablename__ = "preprocessors"
+    id              = Column(String(36), primary_key=True)
+    user_id         = Column(Integer, ForeignKey("users.id"), index=True, nullable=False)
+    dataset_id      = Column(String(36), ForeignKey("datasets.id"), index=True)
+    target          = Column(String(120))
+    test_size       = Column(Float, default=0.2)
+    feature_names_json = Column(Text)
+    preprocessor_pkl   = Column(LargeBinary)           # pickled sklearn ColumnTransformer
+    train_test_pkl     = Column(LargeBinary)           # pickled tuple (X_tr_df, X_te_df, y_tr, y_te)
+    created_at      = Column(DateTime, default=datetime.utcnow, index=True, nullable=False)
+
+
+class Model(Base):  # sklearn 引擎用;pipeline 不存到這裡 (沒保留 trained estimator)
+    __tablename__ = "models"
+    id              = Column(String(36), primary_key=True)
+    user_id         = Column(Integer, ForeignKey("users.id"), index=True, nullable=False)
+    dataset_id      = Column(String(36), index=True, nullable=True)
+    preprocessor_id = Column(String(36), index=True, nullable=True)
+    training_run_id = Column(String(36), ForeignKey("training_runs.id"), index=True, nullable=True)
+    algorithm       = Column(String(50))               # 'xgboost', 'random_forest', ...
+    name            = Column(String(120))              # 顯示用
+    data_source     = Column(String(20))               # 'raw' | 'preprocessed'
+    task_type       = Column(String(20))               # 'classification' | 'regression'
+    target          = Column(String(120))
+    bundle_json     = Column(Text)                     # metrics + featureNames + importance + testTrue/Pred
+    hyperparameters_json = Column(Text, nullable=True) # estimator.get_params() 結果
+    estimator_pkl   = Column(LargeBinary)              # pickled estimator
+    scaler_pkl      = Column(LargeBinary)              # pickled StandardScaler
+    x_test_pkl      = Column(LargeBinary, nullable=True)  # for SHAP visualizer
+    feature_names_json = Column(Text)
+    test_score      = Column(Float, index=True)        # 排序用
+    train_time_ms   = Column(Float)
+    created_at      = Column(DateTime, default=datetime.utcnow, index=True, nullable=False)
+
+
+class TrainingRun(Base):  # sklearn + pipeline 兩個引擎共用
+    __tablename__ = "training_runs"
+    id              = Column(String(36), primary_key=True)
+    user_id         = Column(Integer, ForeignKey("users.id"), index=True, nullable=False)
+    dataset_id      = Column(String(36), index=True)
+    dataset_name    = Column(String(255))              # 冗餘存,方便 list 顯示
+    engine          = Column(String(20), index=True)   # 'sklearn' | 'pipeline'
+    target          = Column(String(120), index=True)
+    task_type       = Column(String(20))
+    sources_json    = Column(Text)                     # ["raw", "preprocessed"]
+    options_json    = Column(Text)                     # 完整訓練設定,給 reproduce 用
+    results_summary_json = Column(Text)                # sklearn: top model names + scores / pipeline: per-source
+    model_ids_json  = Column(Text, nullable=True)      # sklearn 才有 (對應 Model.id 列表)
+    status          = Column(String(20))               # 'running' | 'completed' | 'failed'
+    error_msg       = Column(Text, nullable=True)
+    has_predictions = Column(Boolean, default=False)   # pipeline option B 上傳了 test.csv
+    started_at      = Column(DateTime, default=datetime.utcnow, index=True, nullable=False)
+    finished_at     = Column(DateTime, nullable=True)
+    elapsed_sec     = Column(Float, nullable=True)
+
+
+class PredictionArtifact(Base):  # pipeline Option B 的 test.csv 輸入 + 預測輸出
+    __tablename__ = "prediction_artifacts"
+    id              = Column(String(36), primary_key=True)
+    training_run_id = Column(String(36), ForeignKey("training_runs.id"), index=True, nullable=False)
+    user_id         = Column(Integer, ForeignKey("users.id"), index=True, nullable=False)
+    kind            = Column(String(20))               # 'input' | 'submission' | 'submission_proba'
+    file_name       = Column(String(255))
+    content_blob    = Column(LargeBinary)              # CSV bytes,直接存 DB
+    created_at      = Column(DateTime, default=datetime.utcnow, nullable=False)
 
 
 def init_db() -> None:

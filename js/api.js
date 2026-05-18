@@ -156,9 +156,14 @@ const ApiClient = {
   // onEvent: callback({type, ...}) — type 可能是 'progress' | 'log' | 'done' | 'error'
   // 回傳 promise,完成時 resolve 為 done 事件中的 models 陣列
   async trainStream(payload, onEvent) {
+    // 帶 Authorization header — 不然後端會把 request 當 guest,結果寫到 in-memory dict 而不是 DB
+    const headers = { 'Content-Type': 'application/json' };
+    if (typeof AuthClient !== 'undefined' && AuthClient.token) {
+      headers['Authorization'] = `Bearer ${AuthClient.token}`;
+    }
     const r = await fetch(`${this.baseUrl}/api/train/stream`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers,
       body: JSON.stringify(payload),
     });
     if (!r.ok || !r.body) throw new Error(`trainStream 失敗 (${r.status}): ${await r.text()}`);
@@ -166,8 +171,30 @@ const ApiClient = {
     const reader = r.body.getReader();
     const decoder = new TextDecoder('utf-8');
     let buffer = '';
-    let finalModels = null;
+    const collectedModels = [];   // 從 'model' 事件累積
+    let finalModels = null;        // 'done' 來臨時定型
+    let legacyModels = null;       // 後端若還是用舊版單一 done 事件 (含整個 models 陣列) 的 fallback
     let errorMsg = null;
+
+    const parseAndDispatch = (json) => {
+      let ev;
+      try { ev = JSON.parse(json); }
+      catch (e) {
+        console.warn('[trainStream] JSON.parse 失敗,skip:', e.message, json.slice(0, 100));
+        return;
+      }
+      if (ev.type === 'model' && ev.bundle) {
+        collectedModels.push(ev.bundle);
+      } else if (ev.type === 'done') {
+        // 新版:done 只是 sentinel,models 從 collectedModels 取
+        // 舊版相容:若 done 帶 models 陣列,直接吃下來
+        if (Array.isArray(ev.models)) legacyModels = ev.models;
+        finalModels = legacyModels && legacyModels.length ? legacyModels : collectedModels;
+      } else if (ev.type === 'error') {
+        errorMsg = ev.message || 'unknown';
+      }
+      if (onEvent) onEvent(ev);
+    };
 
     while (true) {
       const { value, done } = await reader.read();
@@ -181,15 +208,17 @@ const ApiClient = {
         if (!line.startsWith('data:')) continue;
         const json = line.slice(5).trim();
         if (!json) continue;
-        try {
-          const ev = JSON.parse(json);
-          if (ev.type === 'done') finalModels = ev.models || [];
-          else if (ev.type === 'error') errorMsg = ev.message || 'unknown';
-          if (onEvent) onEvent(ev);
-        } catch (e) { /* ignore parse errors */ }
+        parseAndDispatch(json);
       }
     }
+    // 連線結束時 flush 殘留 buffer (有時最後一個 chunk 沒 \n\n 收尾)
+    if (buffer.trim().startsWith('data:')) {
+      parseAndDispatch(buffer.trim().slice(5).trim());
+    }
+
     if (errorMsg) throw new Error(errorMsg);
+    // 沒 done 但有 collectedModels 也算成功
+    if (finalModels === null && collectedModels.length > 0) finalModels = collectedModels;
     return finalModels || [];
   },
 };
