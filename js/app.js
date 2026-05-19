@@ -3429,6 +3429,36 @@ function renderRealExperimentsPage() {
   updateTargetInfo();
   buildAlgoCheckboxes();
 
+  // --- 數據模式 radio (靜態/時序) 跟 #exp-time-series checkbox 雙向同步 ---
+  // radio 是視覺主控,checkbox 是 JS 讀的單一真實來源
+  const tsCheckbox = document.getElementById('exp-time-series');
+  const dataModeRadios = document.querySelectorAll('input[name="data-mode"]');
+  const dataModeLabels = document.querySelectorAll('.exp-data-mode-opt');
+  const refreshDataModeVisual = (isTS) => {
+    dataModeLabels.forEach(lbl => {
+      const active = (lbl.dataset.mode === 'timeseries') === isTS;
+      lbl.classList.toggle('bg-primary-500/10', active);
+      lbl.classList.toggle('border-primary-500/30', active);
+      lbl.classList.toggle('bg-dark-800', !active);
+      lbl.classList.toggle('border-dark-600', !active);
+    });
+    dataModeRadios.forEach(r => {
+      r.checked = (r.value === 'timeseries') === isTS;
+    });
+  };
+  // radio change → 寫進 checkbox + 視覺
+  dataModeRadios.forEach(r => r.addEventListener('change', () => {
+    const isTS = r.value === 'timeseries' && r.checked;
+    if (tsCheckbox) tsCheckbox.checked = isTS;
+    refreshDataModeVisual(isTS);
+  }));
+  // checkbox change → 同步 radio + 視覺
+  if (tsCheckbox) {
+    tsCheckbox.addEventListener('change', () => refreshDataModeVisual(tsCheckbox.checked));
+    // init: radio 跟 checkbox 對齊
+    refreshDataModeVisual(tsCheckbox.checked);
+  }
+
   // --- Data source (multi-select) ---
   const srcRaw = document.getElementById('exp-src-raw');
   const srcPp = document.getElementById('exp-src-pp');
@@ -3636,33 +3666,52 @@ function renderRealExperimentsPage() {
 }
 
 // 訓練按鈕狀態機 — 用單一函式集中管理,避免切頁時 cloneNode 把舊參考孤立掉
-let _trainingState = 'idle'; // 'idle' | 'training' | 'completed' | 'failed'
+let _trainingState = 'idle'; // 'idle' | 'training' | 'completed' | 'failed' | 'cancelling'
+// 訓練中持有 AbortController,點「取消」呼叫 abort() 後 fetch 拋 AbortError,
+// 後端 event_stream 偵測到 GeneratorExit 會 set cancel_token 並終止 subprocess
+let _trainingAbort = null;
+
+function cancelCurrentTraining() {
+  if (!_trainingAbort) return;
+  try { _trainingAbort.abort(); } catch (e) {}
+  setTrainBtnState('cancelling');
+}
+window.cancelCurrentTraining = cancelCurrentTraining;
 
 function setTrainBtnState(state) {
   _trainingState = state;
   const btn = document.getElementById('btn-real-train');
   if (!btn) return;
   const spinner = '<div class="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin inline-block mr-2"></div>';
+  // 切換 state 時把 onclick 重置成正常開始訓練 (除了 training 狀態要綁取消)
+  btn.onclick = null;
   switch (state) {
     case 'training':
-      btn.innerHTML = spinner + '訓練中...';
+      btn.innerHTML = '<svg class="w-4 h-4 inline-block mr-1.5 align-text-bottom"><use href="#i-close"/></svg>取消訓練';
+      btn.disabled = false;
+      btn.classList.remove('opacity-75');
+      btn.classList.add('!bg-danger-600', 'hover:!bg-danger-500');
+      btn.onclick = (e) => { e.preventDefault(); e.stopPropagation(); cancelCurrentTraining(); };
+      break;
+    case 'cancelling':
+      btn.innerHTML = spinner + '取消中...';
       btn.disabled = true;
       btn.classList.add('opacity-75');
       break;
     case 'completed':
       btn.innerHTML = '重新訓練';
       btn.disabled = false;
-      btn.classList.remove('opacity-75');
+      btn.classList.remove('opacity-75', '!bg-danger-600', 'hover:!bg-danger-500');
       break;
     case 'failed':
       btn.innerHTML = '重試訓練';
       btn.disabled = false;
-      btn.classList.remove('opacity-75');
+      btn.classList.remove('opacity-75', '!bg-danger-600', 'hover:!bg-danger-500');
       break;
     default: // 'idle'
       btn.innerHTML = '開始訓練';
       btn.disabled = false;
-      btn.classList.remove('opacity-75');
+      btn.classList.remove('opacity-75', '!bg-danger-600', 'hover:!bg-danger-500');
   }
 }
 
@@ -3705,6 +3754,7 @@ async function startRealTraining(ds, targetCol, options = {}) {
     let models, data;
     if (typeof ApiClient !== 'undefined' && ApiClient.enabled) {
       addLog('使用 Python 後端 API 進行訓練 (SSE 即時推送)...', 'info');
+      _trainingAbort = new AbortController();
       models = await ApiClient.trainStream({
         datasetId: ds.id,
         target: targetCol,
@@ -3724,7 +3774,7 @@ async function startRealTraining(ds, targetCol, options = {}) {
         } else if (ev.type === 'progress') {
           onProgress({ type: 'progress', pct: ev.pct, step: ev.step });
         }
-      });
+      }, _trainingAbort.signal);
       MLEngine.trainedModels = models;
       data = { taskType: models[0]?.taskType || 'regression', target: targetCol };
     } else {
@@ -3810,10 +3860,19 @@ async function startRealTraining(ds, targetCol, options = {}) {
     );
 
   } catch (err) {
-    addLog(`錯誤: ${err.message}`, 'error');
-    setTrainBtnState('failed');
-    setGlobalStatus('error', '訓練發生錯誤');
-    notify('訓練發生錯誤', err.message, 'error');
+    if (err.name === 'AbortError' || /aborted|abort/i.test(err.message || '')) {
+      addLog('已取消訓練', 'warning');
+      setTrainBtnState('idle');
+      setGlobalStatus('idle', '已取消訓練');
+      notify('訓練已取消', '已停止當前訓練', 'warning');
+    } else {
+      addLog(`錯誤: ${err.message}`, 'error');
+      setTrainBtnState('failed');
+      setGlobalStatus('error', '訓練發生錯誤');
+      notify('訓練發生錯誤', err.message, 'error');
+    }
+  } finally {
+    _trainingAbort = null;
   }
 }
 
@@ -3876,8 +3935,10 @@ async function startDanielExperimentTraining(ds, targetCol, options) {
       headers['Authorization'] = `Bearer ${AuthClient.token}`;
     }
 
+    // 建立 AbortController,讓「取消訓練」按鈕能 abort fetch (後端會收到 GeneratorExit)
+    _trainingAbort = new AbortController();
     const resp = await fetch(`${ApiClient.baseUrl}/api/train/pipeline/stream`, {
-      method: 'POST', body: form, headers,
+      method: 'POST', body: form, headers, signal: _trainingAbort.signal,
     });
     if (!resp.ok) throw new Error(`HTTP ${resp.status} ${resp.statusText}`);
 
@@ -3989,10 +4050,20 @@ async function startDanielExperimentTraining(ds, targetCol, options) {
     );
 
   } catch (err) {
-    addLog(`錯誤: ${err.message}`, 'error');
-    setTrainBtnState('failed');
-    setGlobalStatus('error', 'Pipeline 失敗');
-    notify('Pipeline 失敗', err.message, 'error');
+    // 使用者按取消 → 不算錯誤,只是取消
+    if (err.name === 'AbortError' || /aborted|abort/i.test(err.message || '')) {
+      addLog('已取消訓練 — 後端 subprocess 已終止', 'warning');
+      setTrainBtnState('idle');
+      setGlobalStatus('idle', '已取消訓練');
+      notify('Pipeline 已取消', '訓練被使用者中止', 'warning');
+    } else {
+      addLog(`錯誤: ${err.message}`, 'error');
+      setTrainBtnState('failed');
+      setGlobalStatus('error', 'Pipeline 失敗');
+      notify('Pipeline 失敗', err.message, 'error');
+    }
+  } finally {
+    _trainingAbort = null;
   }
 }
 

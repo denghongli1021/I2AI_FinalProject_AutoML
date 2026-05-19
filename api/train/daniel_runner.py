@@ -80,6 +80,7 @@ def run_pipeline(
     train_csv_bytes: bytes | None = None,
     test_csv_bytes: bytes | None = None,
     train_file_name: str | None = None,
+    cancel_token=None,   # threading.Event;set 後立刻 terminate subprocess
 ) -> dict[str, Any]:
     """
     兩種模式擇一:
@@ -163,9 +164,28 @@ def run_pipeline(
         env=env,
     )
 
+    cancelled = False
     try:
         assert proc.stdout is not None
-        for raw_line in proc.stdout:
+        # 用 readline 而非 for loop,才能在每行之間檢查 cancel_token
+        while True:
+            if cancel_token is not None and cancel_token.is_set():
+                cancelled = True
+                _emit({"type": "log", "msg": "收到取消訊號,終止 pipeline subprocess...", "level": "warning"})
+                try: proc.terminate()
+                except Exception: pass
+                # 給 1.5 秒收尾,還沒死就 kill
+                try: proc.wait(timeout=1.5)
+                except Exception:
+                    try: proc.kill()
+                    except Exception: pass
+                break
+            raw_line = proc.stdout.readline()
+            if not raw_line:
+                # EOF (subprocess 已結束)
+                if proc.poll() is not None:
+                    break
+                continue
             line = raw_line.rstrip("\r\n")
             if not line:
                 continue
@@ -180,11 +200,16 @@ def run_pipeline(
             if progress is not None:
                 pct, step = progress
                 _emit({"type": "progress", "pct": pct, "step": step})
-        proc.wait()
+        if not cancelled:
+            proc.wait()
     finally:
         for p in tmp_files:
             try: os.unlink(p)
             except Exception: pass
+
+    if cancelled:
+        return {"ok": False, "cancelled": True, "error": "使用者取消訓練",
+                "elapsedSec": round(time.time() - t0, 2)}
 
     elapsed = round(time.time() - t0, 2)
     if result_dict is None:

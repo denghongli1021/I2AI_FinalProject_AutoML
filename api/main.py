@@ -13,6 +13,7 @@ AutoML Backend API — Routes only
 
 from __future__ import annotations
 
+import asyncio
 import json
 import platform
 import queue
@@ -709,6 +710,7 @@ async def train_pipeline_stream_endpoint(
         q: queue.Queue = queue.Queue()
         all_results: list[dict[str, Any]] = []
         error_msg: str | None = None
+        cancel_token = threading.Event()   # 前端 SSE 斷線時 set,worker 偵測後 terminate subprocess
 
         def prefix(ev, label):
             if not multi:
@@ -738,6 +740,8 @@ async def train_pipeline_stream_endpoint(
                 for job in jobs:
                     label = job["label"]
                     on_prog = lambda ev, _label=label: q.put(prefix(ev, _label))
+                    if cancel_token.is_set():
+                        break
                     if "train_csv_bytes" in job:
                         r = run_daniel_pipeline(
                             train_csv_bytes=job["train_csv_bytes"],
@@ -745,6 +749,7 @@ async def train_pipeline_stream_endpoint(
                             train_file_name=job["train_file_name"],
                             options=job["options"],
                             on_progress=on_prog,
+                            cancel_token=cancel_token,
                         )
                     else:
                         r = run_daniel_pipeline(
@@ -752,6 +757,7 @@ async def train_pipeline_stream_endpoint(
                             file_name=job["file_name"],
                             options=job["options"],
                             on_progress=on_prog,
+                            cancel_token=cancel_token,
                         )
                     r["dataSource"] = job["source"]
                     r["dataSourceLabel"] = label
@@ -783,13 +789,23 @@ async def train_pipeline_stream_endpoint(
             finally:
                 q.put(None)
 
-        threading.Thread(target=worker, daemon=True).start()
+        worker_thread = threading.Thread(target=worker, daemon=True)
+        worker_thread.start()
 
-        while True:
-            ev = q.get()
-            if ev is None:
-                break
-            yield f"data: {json.dumps(ev, ensure_ascii=False)}\n\n"
+        try:
+            while True:
+                ev = q.get()
+                if ev is None:
+                    break
+                yield f"data: {json.dumps(ev, ensure_ascii=False)}\n\n"
+        except (GeneratorExit, asyncio.CancelledError):
+            # 前端 SSE 斷線 (取消訓練 / 關分頁) → 告知 worker 立刻收尾
+            cancel_token.set()
+            try: storage.finish_training_run(pipeline_run_id, user, db,
+                                             status="failed", error_msg="使用者取消",
+                                             elapsed_sec=round(time.time() - t_start, 2))
+            except Exception: pass
+            raise
 
         elapsed = round(time.time() - t_start, 2)
         if error_msg:

@@ -155,7 +155,7 @@ const ApiClient = {
   // ---- 5. TRAIN (SSE streaming) ----
   // onEvent: callback({type, ...}) — type 可能是 'progress' | 'log' | 'done' | 'error'
   // 回傳 promise,完成時 resolve 為 done 事件中的 models 陣列
-  async trainStream(payload, onEvent) {
+  async trainStream(payload, onEvent, signal) {
     // 帶 Authorization header — 不然後端會把 request 當 guest,結果寫到 in-memory dict 而不是 DB
     const headers = { 'Content-Type': 'application/json' };
     if (typeof AuthClient !== 'undefined' && AuthClient.token) {
@@ -165,6 +165,7 @@ const ApiClient = {
       method: 'POST',
       headers,
       body: JSON.stringify(payload),
+      signal,
     });
     if (!r.ok || !r.body) throw new Error(`trainStream 失敗 (${r.status}): ${await r.text()}`);
 

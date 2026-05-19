@@ -1374,19 +1374,19 @@
             </div>
             <div>
               <label class="block text-sm font-medium text-dark-300 mb-2">數據模式</label>
-              <div class="flex gap-3">
-                <label class="flex-1 flex items-center gap-3 p-3 rounded-lg bg-primary-500/10 border border-primary-500/30 cursor-pointer">
-                  <input type="radio" name="data-mode" checked class="text-primary-500">
+              <div id="exp-data-mode-row" class="flex gap-3">
+                <label class="exp-data-mode-opt flex-1 flex items-center gap-3 p-3 rounded-lg bg-primary-500/10 border border-primary-500/30 cursor-pointer" data-mode="static">
+                  <input type="radio" name="data-mode" value="static" checked class="text-primary-500">
                   <div>
                     <p class="text-sm font-medium">靜態表格</p>
-                    <p class="text-xs text-dark-400">Cross-sectional</p>
+                    <p class="text-xs text-dark-400">Cross-sectional · 隨機切分</p>
                   </div>
                 </label>
-                <label class="flex-1 flex items-center gap-3 p-3 rounded-lg bg-dark-800 border border-dark-600 cursor-pointer hover:border-dark-500">
-                  <input type="radio" name="data-mode" class="text-primary-500">
+                <label class="exp-data-mode-opt flex-1 flex items-center gap-3 p-3 rounded-lg bg-dark-800 border border-dark-600 cursor-pointer hover:border-dark-500" data-mode="timeseries">
+                  <input type="radio" name="data-mode" value="timeseries" class="text-primary-500">
                   <div>
                     <p class="text-sm font-medium">時間序列</p>
-                    <p class="text-xs text-dark-400">Time-series</p>
+                    <p class="text-xs text-dark-400">Time-series · 依時間順序切分</p>
                   </div>
                 </label>
               </div>
@@ -2530,6 +2530,6 @@
   <script src="js/charts.js?v=36"></script>
   <script src="js/auth.js?v=36"></script>
   <script src="js/api.js?v=36"></script>
-  <script src="js/app.js?v=41"></script>
+  <script src="js/app.js?v=42"></script>
 </body>
 </html>
