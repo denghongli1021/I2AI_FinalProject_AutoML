@@ -24,6 +24,9 @@ document.addEventListener('DOMContentLoaded', () => {
   // Auth — 讀 localStorage / 接 OAuth callback,後續所有 ApiClient fetch 自動帶 token
   if (typeof AuthClient !== 'undefined') AuthClient.init();
 
+  // 從新介面跳回來的 ?need_login=1&next=... — 已登入直接跳回,否則開登入框
+  initNewUiAuthHandshake();
+
   // 監聽 auth 狀態變化 — 登入 / 登出 / 切帳號都要全清 + 重抓新使用者的資料
   let _authInitial = true;
   window.addEventListener('auth:changed', async (ev) => {
@@ -1113,9 +1116,12 @@ function navigateTo(page) {
 function initNavigation() {
   document.querySelectorAll('.nav-item').forEach(item => {
     item.addEventListener('click', e => {
-      e.preventDefault();
       const page = item.dataset.page;
-      if (page) navigateTo(page);
+      if (page) {
+        e.preventDefault();
+        navigateTo(page);
+      }
+      // 沒 data-page (例如 「新介面」切換按鈕) → 讓瀏覽器照原生 href 跳轉
     });
   });
 }
@@ -3341,6 +3347,20 @@ function renderRealExperimentsPage() {
   document.getElementById('exp-feat-all').onclick = () => { featBox.querySelectorAll('.exp-feat-cb').forEach(cb => cb.checked = true); updateFeatureCount(); };
   document.getElementById('exp-feat-none').onclick = () => { featBox.querySelectorAll('.exp-feat-cb').forEach(cb => cb.checked = false); updateFeatureCount(); };
 
+  // 搜尋欄位 — 即時過濾下方 checkbox
+  const featSearch = document.getElementById('exp-feature-search');
+  if (featSearch) {
+    featSearch.value = '';
+    featSearch.oninput = () => {
+      const q = featSearch.value.trim().toLowerCase();
+      featBox.querySelectorAll('label').forEach(lbl => {
+        const cb = lbl.querySelector('.exp-feat-cb');
+        const name = (cb?.value || lbl.textContent || '').toLowerCase();
+        lbl.style.display = !q || name.includes(q) ? '' : 'none';
+      });
+    };
+  }
+
   // --- Algorithm checkboxes ---
   const algoBox = document.getElementById('exp-algo-checkboxes');
   const algoCountEl = document.getElementById('exp-algo-count');
@@ -3898,8 +3918,22 @@ async function startDanielExperimentTraining(ds, targetCol, options) {
     if (errorMsg) throw new Error(errorMsg);
     if (!finalResults || finalResults.length === 0) throw new Error('未收到 pipeline 結果');
 
-    // 把 Daniel result 包成「假 model bundle」塞進現有 leaderboard,共用 renderExperimentResults
-    const models = finalResults.map((r, i) => danielResultToModel(r, i));
+    // 過濾掉 subprocess 失敗 (ok=false) 的 result;全失敗才整批拋
+    const okResults = finalResults.filter(r => r.ok !== false);
+    if (okResults.length === 0) {
+      const reasons = finalResults.map(r => `${r.dataSourceLabel || r.dataSource}: ${r.error || 'unknown'}`).join('\n');
+      throw new Error(`所有 pipeline 任務都失敗:\n${reasons}`);
+    }
+    if (okResults.length < finalResults.length) {
+      finalResults.filter(r => r.ok === false).forEach(r => {
+        const msg = `✗ ${r.dataSourceLabel || r.dataSource} pipeline 失敗: ${r.error || '未知'}`;
+        if (typeof addLog === 'function') addLog(msg, 'error');
+        else console.error('[pipeline]', msg);
+      });
+    }
+
+    // 把 pipeline result 包成「假 model bundle」塞進現有 leaderboard,共用 renderExperimentResults
+    const models = okResults.map((r, i) => danielResultToModel(r, i));
     const sortedModels = models.sort((a, b) => (b.metrics.testScore || 0) - (a.metrics.testScore || 0));
     MLEngine.trainedModels = sortedModels;
 
@@ -3962,32 +3996,36 @@ async function startDanielExperimentTraining(ds, targetCol, options) {
   }
 }
 
-// 把 Daniel pipeline 的 result 物件轉成 sklearn-bundle 的形狀,
+// 把 Pipeline 的 result 物件轉成 sklearn-bundle 的形狀,
 // 讓現有 renderExperimentResults / leaderboard 直接吃。
 function danielResultToModel(r, rank) {
   const sourceLabel = r.dataSourceLabel || (r.dataSource === 'preprocessed' ? '預處理' : '原始');
   const ensembleName = r.bestEnsemble === 'stack' ? 'Stack' : 'Blend';
-  const fakeName = `[${sourceLabel}] Pipeline (${ensembleName})`;
-  // testScore 用 bestScore (Daniel 自己挑 Blend vs Stack 較佳者)
-  const scoreLabel = (r.metric || 'F1').toUpperCase();
+  const isOof = r.scoreSource === 'oof';
+  const oofSuffix = isOof ? ' · OOF' : '';
+  const fakeName = `[${sourceLabel}] Pipeline (${ensembleName})${oofSuffix}`;
+  // testScore 用 bestScore (pipeline 自己挑 Blend vs Stack 較佳者;沒 label 時 fallback OOF max)
+  const scoreLabel = (r.metric || 'F1').toUpperCase() + (isOof ? ' (OOF)' : '');
   return {
     id: `daniel_${rank}_${Date.now()}`,
     name: fakeName,
     type: 'daniel_pipeline',
     taskType: 'classification',
     targetName: r.target,
-    featureNames: [],  // Daniel pipeline 不揭露最終特徵集 (內部做了 PCA/FFT/KMeans...)
+    featureNames: [],  // Pipeline 不揭露最終特徵集 (內部做了 PCA/FFT/KMeans...)
     metrics: {
       taskType: 'classification',
       testAccuracy: r.accuracy ?? 0,
       f1: r.f1 ?? 0,
-      precision: r.f1 ?? 0,    // Daniel 不單獨回報 precision/recall,用 f1 當 placeholder
+      precision: r.f1 ?? 0,    // Pipeline 不單獨回報 precision/recall,用 f1 當 placeholder
       recall: r.f1 ?? 0,
       testScore: r.bestScore ?? 0,
       testScoreLabel: scoreLabel,
       scoreBlend: r.scoreBlend,
       scoreStack: r.scoreStack,
       bestEnsemble: r.bestEnsemble,
+      scoreSource: r.scoreSource || 'test',
+      oofBestScore: r.oofBestScore,
       classes: r.classes || [],
     },
     featureImportance: [],
@@ -5465,13 +5503,91 @@ function initSettings() {
   // ---- API 區 (本來就有效,保留) ----
   const apiToggle = document.getElementById('setting-use-api');
   const apiUrlInput = document.getElementById('setting-api-url');
+  const apiUrlPreset = document.getElementById('setting-api-url-preset');
   const apiPingBtn = document.getElementById('btn-api-ping');
   const apiStatusEl = document.getElementById('setting-api-status');
   if (apiToggle && typeof ApiClient !== 'undefined') {
     apiToggle.checked = ApiClient.enabled;
-    apiUrlInput.value = ApiClient.baseUrl;
     apiToggle.addEventListener('change', () => ApiClient.setEnabled(apiToggle.checked));
-    apiUrlInput.addEventListener('change', () => ApiClient.setBaseUrl(apiUrlInput.value.trim()));
+
+    // ---- 預設清單 + 自訂位址 (localStorage 持久化) ----
+    const CUSTOM_KEY = 'apiBaseUrlCustomList';
+    const loadCustom = () => {
+      try { return JSON.parse(localStorage.getItem(CUSTOM_KEY) || '[]').filter(Boolean); }
+      catch { return []; }
+    };
+    const saveCustom = (arr) => {
+      try { localStorage.setItem(CUSTOM_KEY, JSON.stringify(arr)); } catch (e) {}
+    };
+
+    const rebuildPresetOptions = () => {
+      if (!apiUrlPreset) return;
+      // 預設三個選項保留(它們已在 HTML 裡),這裡只重新插入自訂條目
+      // 先清掉 dataset='custom' 的舊條目,避免重複
+      apiUrlPreset.querySelectorAll('option[data-custom="1"]').forEach(o => o.remove());
+      const customs = loadCustom();
+      const addCustomOpt = apiUrlPreset.querySelector('option[value="__custom__"]');
+      customs.forEach(url => {
+        const opt = document.createElement('option');
+        opt.value = url;
+        opt.dataset.custom = '1';
+        opt.textContent = url.replace(/^https?:\/\//, '');
+        apiUrlPreset.insertBefore(opt, addCustomOpt);
+      });
+    };
+
+    const setActiveUrl = (url) => {
+      if (!url) return;
+      apiUrlInput.value = url;
+      ApiClient.setBaseUrl(url);
+      // 同步 select:若 url 在 options 裡就選它,否則選自訂佔位
+      const matched = Array.from(apiUrlPreset.options).find(o => o.value === url);
+      apiUrlPreset.value = matched ? url : '__custom__';
+    };
+
+    rebuildPresetOptions();
+    setActiveUrl(ApiClient.baseUrl);
+
+    apiUrlPreset.addEventListener('change', () => {
+      const v = apiUrlPreset.value;
+      if (v === '__custom__') {
+        const newUrl = prompt('輸入新的 API Base URL (例如 https://my-backend.example.com):');
+        if (!newUrl || !newUrl.trim()) {
+          // 取消 → 回到目前 active 的 URL
+          setActiveUrl(ApiClient.baseUrl);
+          return;
+        }
+        const clean = newUrl.trim().replace(/\/$/, '');
+        const customs = loadCustom();
+        if (!customs.includes(clean)) {
+          customs.push(clean);
+          saveCustom(customs);
+          rebuildPresetOptions();
+        }
+        setActiveUrl(clean);
+      } else {
+        setActiveUrl(v);
+      }
+    });
+
+    apiUrlInput.addEventListener('change', () => {
+      const v = apiUrlInput.value.trim().replace(/\/$/, '');
+      if (!v) return;
+      // 手動編輯 input → 自動加進自訂清單 (若不是預設項)
+      const isBuiltin = Array.from(apiUrlPreset.options)
+        .filter(o => !o.dataset.custom && o.value !== '__custom__')
+        .some(o => o.value === v);
+      if (!isBuiltin) {
+        const customs = loadCustom();
+        if (!customs.includes(v)) {
+          customs.push(v);
+          saveCustom(customs);
+          rebuildPresetOptions();
+        }
+      }
+      setActiveUrl(v);
+    });
+
     apiPingBtn.addEventListener('click', async () => {
       apiStatusEl.textContent = '測試中...';
       const ok = await ApiClient.health();
@@ -5904,6 +6020,42 @@ function renderPipelineResult(r) {
   `;
 }
 
+
+// ===== 新介面 handshake =====
+// 從 index-new.html 跳回來時帶有 ?need_login=1&next=...,負責:
+//   (a) 已登入 → 直接 redirect 回 next
+//   (b) 未登入 → 自動開啟登入 modal,登入成功後 redirect 回 next
+function initNewUiAuthHandshake() {
+  const url = new URL(window.location.href);
+  const need = url.searchParams.get('need_login');
+  const next = url.searchParams.get('next');
+  if (!need) return;
+
+  const bounce = () => {
+    const nextUrl = next ? decodeURIComponent(next) : 'index-new.html';
+    // 清掉 query 避免下次 reload 重跳
+    url.searchParams.delete('need_login');
+    url.searchParams.delete('next');
+    url.searchParams.delete('reason');
+    window.history.replaceState({}, '', url.pathname + (url.search || '') + url.hash);
+    window.location.href = nextUrl;
+  };
+
+  // 已登入直接 bounce
+  if (typeof AuthClient !== 'undefined' && AuthClient.isAuthenticated()) {
+    bounce();
+    return;
+  }
+
+  // 未登入 → 顯示 toast + 打開登入 modal
+  showToast('請先登入以進入新介面', { type: 'info' });
+  setTimeout(() => document.getElementById('btn-auth-open')?.click(), 300);
+
+  // 登入成功 → bounce
+  window.addEventListener('auth:changed', (ev) => {
+    if (ev.detail && ev.detail.user) bounce();
+  });
+}
 
 // ===== EXPOSE navigateTo globally =====
 window.navigateTo = navigateTo;

@@ -153,6 +153,15 @@
       </a>
     </nav>
 
+    <!-- 切換到新介面 (Beta) — 位於 sidebar 最底 -->
+    <div class="p-3 border-t border-dark-700/50">
+      <a href="index-new.html" id="btn-switch-newui" class="nav-item" title="切換到新介面 (Beta)" onclick="try{localStorage.setItem('ui_pref','new')}catch(e){}">
+        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M13 2L3 14h8l-1 8 10-12h-8l1-8z"/></svg>
+        <span>新介面</span>
+        <span class="ml-auto text-[9px] bg-primary-500/20 text-primary-300 px-1.5 py-0.5 rounded-full font-semibold tracking-wider">BETA</span>
+      </a>
+    </div>
+
     <!-- Mode toggle 已搬到 top bar 的 #mode-badge,sidebar 不再重複放 -->
 
     <!-- User -->
@@ -2360,9 +2369,17 @@
                 <div class="setting-row">
                   <div>
                     <p class="text-sm font-medium">API Base URL</p>
-                    <p class="text-xs text-dark-400">FastAPI 監聽位址,預設 <code class="text-primary-400">https://i2ai-automl-api.onrender.com</code></p>
+                    <p class="text-xs text-dark-400">FastAPI 監聽位址 — 預設選單可以新增自訂位址</p>
                   </div>
-                  <input type="text" id="setting-api-url" class="w-64 bg-dark-700 border border-dark-600 rounded-lg px-3 py-1.5 text-sm focus:border-primary-500 outline-none">
+                  <div class="flex items-center gap-2 flex-wrap justify-end">
+                    <select id="setting-api-url-preset" class="w-64 bg-dark-700 border border-dark-600 rounded-lg px-3 py-1.5 text-sm focus:border-primary-500 outline-none">
+                      <option value="https://honglideng-i2ai-automl-backend.hf.space">HuggingFace (推薦)</option>
+                      <option value="https://i2ai-automl-api.onrender.com">Render (backup)</option>
+                      <option value="http://localhost:8000">localhost:8000</option>
+                      <option value="__custom__">+ 新增自訂位址...</option>
+                    </select>
+                    <input type="text" id="setting-api-url" class="w-64 bg-dark-700 border border-dark-600 rounded-lg px-3 py-1.5 text-sm focus:border-primary-500 outline-none font-mono" placeholder="https://...">
+                  </div>
                 </div>
                 <div class="setting-row">
                   <div>
@@ -2513,6 +2530,6 @@
   <script src="js/charts.js?v=36"></script>
   <script src="js/auth.js?v=36"></script>
   <script src="js/api.js?v=36"></script>
-  <script src="js/app.js?v=36"></script>
+  <script src="js/app.js?v=41"></script>
 </body>
 </html>

@@ -188,9 +188,20 @@ def run_pipeline(
 
     elapsed = round(time.time() - t0, 2)
     if result_dict is None:
+        # 沒收到 __RESULT_JSON__ — 常見原因:OOM kill / Python crash / subprocess timeout
+        rc = proc.returncode
+        if rc in (-9, 137):
+            hint = " (signal 9 / SIGKILL — 多半是 OOM,記憶體不夠)"
+        elif rc in (-11, 139):
+            hint = " (segfault — 套件衝突,可能是 numpy/torch 版本)"
+        elif rc and rc != 0:
+            hint = f" (非 0 return code,subprocess 異常退出)"
+        else:
+            hint = ""
         return {
             "ok": False,
-            "error": f"subprocess 結束但未收到結果 (return code {proc.returncode})",
+            "error": f"pipeline subprocess 沒回結果 (rc={rc}){hint}",
+            "returnCode": rc,
             "elapsedSec": elapsed,
         }
     result_dict.setdefault("elapsedSec", elapsed)

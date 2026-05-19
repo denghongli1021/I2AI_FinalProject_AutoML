@@ -155,15 +155,23 @@ class PredictionArtifact(Base):  # pipeline Option B 的 test.csv 輸入 + 預�
     id              = Column(String(36), primary_key=True)
     training_run_id = Column(String(36), ForeignKey("training_runs.id"), index=True, nullable=False)
     user_id         = Column(Integer, ForeignKey("users.id"), index=True, nullable=False)
-    kind            = Column(String(20))               # 'input' | 'submission' | 'submission_proba'
+    kind            = Column(String(40))               # 'input' | 'submission_raw' | 'submission_preprocessed' | 'submission_upload' | 'submission_proba'
     file_name       = Column(String(255))
     content_blob    = Column(LargeBinary)              # CSV bytes,直接存 DB
     created_at      = Column(DateTime, default=datetime.utcnow, nullable=False)
 
 
 def init_db() -> None:
-    """app 啟動時呼叫 — 建表 (若已存在則 no-op)。"""
+    """app 啟動時呼叫 — 建表 (若已存在則 no-op) + 必要的線上欄位擴寬。"""
     Base.metadata.create_all(bind=engine)
+    # Postgres 不會自動跟著 model 改變欄位寬度;這裡做 idempotent migration。
+    if not _IS_SQLITE:
+        from sqlalchemy import text
+        with engine.begin() as conn:
+            conn.execute(text(
+                "ALTER TABLE prediction_artifacts "
+                "ALTER COLUMN kind TYPE VARCHAR(40)"
+            ))
 
 
 @contextmanager

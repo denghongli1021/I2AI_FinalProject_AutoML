@@ -240,6 +240,12 @@ def main():
 
         elapsed = round(time.time() - t0, 2)
 
+        # 守門:pipeline 沒訓練到任何 model → 拋明確錯誤,不要回 0% 假成功
+        # (常見於 Render free tier 記憶體不足,subprocess 被 OOM kill 後 daniel pipeline 回空殼)
+        if not result.model_tags or len(result.model_tags) == 0:
+            print(f"__RESULT_JSON__:{json.dumps({'ok': False, 'error': 'pipeline 跑完但 0 個模型 — 可能是 OOM / 環境缺套件 / 預算太小被全跳過。請檢查 server logs。', 'modelTags': list(result.model_tags or []), 'elapsedSec': round(time.time() - t0, 2)}, ensure_ascii=False)}")
+            return 1
+
         # 各模型 OOF score (train 一定有 label,所以這個一定能算)
         per_model = []
         for tag, oof in zip(result.model_tags, result.all_oof):
@@ -248,6 +254,28 @@ def main():
             except Exception:
                 s = None
             per_model.append({"tag": tag, "oofScore": s})
+
+        # OOF-based fallback:test 沒 label 時,把 ensemble 預測拿來跟 OOF 算 reference score
+        # 也計算 OOF 級別的 acc/f1 (對 train fold 平均的預測)
+        oof_best_score = None
+        oof_acc = oof_f1 = None
+        if not test_has_label:
+            try:
+                # 用最強的 ensemble 對應的 OOF 矩陣 (Daniel 不直接給 ensemble OOF,
+                # 退一步用各 model OOF 的最大 score 當 reference)
+                valid_oof_scores = [m["oofScore"] for m in per_model if m["oofScore"] is not None]
+                if valid_oof_scores:
+                    oof_best_score = float(max(valid_oof_scores))
+                # 對 train 整體用最佳 OOF 算 acc/f1
+                if result.all_oof:
+                    # 找 score 最大的那個 OOF 矩陣
+                    best_idx = max(range(len(per_model)),
+                                   key=lambda i: per_model[i]["oofScore"] if per_model[i]["oofScore"] is not None else -1)
+                    best_oof = result.all_oof[best_idx]
+                    oof_acc = float(calculate_score(y_tr, best_oof, metric="accuracy"))
+                    oof_f1  = float(calculate_score(y_tr, best_oof, metric="f1"))
+            except Exception:
+                pass
 
         # 把最佳 ensemble 的預測 (decoded label) 一起回 — 給 Option B 寫 submission.csv 用
         best_preds_labels = preds_stack_labels if best_ensemble == "stack" else preds_blend_labels
@@ -259,10 +287,14 @@ def main():
             "metric": m_name,
             "scoreBlend": _r(score_blend),
             "scoreStack": _r(score_stack),
-            "bestScore": _r(best_score),
+            "bestScore": _r(best_score) if best_score is not None else _r(oof_best_score),
             "bestEnsemble": best_ensemble,
-            "accuracy": _r(acc),
-            "f1": _r(f1),
+            "accuracy": _r(acc) if acc is not None else _r(oof_acc),
+            "f1": _r(f1) if f1 is not None else _r(oof_f1),
+            "scoreSource": "test" if test_has_label else "oof",  # 給前端區分顯示
+            "oofBestScore": _r(oof_best_score),
+            "oofAccuracy": _r(oof_acc),
+            "oofF1": _r(oof_f1),
             "nTrain": int(len(y_tr)),
             "nTest": int(X_te.shape[0]),
             "nClasses": int(n_classes),

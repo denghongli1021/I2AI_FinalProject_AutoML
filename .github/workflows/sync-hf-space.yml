@@ -1,0 +1,45 @@
+# =============================================================================
+# Sync to HuggingFace Space
+# 每次 push 到 main → 把 repo 鏡像到 HF Space 的 git remote。
+# 需要設定:
+#   GitHub Settings → Secrets and variables → Actions → New secret
+#     HF_TOKEN      你的 HuggingFace access token (write 權限)
+#     HF_USERNAME   你的 HF 帳號 (例如 denghongli)
+#     HF_SPACE      Space 名稱 (例如 i2ai-automl-backend)
+# =============================================================================
+name: Sync to HuggingFace Space
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:    # 允許手動觸發 (Actions tab → Run workflow)
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo (full history, HF Space 需要完整 git history)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          lfs: true     # 如果以後加大檔案才會用到
+
+      - name: Add HuggingFace remote & push
+        env:
+          HF_TOKEN:    ${{ secrets.HF_TOKEN }}
+          HF_USERNAME: ${{ secrets.HF_USERNAME }}
+          HF_SPACE:    ${{ secrets.HF_SPACE }}
+        run: |
+          set -e
+          if [ -z "$HF_TOKEN" ] || [ -z "$HF_USERNAME" ] || [ -z "$HF_SPACE" ]; then
+            echo "❌ 缺 secret: HF_TOKEN / HF_USERNAME / HF_SPACE,請到 GitHub 倉庫 Settings → Secrets 補。"
+            exit 1
+          fi
+          git config user.email "action@github.com"
+          git config user.name  "GitHub Action"
+          # HF Space git URL 格式:https://USER:TOKEN@huggingface.co/spaces/USER/SPACE
+          HF_URL="https://${HF_USERNAME}:${HF_TOKEN}@huggingface.co/spaces/${HF_USERNAME}/${HF_SPACE}"
+          git remote add hf "$HF_URL" 2>/dev/null || git remote set-url hf "$HF_URL"
+          # 強制 push (HF Space 是 mirror,以 GitHub 為唯一真實來源)
+          git push hf main:main --force
+          echo "✅ 已同步到 https://huggingface.co/spaces/${HF_USERNAME}/${HF_SPACE}"

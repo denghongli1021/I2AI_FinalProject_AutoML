@@ -326,7 +326,12 @@ def run(
                 )
                 mlp_arch = nas.search(X_train, y_train, n_classes)
         else:
-            reason = "時間預算不足" if not no_nas else "no_nas=True"
+            if no_nas:
+                reason = "使用者關閉 NAS"
+            elif not is_ts and len(X_train) < 2000:
+                reason = f"訓練筆數 {len(X_train)} < 2000,小資料 NAS 易過擬合"
+            else:
+                reason = "時間預算不足"
             print(f"\n[3] 跳過 NAS（{reason}），使用預設架構")
             mlp_arch = _DEFAULT_TSNET_ARCH if is_ts else _DEFAULT_MLP_ARCH
 
