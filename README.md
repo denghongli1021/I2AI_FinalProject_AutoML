@@ -7,7 +7,7 @@ sdk: docker
 app_port: 7860
 pinned: false
 license: mit
-short_description: FastAPI backend for the I2AI AutoML project (sklearn + pipeline engine)
+short_description: FastAPI backend for I2AI AutoML (sklearn + pipeline)
 ---
 
 # I2AI AutoML
