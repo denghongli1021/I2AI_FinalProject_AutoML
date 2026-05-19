@@ -402,8 +402,8 @@ def save_model(
         data_source=bundle.get("dataSource"),
         task_type=bundle.get("taskType", "classification"),
         target=bundle.get("targetName") or bundle.get("target"),
-        bundle_json=json.dumps(bundle, ensure_ascii=False, default=_json_default),
-        hyperparameters_json=json.dumps(hyperparameters or {}, ensure_ascii=False, default=_json_default),
+        bundle_json=json.dumps(sanitize_for_json(bundle), ensure_ascii=False, default=_json_default),
+        hyperparameters_json=json.dumps(sanitize_for_json(hyperparameters or {}), ensure_ascii=False, default=_json_default),
         estimator_pkl=estimator_blob,
         scaler_pkl=scaler_blob,
         x_test_pkl=x_test_blob,
@@ -656,3 +656,26 @@ def _json_default(o):
     if isinstance(o, (np.ndarray,)):  return o.tolist()
     if isinstance(o, datetime):       return o.isoformat()
     return str(o)
+
+
+def sanitize_for_json(obj):
+    """遞迴把 dict/list 裡的 NaN / Inf 換成 None (JS JSON.parse 不接受 NaN)。
+    也順手把 numpy scalar 拆成 python 原生型,讓下游 json.dumps 不再依賴 default=。"""
+    import math
+    import numpy as np
+    if obj is None or isinstance(obj, (bool, str, int)):
+        return obj
+    if isinstance(obj, float):
+        return None if (math.isnan(obj) or math.isinf(obj)) else obj
+    if isinstance(obj, np.floating):
+        f = float(obj)
+        return None if (math.isnan(f) or math.isinf(f)) else f
+    if isinstance(obj, np.integer):
+        return int(obj)
+    if isinstance(obj, np.ndarray):
+        return sanitize_for_json(obj.tolist())
+    if isinstance(obj, dict):
+        return {k: sanitize_for_json(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [sanitize_for_json(v) for v in obj]
+    return obj

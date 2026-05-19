@@ -1046,7 +1046,9 @@ def train_stream_endpoint(
             #   每個 model 一個事件,最後送小小的 'done' sentinel 告訴前端「結束了,共 N 個」。
             for b in bundles:
                 try:
-                    model_payload = json.dumps({'type': 'model', 'bundle': b},
+                    # 先 sanitize NaN/Inf → null,不然 JS JSON.parse 會炸 (NaN 不是合法 JSON)
+                    safe_b = storage.sanitize_for_json(b)
+                    model_payload = json.dumps({'type': 'model', 'bundle': safe_b},
                                                ensure_ascii=False, default=str)
                 except Exception as e:
                     print(f"[event_stream] 模型 {b.get('id')} JSON 化失敗,改送 minimal: {e}", flush=True)
@@ -1054,8 +1056,7 @@ def train_stream_endpoint(
                         "id": b.get("id"), "name": b.get("name"),
                         "type": b.get("type"),
                         "dataSource": b.get("dataSource"),
-                        "metrics": {k: v for k, v in (b.get("metrics") or {}).items()
-                                    if isinstance(v, (str, int, float, bool, list)) or v is None},
+                        "metrics": storage.sanitize_for_json(b.get("metrics") or {}),
                         "trainTime": b.get("trainTime", 0),
                         "_minimal": True,
                     }
