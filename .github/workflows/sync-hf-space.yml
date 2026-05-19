@@ -35,6 +35,10 @@ jobs:
             echo "❌ 缺 secret: HF_TOKEN / HF_USERNAME / HF_SPACE,請到 GitHub 倉庫 Settings → Secrets 補。"
             exit 1
           fi
+          # 防呆:secrets 末尾常意外帶 \r \n 空白,組進 URL 會 fatal。tr 一次清掉。
+          HF_TOKEN=$(printf '%s' "$HF_TOKEN" | tr -d '\r\n\t ')
+          HF_USERNAME=$(printf '%s' "$HF_USERNAME" | tr -d '\r\n\t ')
+          HF_SPACE=$(printf '%s' "$HF_SPACE" | tr -d '\r\n\t ')
           git config user.email "action@github.com"
           git config user.name  "GitHub Action"
           # HF Space git URL 格式:https://USER:TOKEN@huggingface.co/spaces/USER/SPACE
