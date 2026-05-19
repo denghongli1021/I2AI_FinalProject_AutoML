@@ -11,7 +11,7 @@ name: Sync to HuggingFace Space
 
 on:
   push:
-    branches: [main]
+    branches: [main, feature/python-api]
   workflow_dispatch:    # 允許手動觸發 (Actions tab → Run workflow)
 
 jobs:
@@ -41,5 +41,6 @@ jobs:
           HF_URL="https://${HF_USERNAME}:${HF_TOKEN}@huggingface.co/spaces/${HF_USERNAME}/${HF_SPACE}"
           git remote add hf "$HF_URL" 2>/dev/null || git remote set-url hf "$HF_URL"
           # 強制 push (HF Space 是 mirror,以 GitHub 為唯一真實來源)
-          git push hf main:main --force
-          echo "✅ 已同步到 https://huggingface.co/spaces/${HF_USERNAME}/${HF_SPACE}"
+          # 用 HEAD:main 不寫死 source branch,允許從 feature/* 或 main 觸發都能同步
+          git push hf HEAD:main --force
+          echo "✅ 已同步 (來自 $(git rev-parse --abbrev-ref HEAD)) → https://huggingface.co/spaces/${HF_USERNAME}/${HF_SPACE}"
