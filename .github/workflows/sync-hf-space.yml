@@ -44,7 +44,17 @@ jobs:
           # HF Space git URL 格式:https://USER:TOKEN@huggingface.co/spaces/USER/SPACE
           HF_URL="https://${HF_USERNAME}:${HF_TOKEN}@huggingface.co/spaces/${HF_USERNAME}/${HF_SPACE}"
           git remote add hf "$HF_URL" 2>/dev/null || git remote set-url hf "$HF_URL"
-          # 強制 push (HF Space 是 mirror,以 GitHub 為唯一真實來源)
-          # 用 HEAD:main 不寫死 source branch,允許從 feature/* 或 main 觸發都能同步
-          git push hf HEAD:main --force
-          echo "✅ 已同步 (來自 $(git rev-parse --abbrev-ref HEAD)) → https://huggingface.co/spaces/${HF_USERNAME}/${HF_SPACE}"
+
+          # ----------------------------------------------------------------
+          # 策略:squash 成單一 orphan commit 再 push,丟掉 GitHub 歷史。
+          # 為什麼:HF Space 拒絕歷史中存在的大型 binary (PNG/csv...),
+          # 即使現在 working tree 已經沒有,只要曾經 commit 過就被擋。
+          # HF Space 只是 deploy target,不需要 commit history。
+          # ----------------------------------------------------------------
+          SOURCE_REF=$(git rev-parse --short HEAD)
+          SOURCE_BRANCH=$(git rev-parse --abbrev-ref HEAD)
+          git checkout --orphan hf-deploy-tmp
+          git add -A
+          git commit -m "Deploy from ${SOURCE_BRANCH}@${SOURCE_REF}"
+          git push hf hf-deploy-tmp:main --force
+          echo "✅ 已同步 (來自 ${SOURCE_BRANCH}@${SOURCE_REF}) → https://huggingface.co/spaces/${HF_USERNAME}/${HF_SPACE}"
