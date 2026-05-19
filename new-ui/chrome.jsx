@@ -7,11 +7,37 @@ function Sidebar({ page, onNavigate, user }) {
   const u = user
     ? { name: user.displayName || (user.email || '').split('@')[0], email: user.email, provider: user.oauthProvider || 'email', avatarUrl: user.avatarUrl }
     : MOCK.user;
+
+  // 從後端拉真實 counts (datasets / training runs / models),失敗就 fallback MOCK
+  const [counts, setCounts] = React.useState(null);
+  React.useEffect(() => {
+    if (!window.NewUI || !NewUI.api.isAuthed()) return;
+    const loadCounts = (force = false) => {
+      const opts = { force };
+      Promise.all([
+        NewUI.api.getCached('/api/dataset/list', opts).then(r => (r.datasets || []).length).catch(() => null),
+        NewUI.api.getCached('/api/training-runs?limit=200', opts).then(r => (r.runs || []).length).catch(() => null),
+        NewUI.api.getCached('/api/models?limit=500', opts).then(r => (r.models || []).length).catch(() => null),
+      ]).then(([d, e, m]) => {
+        setCounts({
+          datasets: d ?? MOCK.counts.datasets,
+          experiments: e ?? MOCK.counts.experiments,
+          models: m ?? MOCK.counts.models,
+        });
+      });
+    };
+    loadCounts(false);
+    // 監聽全域 'newui:refresh-counts' 事件 → force 重抓 (上傳/刪除/訓練完成時 dispatch)
+    const onRefresh = () => loadCounts(true);
+    window.addEventListener('newui:refresh-counts', onRefresh);
+    return () => window.removeEventListener('newui:refresh-counts', onRefresh);
+  }, []);
+  const liveCounts = counts || MOCK.counts;
   const items = [
     { id: 'dashboard',   label: '儀表板', icon: 'dashboard' },
-    { id: 'data',        label: '數據',   icon: 'data',  count: MOCK.counts.datasets },
-    { id: 'experiments', label: '實驗',   icon: 'flask', count: MOCK.counts.experiments },
-    { id: 'models',      label: '模型',   icon: 'bars',  count: MOCK.counts.models },
+    { id: 'data',        label: '數據',   icon: 'data',  count: liveCounts.datasets },
+    { id: 'experiments', label: '實驗',   icon: 'flask', count: liveCounts.experiments },
+    { id: 'models',      label: '模型',   icon: 'bars',  count: liveCounts.models },
     { id: 'insights',    label: '洞察',   icon: 'bulb' },
   ];
   return (

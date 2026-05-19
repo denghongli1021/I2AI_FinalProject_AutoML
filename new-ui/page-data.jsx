@@ -1,122 +1,281 @@
 // =============================================================================
-// Page: Data — merges old 「數據集管理」 + 「預處理」 into one page with tabs
+// Page: Data — 從後端拉真實 datasets (含上傳)
 // =============================================================================
 
 function PageData({ onNavigate }) {
-  const [activeDatasetId, setActiveDatasetId] = React.useState('churn');
   const [tab, setTab] = React.useState('overview');
-  const active = MOCK.datasets.find(d => d.id === activeDatasetId);
+  const [datasets, setDatasets] = React.useState([]);
+  const [activeId, setActiveId] = React.useState(null);
+  const [activeDetail, setActiveDetail] = React.useState(null);
+  const [loading, setLoading] = React.useState(true);
+  const [detailLoading, setDetailLoading] = React.useState(false);
+  const [error, setError] = React.useState(null);
+  const [uploading, setUploading] = React.useState(false);
+  const fileInputRef = React.useRef(null);
+
+  // 拉 dataset list (有 cache,切回 Data 頁不用重抓)
+  const reloadList = React.useCallback((force = false) => {
+    setLoading(true);
+    setError(null);
+    NewUI.api.getCached('/api/dataset/list', { force })
+      .then(r => {
+        const list = r.datasets || [];
+        setDatasets(list);
+        if (list.length > 0 && (!activeId || !list.find(d => d.id === activeId))) {
+          setActiveId(list[0].id);
+        } else if (list.length === 0) {
+          setActiveId(null);
+          setActiveDetail(null);
+        }
+      })
+      .catch(e => setError(e.message || '無法載入數據集'))
+      .finally(() => setLoading(false));
+  }, [activeId]);
+
+  React.useEffect(() => { reloadList(false); }, []);
+
+  // 拉 active dataset detail (cached)
+  React.useEffect(() => {
+    if (!activeId) { setActiveDetail(null); return; }
+    setDetailLoading(true);
+    NewUI.api.getCached(`/api/dataset/${encodeURIComponent(activeId)}`)
+      .then(setActiveDetail)
+      .catch(e => {
+        console.warn('dataset detail fetch fail', e);
+        setActiveDetail(null);
+      })
+      .finally(() => setDetailLoading(false));
+  }, [activeId]);
+
+  // 上傳新 CSV
+  function onUpload(e) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setUploading(true);
+    const form = new FormData();
+    form.append('file', file);
+    NewUI.api.request('/api/preprocess', { method: 'POST', body: form })
+      .then(resp => {
+        // 寫操作完成 → 清掉 dataset / models / runs 的 cache,讓 sidebar 跟其他頁拿到新資料
+        NewUI.api.invalidate('/api/dataset');
+        NewUI.api.invalidate('/api/models');
+        NewUI.api.invalidate('/api/training-runs');
+        window.dispatchEvent(new CustomEvent('newui:refresh-counts'));
+        setActiveId(resp.id);
+        reloadList(true);
+      })
+      .catch(err => alert(`上傳失敗: ${err.message || err}`))
+      .finally(() => {
+        setUploading(false);
+        if (fileInputRef.current) fileInputRef.current.value = '';
+      });
+  }
+
+  // 刪除 dataset
+  function deleteActive() {
+    if (!activeId || !activeDetail) return;
+    if (!confirm(`確定刪除「${activeDetail.fileName || activeId}」?\n此操作會連帶刪除衍生的 preprocessor / model。`)) return;
+    NewUI.api.del(`/api/dataset/${encodeURIComponent(activeId)}`)
+      .then(() => {
+        // 級聯刪除影響 dataset / preprocessor / model / run,全部清 cache
+        NewUI.api.invalidate('/api/dataset');
+        NewUI.api.invalidate('/api/models');
+        NewUI.api.invalidate('/api/training-runs');
+        NewUI.api.invalidate('/api/preprocess');
+        window.dispatchEvent(new CustomEvent('newui:refresh-counts'));
+        setActiveId(null);
+        reloadList(true);
+      })
+      .catch(err => alert(`刪除失敗: ${err.message || err}`));
+  }
+
+  const active = datasets.find(d => d.id === activeId);
+  const colCount = active?.colCount ?? activeDetail?.colCount ?? 0;
 
   return (
     <div style={{ padding: 24 }} >
+      {/* hidden file picker */}
+      <input ref={fileInputRef} type="file" accept=".csv,.tsv,.txt"
+             style={{ display: 'none' }} onChange={onUpload} />
+
       {/* Page header */}
       <Row align="end" style={{ justifyContent: 'space-between', marginBottom: 16 }}>
         <div>
           <h1 className="t-h1">數據</h1>
-          <p className="t-label" style={{ marginTop: 4 }}>上傳、檢視、預處理</p>
+          <p className="t-label" style={{ marginTop: 4 }}>
+            {loading ? '載入中...' : `${datasets.length} 個數據集 · 上傳、檢視、預處理`}
+          </p>
         </div>
         <Row gap={8}>
-          <Button variant="ghost" icon="download">匯出</Button>
-          <Button variant="primary" icon="upload">上傳新數據</Button>
+          {active && (
+            <Button variant="ghost" icon="trash" onClick={deleteActive}>刪除</Button>
+          )}
+          <Button variant="primary" icon="upload"
+                  onClick={() => fileInputRef.current?.click()}
+                  disabled={uploading}>
+            {uploading ? '上傳中...' : '上傳新數據'}
+          </Button>
         </Row>
       </Row>
 
-      {/* Dataset list strip (horizontal cards) */}
-      <Row gap={10} style={{ marginBottom: 16, alignItems: 'stretch' }}>
-        {MOCK.datasets.map(d => (
-          <button key={d.id}
-                  onClick={() => setActiveDatasetId(d.id)}
-                  className={`surface ${activeDatasetId === d.id ? 'surface-strong' : ''}`}
-                  style={{
-                    flex: 1, padding: 14, textAlign: 'left',
-                    background: activeDatasetId === d.id ? 'var(--primary-soft)' : 'var(--bg-surface)',
-                    borderColor: activeDatasetId === d.id ? 'var(--primary-line)' : 'var(--bd-subtle)',
-                    cursor: 'pointer', position: 'relative',
-                  }}>
-            <Row style={{ justifyContent: 'space-between', marginBottom: 8 }}>
-              <Icon name="data" size={16} className={activeDatasetId === d.id ? 'fg-1' : 'fg-3'}
-                    style={{ color: activeDatasetId === d.id ? 'var(--primary)' : undefined }} />
-              <Chip tone={d.task === 'classification' ? 'primary' : undefined} className="mono">
-                {d.task === 'classification' ? 'cls' : 'reg'}
-              </Chip>
-            </Row>
-            <div className="t-title">{d.name}</div>
-            <Row gap={8} style={{ marginTop: 6 }}>
-              <span className="t-label mono">{d.rows.toLocaleString()} 列</span>
-              <span className="fg-4">·</span>
-              <span className="t-label mono">{d.cols} 欄</span>
-              <span className="fg-4">·</span>
-              <span className="t-label mono">{d.size}</span>
-            </Row>
-            <Row gap={6} style={{ marginTop: 8 }}>
-              <span className="t-label">健康度</span>
-              <div style={{ flex: 1, height: 4, background: 'var(--bg-sunken)', borderRadius: 2, overflow: 'hidden' }}>
-                <div style={{
-                  height: '100%', width: `${d.health}%`,
-                  background: d.health >= 80 ? 'var(--good)' : d.health >= 60 ? 'var(--warn)' : 'var(--bad)',
-                }} />
+      {/* Loading state */}
+      {loading && (
+        <div style={{ padding: 48, textAlign: 'center', color: 'var(--fg-muted)' }}>
+          <span className="t-label">載入數據集中...</span>
+        </div>
+      )}
+
+      {/* Error state */}
+      {error && !loading && (
+        <Surface style={{ padding: 24, marginBottom: 16 }}>
+          <Row gap={10}>
+            <Icon name="warning" size={20} style={{ color: 'var(--bad)' }} />
+            <div>
+              <div className="t-title">無法載入數據集</div>
+              <div className="t-label" style={{ marginTop: 4 }}>{error}</div>
+            </div>
+          </Row>
+        </Surface>
+      )}
+
+      {/* Empty state (no datasets yet) */}
+      {!loading && !error && datasets.length === 0 && (
+        <Surface style={{ padding: 48, textAlign: 'center' }}>
+          <Icon name="data" size={40} style={{ color: 'var(--primary)', marginBottom: 12 }} />
+          <div className="t-title">尚未上傳任何數據集</div>
+          <div className="t-label" style={{ marginTop: 6, marginBottom: 20 }}>
+            上傳 CSV 開始預處理 / 訓練流程
+          </div>
+          <Button variant="primary" icon="upload" onClick={() => fileInputRef.current?.click()}>
+            選擇 CSV 檔案
+          </Button>
+        </Surface>
+      )}
+
+      {/* Dataset list strip + content (only when has data) */}
+      {!loading && !error && datasets.length > 0 && (
+        <>
+          {/* Dataset list strip (horizontal cards) */}
+          <Row gap={10} style={{ marginBottom: 16, alignItems: 'stretch', flexWrap: 'wrap' }}>
+            {datasets.map(d => (
+              <button key={d.id}
+                      onClick={() => setActiveId(d.id)}
+                      className={`surface ${activeId === d.id ? 'surface-strong' : ''}`}
+                      style={{
+                        flex: '1 1 220px', minWidth: 220, padding: 14, textAlign: 'left',
+                        background: activeId === d.id ? 'var(--primary-soft)' : 'var(--bg-surface)',
+                        borderColor: activeId === d.id ? 'var(--primary-line)' : 'var(--bd-subtle)',
+                        cursor: 'pointer', position: 'relative',
+                      }}>
+                <Row style={{ justifyContent: 'space-between', marginBottom: 8 }}>
+                  <Icon name="data" size={16}
+                        style={{ color: activeId === d.id ? 'var(--primary)' : 'var(--fg-muted)' }} />
+                  <span className="t-label mono fg-4" style={{ fontSize: 10 }}>{_fmtRelTime(d.loadedAt)}</span>
+                </Row>
+                <div className="t-title" style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                  {d.fileName || d.id}
+                </div>
+                <Row gap={8} style={{ marginTop: 6 }}>
+                  <span className="t-label mono">{(d.rowCount ?? 0).toLocaleString()} 列</span>
+                  <span className="fg-4">·</span>
+                  <span className="t-label mono">{d.colCount ?? 0} 欄</span>
+                </Row>
+              </button>
+            ))}
+            <button onClick={() => fileInputRef.current?.click()} style={{
+              flex: '0 0 90px',
+              background: 'transparent',
+              border: '1px dashed var(--bd-default)',
+              borderRadius: 10,
+              color: 'var(--fg-muted)',
+              cursor: 'pointer',
+              display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 4,
+            }}>
+              <Icon name="plus" size={20} />
+              <span className="t-label">上傳</span>
+            </button>
+          </Row>
+
+          {/* Tab navigation */}
+          {active && (
+            <PageTabs
+              items={[
+                { value: 'overview',  label: '概覽' },
+                { value: 'columns',   label: '欄位', count: colCount },
+                { value: 'preview',   label: '資料預覽' },
+                { value: 'eda',       label: 'EDA' },
+                { value: 'preprocess', label: '預處理' },
+              ]}
+              value={tab}
+              onChange={setTab}
+            />
+          )}
+
+          <div style={{ paddingTop: 16 }}>
+            {detailLoading && (
+              <div style={{ padding: 24, textAlign: 'center', color: 'var(--fg-muted)' }}>
+                <span className="t-label">載入數據集詳情...</span>
               </div>
-              <span className="t-label mono fg-1">{d.health}</span>
-            </Row>
-          </button>
-        ))}
-        <button style={{
-          flex: '0 0 90px',
-          background: 'transparent',
-          border: '1px dashed var(--bd-default)',
-          borderRadius: 10,
-          color: 'var(--fg-muted)',
-          cursor: 'pointer',
-          display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 4,
-        }}>
-          <Icon name="plus" size={20} />
-          <span className="t-label">上傳</span>
-        </button>
-      </Row>
-
-      {/* Tab navigation */}
-      <PageTabs
-        items={[
-          { value: 'overview',  label: '概覽' },
-          { value: 'columns',   label: '欄位',     count: active.cols },
-          { value: 'preview',   label: '資料預覽' },
-          { value: 'eda',       label: 'EDA' },
-          { value: 'preprocess', label: '預處理' },
-        ]}
-        value={tab}
-        onChange={setTab}
-      />
-
-      <div style={{ paddingTop: 16 }}>
-        {tab === 'overview'  && <DataOverview ds={active} />}
-        {tab === 'columns'   && <DataColumns />}
-        {tab === 'preview'   && <DataPreview />}
-        {tab === 'eda'       && <DataEDA ds={active} />}
-        {tab === 'preprocess' && <DataPreprocess onNavigate={onNavigate} />}
-      </div>
+            )}
+            {!detailLoading && active && (
+              <>
+                {tab === 'overview'  && <DataOverview ds={active} detail={activeDetail} />}
+                {tab === 'columns'   && <DataColumns detail={activeDetail} />}
+                {tab === 'preview'   && <DataPreview detail={activeDetail} />}
+                {tab === 'eda'       && <DataEDA ds={active} detail={activeDetail} />}
+                {tab === 'preprocess' && <DataPreprocess onNavigate={onNavigate} />}
+              </>
+            )}
+          </div>
+        </>
+      )}
     </div>
   );
 }
 
+function _fmtRelTime(sec) {
+  if (!sec) return '';
+  const diff = Math.floor(Date.now() / 1000 - sec);
+  if (diff < 60)    return '剛剛';
+  if (diff < 3600)  return `${Math.floor(diff / 60)}m`;
+  if (diff < 86400) return `${Math.floor(diff / 3600)}h`;
+  return `${Math.floor(diff / 86400)}d`;
+}
+
 // ---- Overview tab ----
-function DataOverview({ ds }) {
-  const colTypes = MOCK.columns.reduce((acc, c) => { acc[c.type] = (acc[c.type] || 0) + 1; return acc; }, {});
+function DataOverview({ ds, detail }) {
+  // detail 是後端 /api/dataset/{id} 的 response,可能還沒載
+  const analysis = detail?.analysis || [];
+  const auditReport = detail?.auditReport || {};
+  const colTypes = analysis.reduce((acc, c) => {
+    const t = c.type || 'unknown';
+    acc[t] = (acc[t] || 0) + 1;
+    return acc;
+  }, {});
+  const totalCols = analysis.length || ds.colCount || 0;
+
+  // 從 audit report 衍生問題清單 (備用 fallback)
+  const issues = _deriveIssues(detail, analysis);
+  // 健康度從 audit 拿
+  const health = typeof auditReport.score === 'number' ? auditReport.score : 75;
+
   return (
     <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr) 1.6fr', gap: 12 }}>
-      <SimpleStat label="總列數"     value={ds.rows.toLocaleString()} />
-      <SimpleStat label="總欄位"     value={ds.cols} />
-      <SimpleStat label="目標變數"   value={ds.target} mono />
-      <SimpleStat label="任務類型"   value={ds.task === 'classification' ? '分類' : '回歸'} />
+      <SimpleStat label="總列數"     value={(ds.rowCount ?? 0).toLocaleString()} />
+      <SimpleStat label="總欄位"     value={ds.colCount ?? totalCols} />
+      <SimpleStat label="檔名"       value={ds.fileName || ds.id} mono />
+      <SimpleStat label="缺失值欄位"  value={`${issues.filter(i => i.kind === 'missing').length}`} />
 
       <Surface style={{ gridColumn: 'span 5', marginTop: 4 }}>
-        <CardHeader title="數據品質檢核" subtitle="自動掃描的問題" right={<Chip tone={ds.health >= 80 ? 'good' : 'warn'}>健康度 {ds.health}/100</Chip>} />
+        <CardHeader title="數據品質檢核" subtitle="自動掃描的問題"
+                    right={<Chip tone={health >= 80 ? 'good' : health >= 60 ? 'warn' : 'bad'}>健康度 {health}/100</Chip>} />
         <div style={{ padding: '4px 16px' }}>
-          {[
-            { tone: 'good', icon: 'checkCircle', title: '無重複列', body: '12,450 列全部唯一,沒有完全相同的紀錄' },
-            { tone: 'warn', icon: 'warning',     title: '3 個欄位有缺失值', body: 'gender (12 列, 0.1%) · monthly_charge (30 列, 0.2%) · last_login (145 列, 1.2%)' },
-            { tone: 'good', icon: 'checkCircle', title: '目標變數類別均衡', body: 'churn=No 占 73.4%, churn=Yes 占 26.6%,差距可接受' },
-            { tone: 'warn', icon: 'warning',     title: 'monthly_charge 偵測到 2.1% 離群值', body: '建議用 IQR / quantile clipping 或保留並讓樹模型自然處理' },
-          ].map((issue, i) => (
+          {issues.length === 0 ? (
+            <div style={{ padding: 16, textAlign: 'center' }}>
+              <Chip tone="good" icon="checkCircle">資料品質檢核完成</Chip>
+              <div className="t-label" style={{ marginTop: 8 }}>暫未偵測到明顯問題</div>
+            </div>
+          ) : issues.map((issue, i) => (
             <Row key={i} gap={10} align="start" style={{
               padding: '12px 0',
               borderBottom: i < 3 ? '1px solid var(--bd-subtle)' : 'none',
@@ -145,19 +304,19 @@ function DataOverview({ ds }) {
         <CardHeader title="欄位類型分布" />
         <div style={{ padding: 16, display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 12 }}>
           {[
-            { label: '數值',   value: (colTypes.int || 0) + (colTypes.float || 0), color: 'var(--primary)' },
-            { label: '類別',   value: colTypes.cat || 0,   color: 'color-mix(in srgb, var(--primary) 70%, transparent)' },
-            { label: '日期',   value: colTypes.date || 0,  color: 'color-mix(in srgb, var(--primary) 45%, transparent)' },
-            { label: 'ID',     value: colTypes.id || 0,    color: 'color-mix(in srgb, var(--primary) 25%, transparent)' },
+            { label: '數值',   value: (colTypes.numeric || 0) + (colTypes.int || 0) + (colTypes.float || 0), color: 'var(--primary)' },
+            { label: '類別',   value: (colTypes.categorical || 0) + (colTypes.cat || 0),   color: 'color-mix(in srgb, var(--primary) 70%, transparent)' },
+            { label: '日期',   value: (colTypes.datetime || 0) + (colTypes.date || 0),  color: 'color-mix(in srgb, var(--primary) 45%, transparent)' },
+            { label: '其他',   value: (colTypes.unknown || 0) + (colTypes.string || 0) + (colTypes.text || 0),    color: 'color-mix(in srgb, var(--primary) 25%, transparent)' },
           ].map((t, i) => (
             <div key={i} style={{ padding: 12, background: 'var(--bg-sunken)', borderRadius: 7, border: '1px solid var(--bd-subtle)' }}>
               <div className="t-label">{t.label}</div>
               <Row gap={8} style={{ marginTop: 6, alignItems: 'baseline' }}>
                 <span className="mono t-h1" style={{ fontWeight: 600, color: 'var(--fg-strong)' }}>{t.value}</span>
-                <span className="t-label mono">/ {MOCK.columns.length}</span>
+                <span className="t-label mono">/ {totalCols || 1}</span>
               </Row>
               <div style={{ marginTop: 8, height: 3, background: 'var(--bg-canvas)', borderRadius: 2, overflow: 'hidden' }}>
-                <div style={{ height: '100%', width: `${(t.value / MOCK.columns.length) * 100}%`, background: t.color }} />
+                <div style={{ height: '100%', width: `${(t.value / Math.max(totalCols, 1)) * 100}%`, background: t.color }} />
               </div>
             </div>
           ))}
@@ -177,14 +336,25 @@ function SimpleStat({ label, value, mono }) {
 }
 
 // ---- Columns tab ----
-function DataColumns() {
+function DataColumns({ detail }) {
+  const analysis = detail?.analysis || [];
+  const totalRows = detail?.rowCount || 1;
+
+  if (analysis.length === 0) {
+    return (
+      <Surface style={{ padding: 24, textAlign: 'center' }}>
+        <span className="t-label">無欄位資訊 — 後端尚未回傳 analysis</span>
+      </Surface>
+    );
+  }
+
   return (
     <Surface>
       <CardHeader
         title="欄位詳細"
+        subtitle={`共 ${analysis.length} 個欄位`}
         right={
           <Row gap={6}>
-            <Button variant="ghost" size="sm" icon="filter">篩選</Button>
             <Button variant="ghost" size="sm" icon="download">匯出 schema</Button>
           </Row>
         }
@@ -194,83 +364,83 @@ function DataColumns() {
           <tr>
             <th>欄位</th>
             <th>類型</th>
-            <th>角色</th>
             <th style={{ textAlign: 'right' }}>缺失</th>
             <th style={{ textAlign: 'right' }}>唯一值</th>
             <th>分布</th>
-            <th></th>
           </tr>
         </thead>
         <tbody>
-          {MOCK.columns.map((c, i) => (
-            <tr key={c.name}>
-              <td className="mono fg-1">{c.name}</td>
-              <td><Chip tone={c.type === 'int' || c.type === 'float' ? 'primary' : c.type === 'cat' ? undefined : undefined}>{c.type}</Chip></td>
-              <td>
-                {c.role === 'target'
-                  ? <Chip tone="good">target</Chip>
-                  : c.role === 'id'
-                    ? <Chip tone="warn">id (略過)</Chip>
-                    : <span className="t-label">feature</span>
-                }
-              </td>
-              <td className="mono" style={{ textAlign: 'right', color: c.missing > 0 ? 'var(--warn)' : 'var(--fg-default)' }}>
-                {c.missing > 0 ? `${c.missing} (${(c.missing/12450*100).toFixed(1)}%)` : '0'}
-              </td>
-              <td className="mono" style={{ textAlign: 'right' }}>{c.unique.toLocaleString()}</td>
-              <td style={{ width: 100 }}>
-                <MiniBar data={Array.from({ length: 8 }, (_, j) => 5 + Math.abs(Math.sin(i * 1.3 + j)) * 20 + j * (i % 2 ? -1 : 1))} />
-              </td>
-              <td><Button variant="bare" size="sm" iconRight="chevronRight">處理</Button></td>
-            </tr>
-          ))}
+          {analysis.map((c, i) => {
+            const missing = c.missing ?? c.nullCount ?? 0;
+            const unique = c.unique ?? c.uniqueCount ?? 0;
+            const distData = c.distribution || c.histogram || _synthDist(i);
+            return (
+              <tr key={c.name || i}>
+                <td className="mono fg-1">{c.name}</td>
+                <td><Chip tone={['numeric','int','float'].includes(c.type) ? 'primary' : undefined}>{c.type || '—'}</Chip></td>
+                <td className="mono" style={{ textAlign: 'right', color: missing > 0 ? 'var(--warn)' : 'var(--fg-default)' }}>
+                  {missing > 0 ? `${missing} (${(missing / totalRows * 100).toFixed(1)}%)` : '0'}
+                </td>
+                <td className="mono" style={{ textAlign: 'right' }}>{(unique || 0).toLocaleString()}</td>
+                <td style={{ width: 100 }}>
+                  <MiniBar data={Array.isArray(distData) ? distData : _synthDist(i)} />
+                </td>
+              </tr>
+            );
+          })}
         </tbody>
       </table>
     </Surface>
   );
 }
 
+function _synthDist(seed) {
+  return Array.from({ length: 8 }, (_, j) => 5 + Math.abs(Math.sin(seed * 1.3 + j)) * 20 + j * (seed % 2 ? -1 : 1));
+}
+
 // ---- Preview tab ----
-function DataPreview() {
-  // Generate plausible sample rows
-  const rows = Array.from({ length: 12 }, (_, i) => ({
-    customer_id: 10000 + i,
-    age: 28 + (i * 7) % 40,
-    gender: i % 3 === 0 ? 'F' : 'M',
-    tenure: ((i * 13) % 60) + 1,
-    monthly_charge: (29.9 + (i * 11.7) % 80).toFixed(2),
-    total_charge: (200 + (i * 387) % 5000).toFixed(2),
-    contract: ['Month-to-Month', 'One Year', 'Two Year'][i % 3],
-    payment: ['Electronic check', 'Mailed check', 'Bank transfer', 'Credit card'][i % 4],
-    complaints: i % 5,
-    churn: i % 4 === 0 ? 'Yes' : 'No',
-  }));
-  const cols = Object.keys(rows[0]);
+function DataPreview({ detail }) {
+  const headers = detail?.headers || [];
+  // 後端 response 可能用 `preview` 或 `data` (依 preprocess.run 實作)
+  const previewRows = detail?.preview || detail?.data || [];
+  const totalRows = detail?.rowCount || 0;
+
+  if (previewRows.length === 0 || headers.length === 0) {
+    return (
+      <Surface style={{ padding: 24, textAlign: 'center' }}>
+        <span className="t-label">無預覽資料</span>
+      </Surface>
+    );
+  }
+
+  // preview 可能是 list of objects 或 list of arrays
+  const isArrayFormat = Array.isArray(previewRows[0]);
+  const displayRows = previewRows.slice(0, 20);
 
   return (
     <Surface>
-      <CardHeader title="前 12 筆" subtitle={`共 12,450 筆 · 顯示 ${cols.length} / 14 欄`} right={
-        <Row gap={6}>
-          <Button variant="ghost" size="sm" icon="arrowLeft" />
-          <span className="t-label mono">1–12 / 12,450</span>
-          <Button variant="ghost" size="sm" icon="arrowRight" />
-        </Row>
-      } />
-      <div style={{ overflow: 'auto' }}>
+      <CardHeader title={`前 ${displayRows.length} 筆`}
+                  subtitle={`共 ${totalRows.toLocaleString()} 筆 · ${headers.length} 個欄位`} />
+      <div style={{ overflow: 'auto', maxHeight: 480 }}>
         <table className="tbl" style={{ fontSize: 12 }}>
           <thead>
             <tr>
-              {cols.map(c => <th key={c} className="mono">{c}</th>)}
+              <th style={{ width: 40, textAlign: 'right' }} className="mono fg-4">#</th>
+              {headers.map(c => <th key={c} className="mono">{c}</th>)}
             </tr>
           </thead>
           <tbody>
-            {rows.map((r, i) => (
+            {displayRows.map((row, i) => (
               <tr key={i}>
-                {cols.map(c => (
-                  <td key={c} className="mono" style={{ color: c === 'churn' ? (r[c] === 'Yes' ? 'var(--bad)' : 'var(--good)') : undefined }}>
-                    {r[c]}
-                  </td>
-                ))}
+                <td className="mono fg-4" style={{ textAlign: 'right' }}>{i + 1}</td>
+                {headers.map((c, j) => {
+                  const v = isArrayFormat ? row[j] : row[c];
+                  return (
+                    <td key={c} className="mono" style={{ maxWidth: 200, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                      {v == null || v === '' ? <span className="fg-4">—</span> : String(v)}
+                    </td>
+                  );
+                })}
               </tr>
             ))}
           </tbody>
@@ -608,6 +778,60 @@ function MissingHeatmap() {
       )}
     </svg>
   );
+}
+
+// 從 audit report + analysis 衍生「數據品質檢核」列表
+function _deriveIssues(detail, analysis) {
+  if (!detail) return [];
+  const issues = [];
+  const audit = detail.auditReport || {};
+  const totalRows = detail.rowCount || 1;
+
+  // 1. 缺失值欄位
+  const missingCols = analysis.filter(c => (c.missing ?? 0) > 0);
+  if (missingCols.length === 0) {
+    issues.push({ tone: 'good', icon: 'checkCircle', title: '無缺失值', body: '所有欄位都完整,不需要補值' });
+  } else {
+    issues.push({
+      tone: 'warn', icon: 'warning', kind: 'missing',
+      title: `${missingCols.length} 個欄位有缺失值`,
+      body: missingCols.slice(0, 5).map(c => `${c.name} (${c.missing} 列, ${((c.missing || 0) / totalRows * 100).toFixed(1)}%)`).join(' · ')
+            + (missingCols.length > 5 ? ` · 其他 ${missingCols.length - 5} 個...` : ''),
+    });
+  }
+
+  // 2. audit duplicates
+  if (typeof audit.duplicateCount === 'number') {
+    if (audit.duplicateCount === 0) {
+      issues.push({ tone: 'good', icon: 'checkCircle', title: '無重複列', body: `${totalRows.toLocaleString()} 列全部唯一` });
+    } else {
+      issues.push({ tone: 'warn', icon: 'warning', title: `偵測到 ${audit.duplicateCount} 列重複資料`, body: '建議刪除或檢查資料來源' });
+    }
+  }
+
+  // 3. audit outliers
+  if (Array.isArray(audit.outlierCols) && audit.outlierCols.length > 0) {
+    issues.push({
+      tone: 'warn', icon: 'warning',
+      title: `${audit.outlierCols.length} 個欄位有離群值`,
+      body: audit.outlierCols.slice(0, 3).map(o => `${o.column || o.name}: ${o.outlierRatio ? (o.outlierRatio * 100).toFixed(1) + '%' : '已偵測'}`).join(' · '),
+    });
+  }
+
+  // 4. high cardinality categoricals
+  const highCardCat = analysis.filter(c =>
+    (c.type === 'categorical' || c.type === 'cat' || c.type === 'string') && (c.unique || 0) > 50,
+  );
+  if (highCardCat.length > 0) {
+    issues.push({
+      tone: 'info', icon: 'info',
+      title: `${highCardCat.length} 個高基數類別欄位`,
+      body: highCardCat.slice(0, 3).map(c => `${c.name} (${c.unique} 個唯一值)`).join(' · ')
+            + ' — 建議用 target encoding 或 frequency encoding',
+    });
+  }
+
+  return issues;
 }
 
 window.PageData = PageData;

@@ -69,6 +69,41 @@ NewUI.api = (() => {
     return ct.includes('application/json') ? res.json() : res.text();
   }
 
+  // ----------------------------------------------------------------
+  // Simple in-memory GET cache (跨頁切換不用每次重抓)
+  //   - 預設 TTL 60 秒 (.getCached)
+  //   - 可帶 { force: true } 強制重抓 (例如使用者點重新整理)
+  //   - 寫入操作 (upload / delete / train) 用 invalidate(prefix) 清掉相關 entry
+  // ----------------------------------------------------------------
+  const _cache = new Map();   // url → { data, expires }
+
+  function _cacheGet(url) {
+    const e = _cache.get(url);
+    if (!e) return null;
+    if (e.expires < Date.now()) { _cache.delete(url); return null; }
+    return e.data;
+  }
+  function _cacheSet(url, data, ttlMs) {
+    _cache.set(url, { data, expires: Date.now() + ttlMs });
+  }
+  function invalidate(prefix) {
+    for (const k of Array.from(_cache.keys())) {
+      if (!prefix || k.startsWith(prefix)) _cache.delete(k);
+    }
+  }
+  function clearCache() { _cache.clear(); }
+
+  async function getCached(path, opts = {}) {
+    const ttl = opts.ttlMs ?? 60_000;
+    if (!opts.force) {
+      const hit = _cacheGet(path);
+      if (hit !== null) return hit;
+    }
+    const data = await request(path, { method: 'GET' });
+    _cacheSet(path, data, ttl);
+    return data;
+  }
+
   return {
     baseUrl,
     token,
@@ -79,8 +114,12 @@ NewUI.api = (() => {
     request,
     // shortcuts
     get:  (path)        => request(path, { method: 'GET' }),
+    getCached,
     post: (path, body)  => request(path, { method: 'POST', body: body instanceof FormData ? body : JSON.stringify(body) }),
     del:  (path)        => request(path, { method: 'DELETE' }),
+    // Cache control
+    invalidate,
+    clearCache,
     // Auth helpers
     async me() { return this.request('/api/auth/me'); },
     isAuthed() { return !!token(); },

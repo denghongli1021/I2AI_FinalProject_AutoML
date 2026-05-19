@@ -4,27 +4,173 @@
 // =============================================================================
 
 function PageInsights() {
-  // History cascade: dataset → target → run
-  const [datasetId, setDatasetId]   = React.useState(MOCK.trainingRuns[0].datasetId);
-  const targetsForDs = [...new Set(MOCK.trainingRuns.filter(r => r.datasetId === datasetId).map(r => r.target))];
-  const [target, setTarget]         = React.useState(targetsForDs[0]);
+  // ---- 拉真實資料 ----
+  const [loading, setLoading] = React.useState(true);
+  const [error, setError]     = React.useState(null);
+  const [runs, setRuns]       = React.useState([]);
+  const [models, setModels]   = React.useState([]);
+  const [datasets, setDatasets] = React.useState([]);
+
   React.useEffect(() => {
-    if (!targetsForDs.includes(target)) setTarget(targetsForDs[0]);
-  }, [datasetId]);
-  const runsForTarget = MOCK.trainingRuns.filter(r => r.datasetId === datasetId && r.target === target);
-  const [runId, setRunId]           = React.useState(runsForTarget[0]?.id);
+    setLoading(true);
+    setError(null);
+    Promise.all([
+      NewUI.api.getCached('/api/training-runs?limit=100').then(r => r.runs || []).catch(() => []),
+      NewUI.api.getCached('/api/models?limit=500').then(r => r.models || []).catch(() => []),
+      NewUI.api.getCached('/api/dataset/list').then(r => r.datasets || []).catch(() => []),
+    ]).then(([rRuns, rModels, rDatasets]) => {
+      setRuns(rRuns);
+      setModels(rModels);
+      setDatasets(rDatasets);
+      setLoading(false);
+    }).catch(err => { setError(err.message || '載入失敗'); setLoading(false); });
+  }, []);
+
+  // ---- 把 runs / models 正規化 (跟 page-models.jsx 同樣的 shape) ----
+  const normalizedModels = React.useMemo(() => models.map(m => {
+    const b = m.bundle || {}, mt = b.metrics || {};
+    return {
+      id: m.id, bundle: b, trainingRunId: m.trainingRunId, datasetId: m.datasetId,
+      algo: (b.name || b.type || '?').replace(/^\[(原始|預處理)\]\s*/, ''),
+      rawName: b.name || b.type || '?',
+      source: b.dataSource === 'preprocessed' ? '預處理' : '原始',
+      taskType: b.taskType || 'classification',
+      f1: typeof mt.f1 === 'number' ? mt.f1 : null,
+      auc: typeof mt.auc === 'number' ? mt.auc : null,
+      acc: typeof mt.testAccuracy === 'number' ? mt.testAccuracy : (typeof mt.accuracy === 'number' ? mt.accuracy : null),
+      testScore: typeof mt.testScore === 'number' ? mt.testScore : null,
+      testScoreLabel: mt.testScoreLabel || (b.taskType === 'regression' ? 'R²' : 'F1'),
+      featureImportance: b.featureImportance || [],
+      featureNames: b.featureNames || [],
+      testTrue: b.testTrue || [],
+      testPred: b.testPred || [],
+      trainTime: (b.trainTime || 0) / 1000,
+    };
+  }), [models]);
+
+  // ---- Cascade: dataset → target → run ----
+  // dataset 從 datasets 列表拿 (有 fileName);target 從 runs 群組
+  const availableDatasetIds = React.useMemo(() => {
+    const ids = new Set();
+    runs.forEach(r => { if (r.datasetId) ids.add(r.datasetId); });
+    return [...ids];
+  }, [runs]);
+
+  const [datasetId, setDatasetId] = React.useState(null);
   React.useEffect(() => {
-    if (!runsForTarget.some(r => r.id === runId)) setRunId(runsForTarget[0]?.id);
-  }, [datasetId, target]);
-  const run = MOCK.trainingRuns.find(r => r.id === runId) || MOCK.trainingRuns[0];
+    if (!datasetId && availableDatasetIds.length > 0) setDatasetId(availableDatasetIds[0]);
+    else if (datasetId && !availableDatasetIds.includes(datasetId) && availableDatasetIds.length > 0) {
+      setDatasetId(availableDatasetIds[0]);
+    }
+  }, [availableDatasetIds.join(',')]);
+
+  const targetsForDs = React.useMemo(
+    () => [...new Set(runs.filter(r => r.datasetId === datasetId).map(r => r.target))],
+    [runs, datasetId],
+  );
+  const [target, setTarget] = React.useState(null);
+  React.useEffect(() => {
+    if (targetsForDs.length > 0 && (!target || !targetsForDs.includes(target))) setTarget(targetsForDs[0]);
+  }, [targetsForDs.join(',')]);
+
+  const runsForTarget = React.useMemo(
+    () => runs.filter(r => r.datasetId === datasetId && r.target === target && r.status === 'completed'),
+    [runs, datasetId, target],
+  );
+  const [runId, setRunId] = React.useState(null);
+  React.useEffect(() => {
+    if (runsForTarget.length > 0 && (!runId || !runsForTarget.find(r => r.id === runId))) {
+      setRunId(runsForTarget[0].id);
+    }
+  }, [runsForTarget.map(r => r.id).join(',')]);
+
+  const run = runs.find(r => r.id === runId);
+  const isRegression = run?.taskType === 'regression';
+
+  // models from this run (sorted by score desc)
+  const runModels = React.useMemo(() => {
+    const arr = normalizedModels.filter(m => m.trainingRunId === runId);
+    arr.sort((a, b) => (b.testScore || 0) - (a.testScore || 0));
+    return arr;
+  }, [normalizedModels, runId]);
 
   const [tab, setTab] = React.useState('importance');
-  const [modelId, setModelId] = React.useState('m1');
-  const [importMethod, setImportMethod] = React.useState('shap');
-  const model = MOCK.models.find(m => m.id === modelId) || MOCK.models[0];
+  const [modelId, setModelId] = React.useState(null);
+  React.useEffect(() => {
+    // 從 sessionStorage 拿 Models 頁傳來的 focus model
+    let focusId = null;
+    try { focusId = sessionStorage.getItem('newui_focus_model_id'); } catch (e) {}
+    if (focusId && normalizedModels.find(m => m.id === focusId)) {
+      setModelId(focusId);
+      try { sessionStorage.removeItem('newui_focus_model_id'); } catch (e) {}
+      // 也同步把 cascade 切到對應 run/dataset
+      const focusModel = normalizedModels.find(m => m.id === focusId);
+      if (focusModel) {
+        const focusRun = runs.find(r => r.id === focusModel.trainingRunId);
+        if (focusRun) {
+          setDatasetId(focusRun.datasetId);
+          setTarget(focusRun.target);
+          setRunId(focusRun.id);
+        }
+      }
+    } else if (runModels.length > 0 && (!modelId || !runModels.find(m => m.id === modelId))) {
+      setModelId(runModels[0].id);
+    }
+  }, [normalizedModels.length, runModels.map(m => m.id).join(',')]);
 
-  // Switch to regression mode if the active run is regression
-  const isRegression = run.task === 'regression';
+  const [importMethod, setImportMethod] = React.useState('shap');
+  const model = normalizedModels.find(m => m.id === modelId) || runModels[0] || null;
+
+  // ---- empty / loading states ----
+  if (loading) {
+    return (
+      <div style={{ padding: 24, textAlign: 'center', minHeight: 300, color: 'var(--fg-muted)' }}>
+        <span className="t-label">載入洞察中...</span>
+      </div>
+    );
+  }
+  if (error) {
+    return (
+      <div style={{ padding: 24 }}>
+        <Surface style={{ padding: 24 }}>
+          <Row gap={10}>
+            <Icon name="warning" size={20} style={{ color: 'var(--bad)' }} />
+            <span className="t-label">{error}</span>
+          </Row>
+        </Surface>
+      </div>
+    );
+  }
+  if (runs.length === 0 || normalizedModels.length === 0) {
+    return (
+      <div style={{ padding: 24 }}>
+        <Row align="end" style={{ marginBottom: 16 }}>
+          <div>
+            <h1 className="t-h1">洞察</h1>
+            <p className="t-label" style={{ marginTop: 4 }}>了解模型如何做決定</p>
+          </div>
+        </Row>
+        <Surface style={{ padding: 48, textAlign: 'center' }}>
+          <Icon name="bulb" size={40} style={{ color: 'var(--primary)', marginBottom: 12 }} />
+          <div className="t-title">尚無訓練紀錄</div>
+          <div className="t-label" style={{ marginTop: 6, marginBottom: 20 }}>先去實驗室訓練一個模型,再回來看洞察</div>
+        </Surface>
+      </div>
+    );
+  }
+  if (!model || !run) {
+    return (
+      <div style={{ padding: 24, color: 'var(--fg-muted)' }}>
+        <span className="t-label">沒有可顯示的模型 — 試試上方 cascade 選擇器</span>
+      </div>
+    );
+  }
+
+  // ---- run summary metadata for cards ----
+  const bestModel = runModels[0];
+  const featureCount = (model.featureNames || []).length || (model.featureImportance || []).length || 0;
+  const runScoreLabel = bestModel?.testScoreLabel || (isRegression ? 'R²' : 'F1');
+  const bestScore = bestModel?.testScore;
 
   return (
     <div style={{ padding: 24 }} >
@@ -35,9 +181,11 @@ function PageInsights() {
         </div>
         <Row gap={8}>
           <span className="t-label">模型</span>
-          <select className="input" value={modelId} onChange={e => setModelId(e.target.value)} style={{ width: 240 }}>
-            {MOCK.models.map(m => (
-              <option key={m.id} value={m.id}>#{m.rank} {m.algo} · F1 {m.f1.toFixed(3)}</option>
+          <select className="input" value={modelId || ''} onChange={e => setModelId(e.target.value)} style={{ width: 280 }}>
+            {runModels.map((m, i) => (
+              <option key={m.id} value={m.id}>
+                #{i + 1} {m.algo} {m.testScore != null ? `· ${m.testScoreLabel} ${m.testScore.toFixed(3)}` : ''}
+              </option>
             ))}
           </select>
         </Row>
@@ -48,43 +196,44 @@ function PageInsights() {
         <Row gap={12} style={{ padding: '12px 16px', alignItems: 'center', flexWrap: 'wrap' }}>
           <Row gap={6}>
             <span className="t-label">資料集</span>
-            <select className="input" value={datasetId} onChange={e => setDatasetId(e.target.value)} style={{ width: 180 }}>
-              {MOCK.datasets.map(d => (
-                <option key={d.id} value={d.id}>{d.name}</option>
-              ))}
+            <select className="input" value={datasetId || ''} onChange={e => setDatasetId(e.target.value)} style={{ width: 220 }}>
+              {availableDatasetIds.map(did => {
+                const ds = datasets.find(d => d.id === did);
+                return <option key={did} value={did}>{ds?.fileName || did}</option>;
+              })}
             </select>
           </Row>
           <span className="fg-4 mono">›</span>
           <Row gap={6}>
             <span className="t-label">target</span>
-            <select className="input mono" value={target} onChange={e => setTarget(e.target.value)} style={{ width: 140 }}>
+            <select className="input mono" value={target || ''} onChange={e => setTarget(e.target.value)} style={{ width: 160 }}>
               {targetsForDs.map(t => <option key={t} value={t}>{t}</option>)}
             </select>
           </Row>
           <span className="fg-4 mono">›</span>
-          <Row gap={6} style={{ flex: 1, minWidth: 240 }}>
+          <Row gap={6} style={{ flex: 1, minWidth: 280 }}>
             <span className="t-label">訓練</span>
-            <select className="input" value={runId} onChange={e => setRunId(e.target.value)} style={{ flex: 1 }}>
+            <select className="input" value={runId || ''} onChange={e => setRunId(e.target.value)} style={{ flex: 1 }}>
               {runsForTarget.map(r => (
                 <option key={r.id} value={r.id}>
-                  {r.startedAt} · {r.modelCount} 模型 · {r.scoreLabel}={typeof r.bestScore === 'number' && r.bestScore < 10 ? r.bestScore.toFixed(3) : r.bestScore}
-                  {r.engine === 'pipeline' ? ' · Pipeline' : ''}
+                  {_fmtTime(r.startedAt)} · {r.engine} · {(r.modelIds || []).length} 模型
                 </option>
               ))}
             </select>
           </Row>
-          <Button variant="ghost" size="sm" icon="info" title="此 run 的 metadata">
-            <span className="mono fg-3" style={{ fontSize: 11 }}>{run.id}</span>
-          </Button>
         </Row>
       </Surface>
 
       {/* ===== Summary cards (4) ===== */}
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 12, marginBottom: 16 }}>
-        <SummaryCard icon="bars"        label="最佳模型"   value={run.bestModel} hint={`${run.engine} engine`} />
-        <SummaryCard icon="checkCircle" label={run.scoreLabel} value={typeof run.bestScore === 'number' && run.bestScore < 10 ? run.bestScore.toFixed(3) : run.bestScore.toLocaleString()} hint={isRegression ? '越小越好' : '越大越好'} highlight />
-        <SummaryCard icon="cube"        label="使用特徵數量" value={MOCK.featureImportance.length} hint="含預處理生成欄位" />
-        <SummaryCard icon="zap"         label="已訓練模型"   value={run.modelCount} hint={`run ${run.id}`} />
+        <SummaryCard icon="bars" label="最佳模型"
+                     value={bestModel?.algo || '—'}
+                     hint={`${run.engine || 'sklearn'} engine`} />
+        <SummaryCard icon="checkCircle" label={runScoreLabel}
+                     value={bestScore != null ? bestScore.toFixed(3) : '—'}
+                     hint={isRegression ? '越小越好' : '越大越好'} highlight />
+        <SummaryCard icon="cube" label="特徵數量" value={featureCount} hint="使用的訓練特徵" />
+        <SummaryCard icon="zap" label="已訓練模型" value={runModels.length} hint={`run ${(run.id || '').slice(0, 8)}`} />
       </div>
 
       <PageTabs
@@ -101,13 +250,19 @@ function PageInsights() {
 
       <div style={{ paddingTop: 16 }}>
         {tab === 'importance'  && <FeatureImportance method={importMethod} onChangeMethod={setImportMethod} model={model} />}
-        {tab === 'shap'        && <ShapWaterfall model={model} />}
-        {tab === 'compare'     && <ModelCompareChart models={MOCK.modelCompare} scoreLabel={run.scoreLabel} />}
+        {tab === 'shap'        && <ShapTab model={model} />}
+        {tab === 'compare'     && <ModelCompareChart models={runModels} scoreLabel={runScoreLabel} />}
         {tab === 'whatif'      && <WhatIfSimulator model={model} />}
         {tab === 'predictions' && <PredictionDiagnostics model={model} isRegression={isRegression} />}
       </div>
     </div>
   );
+}
+
+function _fmtTime(sec) {
+  if (!sec) return '?';
+  const d = new Date(sec * 1000);
+  return `${d.getMonth() + 1}/${d.getDate()} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
 }
 
 // ---- Summary card ----
@@ -142,8 +297,36 @@ function SummaryCard({ icon, label, value, hint, highlight }) {
 
 // ---- Feature importance ----
 function FeatureImportance({ method, onChangeMethod, model }) {
-  const data = [...MOCK.featureImportance].sort((a, b) => b[method] - a[method]);
-  const maxVal = data[0][method];
+  // 真實 model.featureImportance 結構通常是 [{ feature, importance }] 或 [{ name, gain, shap }]
+  // 我們做一次正規化:把任何 shape 轉成 [{ feature, shap, gain }]
+  const rawFI = model?.featureImportance || [];
+  const data = React.useMemo(() => {
+    if (rawFI.length === 0) return [];
+    const norm = rawFI.map(fi => ({
+      feature: fi.feature || fi.name || '?',
+      shap:    typeof fi.shap === 'number' ? fi.shap
+             : typeof fi.importance === 'number' ? fi.importance
+             : 0,
+      gain:    typeof fi.gain === 'number' ? fi.gain
+             : typeof fi.importance === 'number' ? fi.importance
+             : 0,
+    }));
+    return norm.sort((a, b) => b[method] - a[method]);
+  }, [rawFI, method]);
+
+  const maxVal = data[0]?.[method] || 1;
+
+  if (data.length === 0) {
+    return (
+      <Surface style={{ padding: 24, textAlign: 'center' }}>
+        <Icon name="bulb" size={28} style={{ color: 'var(--fg-faint)', marginBottom: 8 }} />
+        <div className="t-label">這個模型沒有特徵重要性資料</div>
+        <div className="t-label fg-4" style={{ marginTop: 4, fontSize: 11 }}>
+          (Pipeline 引擎的 Stack ensemble 不直接揭露特徵重要性,可改試 sklearn 引擎的單一模型)
+        </div>
+      </Surface>
+    );
+  }
 
   return (
     <div style={{ display: 'grid', gridTemplateColumns: '1.4fr 1fr', gap: 12 }}>
@@ -175,17 +358,17 @@ function FeatureImportance({ method, onChangeMethod, model }) {
       </Surface>
 
       <Surface>
-        <CardHeader title="SHAP 蜂群圖" subtitle="200 個樣本的影響分布" />
+        <CardHeader title="SHAP 蜂群圖" subtitle={`top ${Math.min(data.length, 6)} 個特徵的影響分布`} />
         <div style={{ padding: 16, height: 380 }}>
-          <BeeswarmPlot />
+          <BeeswarmPlot features={data.slice(0, 6).map(d => d.feature)} />
         </div>
       </Surface>
     </div>
   );
 }
 
-function BeeswarmPlot() {
-  const features = MOCK.featureImportance.slice(0, 6).map(f => f.feature);
+function BeeswarmPlot({ features = [] }) {
+  if (!features.length) features = MOCK.featureImportance.slice(0, 6).map(f => f.feature);
   return (
     <svg viewBox="0 0 100 100" preserveAspectRatio="xMidYMid meet" style={{ width: '100%', height: '100%' }}>
       <line x1="60" y1="4" x2="60" y2="88" stroke="var(--bd-subtle)" strokeWidth="0.5" />
@@ -218,23 +401,80 @@ function BeeswarmPlot() {
 }
 
 // ---- SHAP waterfall + interaction dependence ----
-function ShapWaterfall({ model }) {
-  const [sampleIdx, setSampleIdx] = React.useState(1024);
-  const [interactionFeat, setInteractionFeat] = React.useState(MOCK.featureImportance[1].feature);
+function ShapTab({ model }) {
+  const [sampleIdx, setSampleIdx] = React.useState(0);
   const [recomputing, setRecomputing] = React.useState(false);
-  const s = MOCK.shapSample;
-  let running = s.base;
-  const rows = s.contributions.map(c => {
-    const start = running;
-    running += c.delta;
-    return { ...c, start, end: running };
-  });
+  const [shapErr, setShapErr] = React.useState(null);
 
-  function recompute() {
+  // 用 model.featureImportance 當基底,合成一個 waterfall (real SHAP value 要叫 backend 跑,慢)
+  // top features × 隨機 sign 模擬一個 sample 的貢獻;sample # 變動會改 seed 讓 waterfall 變化
+  const rawFI = model?.featureImportance || [];
+  const fiTop = React.useMemo(() => {
+    return rawFI
+      .map(fi => ({
+        feature: fi.feature || fi.name || '?',
+        importance: typeof fi.shap === 'number' ? Math.abs(fi.shap)
+                   : typeof fi.importance === 'number' ? Math.abs(fi.importance) : 0,
+      }))
+      .sort((a, b) => b.importance - a.importance)
+      .slice(0, 8);
+  }, [rawFI]);
+
+  const [interactionFeat, setInteractionFeat] = React.useState(null);
+  React.useEffect(() => {
+    if (fiTop.length > 0 && (!interactionFeat || !fiTop.find(f => f.feature === interactionFeat))) {
+      setInteractionFeat(fiTop[1]?.feature || fiTop[0]?.feature);
+    }
+  }, [fiTop.map(f => f.feature).join(',')]);
+
+  // 合成 waterfall rows
+  const { rows, base, finalVal } = React.useMemo(() => {
+    if (fiTop.length === 0) return { rows: [], base: 0.5, finalVal: 0.5 };
+    const seed = sampleIdx + 1;
+    const baseV = 0.32;
+    let running = baseV;
+    const rs = fiTop.map((f, i) => {
+      const sign = Math.sin(seed * 11 + i * 7) > 0 ? 1 : -1;
+      const delta = sign * f.importance * 0.8;
+      const start = running;
+      running += delta;
+      return { feature: f.feature, delta, start, end: running };
+    });
+    return { rows: rs, base: baseV, finalVal: Math.max(0.02, Math.min(0.98, running)) };
+  }, [fiTop, sampleIdx]);
+
+  // 呼叫真 backend SHAP (Phase 2 — 慢且需 plotly,目前只測連線)
+  async function recompute() {
+    if (!model?.id) return;
     setRecomputing(true);
-    setTimeout(() => setRecomputing(false), 800);
+    setShapErr(null);
+    try {
+      const r = await NewUI.api.post('/api/visualize/shap', {
+        modelId: model.id,
+        sampleIndex: sampleIdx,
+        targetFeature: interactionFeat,
+        maxSamples: 50,
+      });
+      // backend 回 plotly figure JSON,但目前前端沒載 Plotly 函式庫,先顯示成功訊息
+      setShapErr(null);
+      alert(`SHAP 計算成功 (${r.sampleCount || '?'} 個樣本)\n注意:Plotly 視覺化在新 UI 還沒接,目前用合成 waterfall 顯示。`);
+    } catch (err) {
+      setShapErr(err.message || 'SHAP 計算失敗');
+    } finally {
+      setRecomputing(false);
+    }
   }
 
+  if (fiTop.length === 0) {
+    return (
+      <Surface style={{ padding: 24, textAlign: 'center' }}>
+        <Icon name="bulb" size={28} style={{ color: 'var(--fg-faint)', marginBottom: 8 }} />
+        <div className="t-label">這個模型沒有 SHAP / 特徵重要性資料可用</div>
+      </Surface>
+    );
+  }
+
+  return (
   return (
     <Stack gap={12}>
       {/* Controls bar */}
@@ -245,12 +485,13 @@ function ShapWaterfall({ model }) {
                  onChange={e => setSampleIdx(parseInt(e.target.value) || 0)}
                  style={{ width: 80, fontSize: 12, textAlign: 'right' }} />
           <span className="t-label" style={{ marginLeft: 8 }}>交互特徵</span>
-          <select className="input mono" value={interactionFeat} onChange={e => setInteractionFeat(e.target.value)} style={{ width: 160, fontSize: 12 }}>
-            {MOCK.featureImportance.map(f => <option key={f.feature} value={f.feature}>{f.feature}</option>)}
+          <select className="input mono" value={interactionFeat || ''} onChange={e => setInteractionFeat(e.target.value)} style={{ width: 200, fontSize: 12 }}>
+            {fiTop.map(f => <option key={f.feature} value={f.feature}>{f.feature}</option>)}
           </select>
           <Row gap={4} style={{ marginLeft: 'auto' }}>
+            {shapErr && <span className="t-label" style={{ color: 'var(--bad)' }}>{shapErr}</span>}
             <Button variant="primary" size="sm" icon="refresh" onClick={recompute} disabled={recomputing}>
-              {recomputing ? '計算中…' : '重新計算'}
+              {recomputing ? '計算中…' : '從後端重算 SHAP'}
             </Button>
           </Row>
         </Row>
@@ -259,34 +500,35 @@ function ShapWaterfall({ model }) {
       {/* Waterfall + prediction summary */}
       <div style={{ display: 'grid', gridTemplateColumns: '1.6fr 1fr', gap: 12 }}>
         <Surface>
-          <CardHeader title={`樣本 #${sampleIdx} 的決策路徑`} subtitle={`base = ${s.base} → output = ${s.final}`}
+          <CardHeader title={`樣本 #${sampleIdx} 的決策路徑`}
+                      subtitle={`base = ${base.toFixed(2)} → output = ${finalVal.toFixed(2)} · 注:此為從特徵重要性合成的估計值`}
                       right={
                         <Row gap={6}>
-                          <Button variant="ghost" size="sm" icon="arrowLeft" onClick={() => setSampleIdx(i => Math.max(1, i - 1))}>上一筆</Button>
+                          <Button variant="ghost" size="sm" icon="arrowLeft" onClick={() => setSampleIdx(i => Math.max(0, i - 1))}>上一筆</Button>
                           <Button variant="ghost" size="sm" iconRight="arrowRight" onClick={() => setSampleIdx(i => i + 1)}>下一筆</Button>
                         </Row>
                       } />
           <div style={{ padding: 16 }}>
-            <WaterfallChart rows={rows} base={s.base} final={s.final} />
+            <WaterfallChart rows={rows} base={base} final={finalVal} />
           </div>
         </Surface>
 
         <Surface>
           <CardHeader title="預測結果" />
           <div style={{ padding: 16 }}>
-            <div className="t-label">預測值</div>
+            <div className="t-label">合成預測值</div>
             <Row gap={8} style={{ marginTop: 6, alignItems: 'baseline' }}>
-              <span className="t-metric" style={{ color: s.final > 0.5 ? 'var(--bad)' : 'var(--good)' }}>{(s.final * 100).toFixed(1)}%</span>
-              <span className="t-label">流失機率</span>
+              <span className="t-metric" style={{ color: finalVal > 0.5 ? 'var(--bad)' : 'var(--good)' }}>{(finalVal * 100).toFixed(1)}%</span>
+              <span className="t-label">機率</span>
             </Row>
             <div style={{ marginTop: 12, height: 6, background: 'var(--bg-sunken)', borderRadius: 3, overflow: 'hidden' }}>
-              <div style={{ height: '100%', width: `${s.final * 100}%`, background: s.final > 0.5 ? 'var(--bad)' : 'var(--good)' }} />
+              <div style={{ height: '100%', width: `${finalVal * 100}%`, background: finalVal > 0.5 ? 'var(--bad)' : 'var(--good)' }} />
             </div>
 
             <div style={{ marginTop: 24, padding: 12, background: 'var(--bg-sunken)', borderRadius: 7, border: '1px solid var(--bd-subtle)' }}>
-              <div className="t-label" style={{ marginBottom: 8 }}>關鍵推力</div>
+              <div className="t-label" style={{ marginBottom: 8 }}>關鍵推力 (top |delta|)</div>
               <Stack gap={8}>
-                {rows.filter(r => Math.abs(r.delta) >= 0.07).map((r, i) => (
+                {rows.filter(r => Math.abs(r.delta) >= 0.04).slice(0, 5).map((r, i) => (
                   <Row key={i} gap={8}>
                     <Chip tone={r.delta > 0 ? 'bad' : 'good'} className="mono">
                       {r.delta > 0 ? '+' : ''}{r.delta.toFixed(2)}
@@ -300,12 +542,12 @@ function ShapWaterfall({ model }) {
         </Surface>
       </div>
 
-      {/* Interaction dependence plot */}
+      {/* Interaction dependence plot — 用合成資料,真實 SHAP interaction 要叫 backend */}
       <Surface>
         <CardHeader title="交互依賴圖 (Interaction Dependence)"
-                    subtitle={`主特徵: ${interactionFeat} · 顏色: 第二特徵強度`} />
+                    subtitle={`主特徵: ${interactionFeat || '?'} · 顏色: 第二特徵強度 · 注:合成圖示`} />
         <div style={{ padding: 16, height: 280 }}>
-          <InteractionDependencePlot data={MOCK.shapInteraction} mainFeat={interactionFeat} />
+          <InteractionDependencePlot data={MOCK.shapInteraction} mainFeat={interactionFeat || '?'} />
         </div>
       </Surface>
     </Stack>
@@ -390,25 +632,34 @@ function InteractionDependencePlot({ data, mainFeat }) {
 
 // ---- Model comparison chart ----
 function ModelCompareChart({ models, scoreLabel }) {
+  if (!models || models.length === 0) {
+    return (
+      <Surface style={{ padding: 24, textAlign: 'center' }}>
+        <span className="t-label">這個 run 沒有可比較的模型</span>
+      </Surface>
+    );
+  }
   const metrics = ['f1', 'auc', 'acc'];
   const labels = { f1: 'F1', auc: 'AUC', acc: 'Accuracy' };
-  const maxV = Math.max(...models.flatMap(m => metrics.map(k => m[k] ?? 0)));
+  const allVals = models.flatMap(m => metrics.map(k => m[k]).filter(v => v != null));
+  const maxV = allVals.length ? Math.max(...allVals) : 1;
+  const fmt = v => v == null ? '—' : v.toFixed(3);
 
   return (
     <div style={{ display: 'grid', gridTemplateColumns: '1.4fr 1fr', gap: 12 }}>
       <Surface>
         <CardHeader title="模型分數比較" subtitle={`${models.length} 個模型 · 三項 metric`} />
-        <div style={{ padding: 16 }}>
+        <div style={{ padding: 16, maxHeight: 600, overflow: 'auto' }}>
           <Stack gap={14}>
             {models.map((m, i) => (
-              <div key={`${m.algo}-${m.source}-${i}`}>
+              <div key={m.id || i}>
                 <Row style={{ justifyContent: 'space-between', marginBottom: 6 }}>
                   <Row gap={8}>
                     <span className="t-label mono fg-3" style={{ width: 18, textAlign: 'right' }}>#{i + 1}</span>
                     <span className="t-body-lg fg-1">{m.algo}</span>
                     <Chip className="mono">{m.source}</Chip>
                   </Row>
-                  <span className="mono fg-1" style={{ fontSize: 11 }}>F1 {m.f1.toFixed(3)}</span>
+                  <span className="mono fg-1" style={{ fontSize: 11 }}>{scoreLabel} {fmt(m.testScore)}</span>
                 </Row>
                 <Stack gap={4}>
                   {metrics.map(k => (
@@ -416,11 +667,11 @@ function ModelCompareChart({ models, scoreLabel }) {
                       <span className="t-label mono fg-3" style={{ width: 36 }}>{labels[k]}</span>
                       <div style={{ flex: 1, height: 6, background: 'var(--bg-sunken)', borderRadius: 3, overflow: 'hidden' }}>
                         <div style={{
-                          height: '100%', width: `${(m[k] / maxV) * 100}%`,
+                          height: '100%', width: m[k] != null ? `${(m[k] / maxV) * 100}%` : '0%',
                           background: k === 'f1' ? 'var(--primary)' : k === 'auc' ? 'color-mix(in srgb, var(--primary) 70%, transparent)' : 'color-mix(in srgb, var(--primary) 40%, transparent)',
                         }} />
                       </div>
-                      <span className="mono fg-1" style={{ width: 46, textAlign: 'right', fontSize: 11 }}>{m[k].toFixed(3)}</span>
+                      <span className="mono fg-1" style={{ width: 46, textAlign: 'right', fontSize: 11 }}>{fmt(m[k])}</span>
                     </Row>
                   ))}
                 </Stack>
@@ -431,19 +682,24 @@ function ModelCompareChart({ models, scoreLabel }) {
       </Surface>
 
       <Surface>
-        <CardHeader title="效能 vs 速度" subtitle="散點:橫軸=訓練秒數,縱軸=F1" />
+        <CardHeader title="效能 vs 速度" subtitle="散點:橫軸=訓練秒數,縱軸=score" />
         <div style={{ padding: 16, height: 380 }}>
-          <SpeedQualityScatter />
+          <SpeedQualityScatter models={models} />
         </div>
       </Surface>
     </div>
   );
 }
 
-function SpeedQualityScatter() {
-  const pts = MOCK.models.map(m => ({
-    x: m.trainTime, y: m.f1, algo: m.algo, tag: m.tag,
-  }));
+function SpeedQualityScatter({ models = MOCK.models }) {
+  const pts = (models || []).map(m => ({
+    x: m.trainTime || 0,
+    y: m.testScore != null ? m.testScore : (m.f1 != null ? m.f1 : 0),
+    algo: m.algo,
+  })).filter(p => p.y > 0);
+  if (pts.length === 0) {
+    return <div style={{ height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center' }}><span className="t-label">無資料</span></div>;
+  }
   const xMax = Math.max(...pts.map(p => p.x)) * 1.1;
   const yMin = Math.min(...pts.map(p => p.y)) - 0.02;
   const xScale = v => (v / xMax) * 88 + 6;
@@ -592,33 +848,68 @@ function WhatIfSimulator({ model }) {
 
 // ---- Prediction diagnostics ----
 function PredictionDiagnostics({ model, isRegression }) {
+  if (!model) {
+    return <Surface style={{ padding: 24, textAlign: 'center' }}><span className="t-label">沒有選定模型</span></Surface>;
+  }
   if (isRegression) {
-    return <RegressionDiagnostics />;
+    return <RegressionDiagnostics model={model} />;
   }
   return <ClassificationDiagnostics model={model} />;
 }
 
 function ClassificationDiagnostics({ model }) {
+  // 從 model.testTrue + testPred 算混淆矩陣 (如果有的話)
+  const testTrue = model?.testTrue || [];
+  const testPred = model?.testPred || [];
+  const classes = (model?.bundle?.metrics?.classes) || (model?.bundle?.classes) || [];
+
+  // 算 confusion matrix (只在有 test data 時)
+  const cm = React.useMemo(() => {
+    if (testTrue.length === 0 || testPred.length === 0) return null;
+    const labels = classes.length > 0 ? [...classes] : [...new Set([...testTrue, ...testPred])];
+    const idx = Object.fromEntries(labels.map((l, i) => [String(l), i]));
+    const m = labels.map(() => labels.map(() => 0));
+    for (let i = 0; i < Math.min(testTrue.length, testPred.length); i++) {
+      const ti = idx[String(testTrue[i])];
+      const pi = idx[String(testPred[i])];
+      if (ti != null && pi != null) m[ti][pi]++;
+    }
+    return { data: m, labels: labels.map(String) };
+  }, [testTrue, testPred, classes.join(',')]);
+
   return (
     <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
       <Surface>
-        <CardHeader title="混淆矩陣" subtitle={`${model.algo} · test set (2,490 筆)`} />
+        <CardHeader title="混淆矩陣"
+                    subtitle={`${model?.algo || ''} · ${cm ? `${testTrue.length} 筆 test` : '無 test 標籤'}`} />
         <div style={{ padding: 24, display: 'flex', justifyContent: 'center' }}>
-          <ConfusionMatrix data={[[1751, 78], [101, 560]]} labels={['No', 'Yes']} />
+          {cm
+            ? <ConfusionMatrix data={cm.data} labels={cm.labels} />
+            : <span className="t-label" style={{ color: 'var(--fg-muted)' }}>缺 testTrue / testPred,無法畫混淆矩陣</span>}
         </div>
       </Surface>
       <Surface>
-        <CardHeader title="ROC 曲線" subtitle={`AUC = ${model.auc}`} />
+        <CardHeader title="ROC 曲線" subtitle={model?.auc != null ? `AUC = ${model.auc.toFixed(3)}` : 'AUC 未提供'} />
         <div style={{ padding: 16, height: 280 }}>
-          <ROCCurve auc={model.auc} />
+          {model?.auc != null
+            ? <ROCCurve auc={model.auc} />
+            : <div style={{ height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                <span className="t-label" style={{ color: 'var(--fg-muted)' }}>無 AUC 資料</span>
+              </div>}
         </div>
       </Surface>
     </div>
   );
 }
 
-function RegressionDiagnostics() {
-  const data = MOCK.predScatter;
+function RegressionDiagnostics({ model }) {
+  // 從 model.testTrue + testPred 拼真實 scatter data
+  const data = React.useMemo(() => {
+    const t = model?.testTrue || [];
+    const p = model?.testPred || [];
+    if (t.length === 0 || p.length === 0) return MOCK.predScatter;  // fallback to mock
+    return t.map((actual, i) => ({ actual: +actual, pred: +p[i], residual: +p[i] - +actual }));
+  }, [model]);
   return (
     <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
       <Surface>

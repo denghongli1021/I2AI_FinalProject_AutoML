@@ -2,12 +2,131 @@
 // Page: Experiments — left list + right detail/new-exp form
 // =============================================================================
 
+// 把後端 training run 映射成 UI 用的 experiment 形狀,讓既有 component 不用大改
+function _runToExp(run, allModels) {
+  const summary = run.resultsSummary || {};
+  const top = summary.topModels?.[0] || summary.perSource?.[0] || null;
+  const elapsed = run.elapsedSec ?? (run.finishedAt && run.startedAt ? run.finishedAt - run.startedAt : 0);
+  const myModels = (allModels || []).filter(m => m.trainingRunId === run.id);
+  return {
+    id: run.id,
+    name: `${run.datasetName || run.datasetId || '?'} · ${run.target}`,
+    dataset: run.datasetName || run.datasetId,
+    target: run.target,
+    task: run.taskType === 'regression' ? 'regression' : 'classification',
+    status: run.status,
+    startedAt: _expRelTime(run.startedAt),
+    startedAtSec: run.startedAt,
+    duration: _fmtElapsed(elapsed),
+    error: run.errorMsg,
+    models: myModels.length || (run.modelIds || []).length,
+    modelIds: run.modelIds || [],
+    myModels,
+    engine: run.engine,
+    sources: run.sources || [],
+    options: run.options || {},
+    best: top ? {
+      algo: (top.name || '').replace(/^\[(原始|預處理)\]\s*/, '') || top.algo || '?',
+      metric: top.metric || (run.taskType === 'regression' ? 'R²' : 'F1'),
+      value: typeof top.score === 'number' ? top.score.toFixed(3)
+           : typeof top.bestScore === 'number' ? top.bestScore.toFixed(3) : '—',
+    } : null,
+    progress: run.status === 'running' ? 0.5 : 1,
+  };
+}
+
+function _expRelTime(sec) {
+  if (!sec) return '?';
+  const diff = Math.floor(Date.now() / 1000 - sec);
+  if (diff < 60)   return `${diff}s 前`;
+  if (diff < 3600) return `${Math.floor(diff / 60)}m 前`;
+  if (diff < 86400) return `${Math.floor(diff / 3600)}h 前`;
+  return `${Math.floor(diff / 86400)} 天前`;
+}
+function _fmtElapsed(sec) {
+  if (!sec || sec === 0) return '—';
+  if (sec < 60) return `${sec.toFixed(0)}s`;
+  const m = Math.floor(sec / 60);
+  const s = Math.round(sec - m * 60);
+  return `${m}m ${s.toString().padStart(2, '0')}s`;
+}
+
 function PageExperiments({ onNavigate }) {
-  const [selectedId, setSelectedId] = React.useState('exp-11'); // running by default
-  const [mode, setMode] = React.useState('detail'); // 'detail' | 'new'
-  const selected = MOCK.experiments.find(e => e.id === selectedId);
+  const [mode, setMode] = React.useState('detail');
+  const [selectedId, setSelectedId] = React.useState(null);
+  const [loading, setLoading] = React.useState(true);
+  const [error, setError]     = React.useState(null);
+  const [runs, setRuns]       = React.useState([]);
+  const [models, setModels]   = React.useState([]);
+  const [search, setSearch]   = React.useState('');
+  const [statusFilter, setStatusFilter] = React.useState('all');
+
+  React.useEffect(() => {
+    setLoading(true);
+    Promise.all([
+      NewUI.api.getCached('/api/training-runs?limit=200').then(r => r.runs || []).catch(() => []),
+      NewUI.api.getCached('/api/models?limit=1000').then(r => (r.models || []).map(m => ({ ...m, bundle: m.bundle || {} }))).catch(() => []),
+    ]).then(([rRuns, rModels]) => {
+      setRuns(rRuns);
+      setModels(rModels);
+      setLoading(false);
+      if (!selectedId && rRuns.length > 0) setSelectedId(rRuns[0].id);
+    }).catch(err => { setError(err.message); setLoading(false); });
+  }, []);
+
+  const experiments = React.useMemo(() => runs.map(r => _runToExp(r, models)), [runs, models]);
+  const counts = React.useMemo(() => ({
+    all: experiments.length,
+    running: experiments.filter(e => e.status === 'running').length,
+    completed: experiments.filter(e => e.status === 'completed').length,
+    failed: experiments.filter(e => e.status === 'failed').length,
+  }), [experiments]);
+
+  const filtered = React.useMemo(() => {
+    return experiments.filter(e => {
+      if (statusFilter !== 'all' && e.status !== statusFilter) return false;
+      if (search && !(`${e.name} ${e.dataset} ${e.target}`).toLowerCase().includes(search.toLowerCase())) return false;
+      return true;
+    });
+  }, [experiments, search, statusFilter]);
+
+  const selected = experiments.find(e => e.id === selectedId);
 
   function startNew() { setMode('new'); }
+
+  if (loading) {
+    return <div style={{ padding: 24, textAlign: 'center', color: 'var(--fg-muted)', minHeight: 300 }}>
+      <span className="t-label">載入實驗中...</span>
+    </div>;
+  }
+  if (error) {
+    return <div style={{ padding: 24 }}>
+      <Surface style={{ padding: 24 }}>
+        <Row gap={10}><Icon name="warning" size={20} style={{ color: 'var(--bad)' }} /><span className="t-label">{error}</span></Row>
+      </Surface>
+    </div>;
+  }
+  if (experiments.length === 0) {
+    return (
+      <div style={{ padding: 24 }}>
+        <Row align="end" style={{ marginBottom: 16 }}>
+          <div><h1 className="t-h1">實驗</h1><p className="t-label">尚無任何訓練紀錄</p></div>
+        </Row>
+        <Surface style={{ padding: 48, textAlign: 'center' }}>
+          <Icon name="flask" size={40} style={{ color: 'var(--primary)', marginBottom: 12 }} />
+          <div className="t-title">尚無實驗</div>
+          <div className="t-label" style={{ marginTop: 6, marginBottom: 20 }}>
+            目前新介面尚未實作訓練表單,請先在舊介面上跑一次,結果會自動同步回來
+          </div>
+          <Row gap={8} style={{ justifyContent: 'center' }}>
+            <Button variant="primary" icon="arrowLeft" onClick={() => { window.location.href = 'index.html#experiments'; }}>
+              到舊介面開始實驗
+            </Button>
+          </Row>
+        </Surface>
+      </div>
+    );
+  }
 
   return (
     <div style={{ display: 'grid', gridTemplateColumns: '320px 1fr', height: 'calc(100vh - 49px)' }} >
@@ -18,29 +137,68 @@ function PageExperiments({ onNavigate }) {
             <h1 className="t-h1">實驗</h1>
             <Button variant="primary" icon="plus" size="sm" onClick={startNew}>新實驗</Button>
           </Row>
-          <input className="input" placeholder="搜尋實驗..." style={{ marginBottom: 10 }} />
-          <Row gap={4}>
-            <Chip className="mono">全部 12</Chip>
-            <Chip className="mono">running 1</Chip>
-            <Chip className="mono">failed 1</Chip>
+          <input className="input" placeholder="搜尋實驗..." value={search} onChange={e => setSearch(e.target.value)} style={{ marginBottom: 10, width: '100%' }} />
+          <Row gap={4} style={{ flexWrap: 'wrap' }}>
+            {[
+              { v: 'all', l: `全部 ${counts.all}` },
+              { v: 'running', l: `running ${counts.running}` },
+              { v: 'completed', l: `done ${counts.completed}` },
+              { v: 'failed', l: `failed ${counts.failed}` },
+            ].map(f => (
+              <button key={f.v} onClick={() => setStatusFilter(f.v)}
+                      className={`chip mono ${statusFilter === f.v ? 'chip-primary' : ''}`}
+                      style={{ cursor: 'pointer', border: 'none' }}>
+                {f.l}
+              </button>
+            ))}
           </Row>
         </div>
         <div style={{ overflow: 'auto', flex: 1 }}>
-          {MOCK.experiments.map(exp => (
-            <ExpListItem key={exp.id} exp={exp}
-                         active={mode === 'detail' && selectedId === exp.id}
-                         onClick={() => { setSelectedId(exp.id); setMode('detail'); }} />
-          ))}
+          {filtered.length === 0
+            ? <div style={{ padding: 24, textAlign: 'center', color: 'var(--fg-muted)' }}>
+                <span className="t-label">沒有符合條件的實驗</span>
+              </div>
+            : filtered.map(exp => (
+                <ExpListItem key={exp.id} exp={exp}
+                             active={mode === 'detail' && selectedId === exp.id}
+                             onClick={() => { setSelectedId(exp.id); setMode('detail'); }} />
+              ))}
         </div>
       </div>
 
       {/* ===== Right: detail or new ===== */}
       <div style={{ overflow: 'auto' }}>
         {mode === 'new'
-          ? <NewExperiment onCancel={() => setMode('detail')} onCreated={(id) => { setSelectedId(id); setMode('detail'); }} />
-          : <ExperimentDetail exp={selected} onNavigate={onNavigate} />
+          ? <NewExperimentRedirect onCancel={() => setMode('detail')} />
+          : (selected ? <ExperimentDetail exp={selected} onNavigate={onNavigate} /> : null)
         }
       </div>
+    </div>
+  );
+}
+
+// 新實驗:目前不接 SSE,只提示去舊介面
+function NewExperimentRedirect({ onCancel }) {
+  return (
+    <div style={{ padding: 24 }}>
+      <Row align="end" style={{ justifyContent: 'space-between', marginBottom: 16 }}>
+        <div>
+          <h1 className="t-h1">新實驗</h1>
+          <p className="t-label" style={{ marginTop: 4 }}>選 dataset、target、演算法 → 開始訓練</p>
+        </div>
+        <Button variant="ghost" size="sm" onClick={onCancel}>返回列表</Button>
+      </Row>
+      <Surface style={{ padding: 32, textAlign: 'center' }}>
+        <Icon name="warning" size={32} style={{ color: 'var(--warn)', marginBottom: 12 }} />
+        <div className="t-title">新介面尚未實作訓練表單</div>
+        <div className="t-label" style={{ marginTop: 8, marginBottom: 20, maxWidth: 480, margin: '8px auto 20px' }}>
+          訓練流程涉及多步表單 (引擎切換、預處理選擇、特徵勾選、SSE 進度推送等),
+          目前先在舊介面跑,完成後回到這裡可以看到結果。
+        </div>
+        <Button variant="primary" icon="arrowLeft" onClick={() => { window.location.href = 'index.html#experiments'; }}>
+          開新分頁到舊介面跑訓練
+        </Button>
+      </Surface>
     </div>
   );
 }
@@ -164,62 +322,88 @@ function ExpSummary({ exp, onNavigate }) {
     return <ExpRunningView exp={exp} />;
   }
 
+  // exp.best 可能是 null (run 沒模型),要 defensive
+  const best = exp.best || { metric: '—', value: '—', algo: '—' };
+  // 從 myModels 排 top 5 (依 testScore desc)
+  const top5 = React.useMemo(() => {
+    return (exp.myModels || []).map(m => {
+      const b = m.bundle || {}, mt = b.metrics || {};
+      return {
+        id: m.id,
+        algo: (b.name || b.type || '?').replace(/^\[(原始|預處理)\]\s*/, ''),
+        source: b.dataSource === 'preprocessed' ? '預處理' : '原始',
+        f1: typeof mt.f1 === 'number' ? mt.f1 : null,
+        auc: typeof mt.auc === 'number' ? mt.auc : null,
+        acc: typeof mt.testAccuracy === 'number' ? mt.testAccuracy : null,
+        testScore: mt.testScore,
+        trainTime: (b.trainTime || 0) / 1000,
+      };
+    }).sort((a, b) => (b.testScore || 0) - (a.testScore || 0)).slice(0, 5);
+  }, [exp.myModels]);
+
   return (
     <div>
       {/* Top metrics */}
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 12, marginBottom: 16 }}>
         <Surface style={{ padding: 16, borderColor: 'var(--primary-line)', background: 'linear-gradient(180deg, var(--primary-soft) 0%, var(--bg-surface) 60%)' }}>
-          <div className="t-label">最佳 {exp.best.metric}</div>
-          <div className="t-metric" style={{ marginTop: 6 }}>{exp.best.value}</div>
-          <div className="t-label mono" style={{ marginTop: 6 }}>{exp.best.algo}</div>
+          <div className="t-label">最佳 {best.metric}</div>
+          <div className="t-metric" style={{ marginTop: 6 }}>{best.value}</div>
+          <div className="t-label mono" style={{ marginTop: 6, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{best.algo}</div>
         </Surface>
         <Surface style={{ padding: 16 }}>
           <div className="t-label">已訓練模型</div>
           <div className="t-metric" style={{ marginTop: 6 }}>{exp.models}</div>
-          <div className="t-label" style={{ marginTop: 6 }}>來自 4 種演算法</div>
+          <div className="t-label" style={{ marginTop: 6 }}>engine: {exp.engine || '?'}</div>
         </Surface>
         <Surface style={{ padding: 16 }}>
           <div className="t-label">總耗時</div>
           <div className="t-metric" style={{ marginTop: 6 }}>{exp.duration}</div>
-          <div className="t-label" style={{ marginTop: 6 }}>HPO 占 72%</div>
+          <div className="t-label" style={{ marginTop: 6 }}>實際訓練時長</div>
         </Surface>
         <Surface style={{ padding: 16 }}>
-          <div className="t-label">完成於</div>
-          <div className="mono" style={{ marginTop: 6, fontSize: 22, fontWeight: 600, color: 'var(--fg-strong)' }}>14:32</div>
+          <div className="t-label">啟動時間</div>
+          <div className="t-label mono" style={{ marginTop: 6, fontSize: 18, fontWeight: 600, color: 'var(--fg-strong)' }}>
+            {exp.startedAtSec ? new Date(exp.startedAtSec * 1000).toLocaleString('zh-TW', { hour12: false }) : '?'}
+          </div>
           <div className="t-label" style={{ marginTop: 6 }}>{exp.startedAt}</div>
         </Surface>
       </div>
 
       {/* Top 5 models table */}
       <Surface>
-        <CardHeader title="Top 5 模型" subtitle="按 F1-score 排名"
+        <CardHeader title="Top 5 模型" subtitle={`按 ${top5[0]?.testScore != null ? '分數' : 'F1'} 排名`}
                     right={<Button variant="bare" size="sm" iconRight="arrowRight" onClick={() => onNavigate('models')}>看全部排行榜</Button>} />
-        <table className="tbl">
-          <thead>
-            <tr>
-              <th>#</th>
-              <th>演算法</th>
-              <th>來源</th>
-              <th style={{ textAlign: 'right' }}>F1</th>
-              <th style={{ textAlign: 'right' }}>AUC</th>
-              <th style={{ textAlign: 'right' }}>Accuracy</th>
-              <th style={{ textAlign: 'right' }}>訓練 (s)</th>
-            </tr>
-          </thead>
-          <tbody>
-            {MOCK.models.slice(0, 5).map(m => (
-              <tr key={m.id}>
-                <td className="mono fg-3">{m.rank}</td>
-                <td className="fg-1">{m.algo} {m.tag && <Chip tone={m.tag === 'best' ? 'primary' : 'good'} className="mono" style={{ marginLeft: 6 }}>{m.tag}</Chip>}</td>
-                <td><Chip className="mono">{m.source}</Chip></td>
-                <td className="mono fg-1" style={{ textAlign: 'right' }}>{m.f1.toFixed(3)}</td>
-                <td className="mono" style={{ textAlign: 'right' }}>{m.auc.toFixed(3)}</td>
-                <td className="mono" style={{ textAlign: 'right' }}>{m.acc.toFixed(3)}</td>
-                <td className="mono fg-3" style={{ textAlign: 'right' }}>{m.trainTime}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
+        {top5.length === 0
+          ? <div style={{ padding: 24, textAlign: 'center', color: 'var(--fg-muted)' }}>
+              <span className="t-label">此實驗沒有模型 (失敗 or 仍在運行)</span>
+            </div>
+          : <table className="tbl">
+              <thead>
+                <tr>
+                  <th>#</th>
+                  <th>演算法</th>
+                  <th>來源</th>
+                  <th style={{ textAlign: 'right' }}>F1</th>
+                  <th style={{ textAlign: 'right' }}>AUC</th>
+                  <th style={{ textAlign: 'right' }}>Accuracy</th>
+                  <th style={{ textAlign: 'right' }}>訓練 (s)</th>
+                </tr>
+              </thead>
+              <tbody>
+                {top5.map((m, i) => (
+                  <tr key={m.id}>
+                    <td className="mono fg-3">{i + 1}</td>
+                    <td className="fg-1">{m.algo}</td>
+                    <td><Chip className="mono">{m.source}</Chip></td>
+                    <td className="mono fg-1" style={{ textAlign: 'right' }}>{m.f1 != null ? m.f1.toFixed(3) : '—'}</td>
+                    <td className="mono" style={{ textAlign: 'right' }}>{m.auc != null ? m.auc.toFixed(3) : '—'}</td>
+                    <td className="mono" style={{ textAlign: 'right' }}>{m.acc != null ? m.acc.toFixed(3) : '—'}</td>
+                    <td className="mono fg-3" style={{ textAlign: 'right' }}>{m.trainTime > 0 ? m.trainTime.toFixed(1) : '—'}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+        }
       </Surface>
     </div>
   );
@@ -355,40 +539,73 @@ function HPOChart({ progress }) {
 }
 
 function ExpModelsList({ exp, onNavigate }) {
+  // exp.myModels 是從 run 篩出來的 raw model 物件,正規化成顯示用 shape 再排
+  const list = React.useMemo(() => {
+    return (exp.myModels || []).map(m => {
+      const b = m.bundle || {}, mt = b.metrics || {};
+      return {
+        id: m.id,
+        algo: (b.name || b.type || '?').replace(/^\[(原始|預處理)\]\s*/, ''),
+        source: b.dataSource === 'preprocessed' ? '預處理' : '原始',
+        f1: typeof mt.f1 === 'number' ? mt.f1 : null,
+        auc: typeof mt.auc === 'number' ? mt.auc : null,
+        acc: typeof mt.testAccuracy === 'number' ? mt.testAccuracy : null,
+        testScore: mt.testScore,
+        trainTime: (b.trainTime || 0) / 1000,
+        inferLatency: b.inferLatency || 0,
+      };
+    }).sort((a, b) => (b.testScore || 0) - (a.testScore || 0));
+  }, [exp.myModels]);
+
+  function analyze(modelId) {
+    try { sessionStorage.setItem('newui_focus_model_id', modelId); } catch (e) {}
+    onNavigate('insights');
+  }
+
   return (
     <Surface>
-      <CardHeader title="所有模型" subtitle={`${exp.models} 個模型`}
+      <CardHeader title="所有模型" subtitle={`${list.length} 個模型`}
                   right={<Button variant="primary" size="sm" iconRight="arrowRight" onClick={() => onNavigate('models')}>排行榜檢視</Button>} />
-      <table className="tbl">
-        <thead>
-          <tr>
-            <th>#</th>
-            <th>演算法</th>
-            <th>來源</th>
-            <th style={{ textAlign: 'right' }}>F1</th>
-            <th style={{ textAlign: 'right' }}>AUC</th>
-            <th style={{ textAlign: 'right' }}>Accuracy</th>
-            <th style={{ textAlign: 'right' }}>訓練 (s)</th>
-            <th style={{ textAlign: 'right' }}>推論 (ms)</th>
-            <th></th>
-          </tr>
-        </thead>
-        <tbody>
-          {MOCK.models.map(m => (
-            <tr key={m.id}>
-              <td className="mono fg-3">{m.rank}</td>
-              <td className="fg-1">{m.algo}</td>
-              <td><Chip className="mono">{m.source}</Chip></td>
-              <td className="mono fg-1" style={{ textAlign: 'right' }}>{m.f1.toFixed(3)}</td>
-              <td className="mono" style={{ textAlign: 'right' }}>{m.auc.toFixed(3)}</td>
-              <td className="mono" style={{ textAlign: 'right' }}>{m.acc.toFixed(3)}</td>
-              <td className="mono fg-3" style={{ textAlign: 'right' }}>{m.trainTime}</td>
-              <td className="mono fg-3" style={{ textAlign: 'right' }}>{m.inferLatency}</td>
-              <td><Button variant="bare" size="sm" iconRight="chevronRight" /></td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
+      {list.length === 0 ? (
+        <div style={{ padding: 24, textAlign: 'center', color: 'var(--fg-muted)' }}>
+          <span className="t-label">此實驗沒有可顯示的模型</span>
+        </div>
+      ) : (
+        <div style={{ overflow: 'auto' }}>
+          <table className="tbl">
+            <thead>
+              <tr>
+                <th>#</th>
+                <th>演算法</th>
+                <th>來源</th>
+                <th style={{ textAlign: 'right' }}>F1</th>
+                <th style={{ textAlign: 'right' }}>AUC</th>
+                <th style={{ textAlign: 'right' }}>Accuracy</th>
+                <th style={{ textAlign: 'right' }}>訓練 (s)</th>
+                <th style={{ textAlign: 'right' }}>推論 (ms)</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody>
+              {list.map((m, i) => (
+                <tr key={m.id}>
+                  <td className="mono fg-3">{i + 1}</td>
+                  <td className="fg-1">{m.algo}</td>
+                  <td><Chip className="mono">{m.source}</Chip></td>
+                  <td className="mono fg-1" style={{ textAlign: 'right' }}>{m.f1 != null ? m.f1.toFixed(3) : '—'}</td>
+                  <td className="mono" style={{ textAlign: 'right' }}>{m.auc != null ? m.auc.toFixed(3) : '—'}</td>
+                  <td className="mono" style={{ textAlign: 'right' }}>{m.acc != null ? m.acc.toFixed(3) : '—'}</td>
+                  <td className="mono fg-3" style={{ textAlign: 'right' }}>{m.trainTime > 0 ? m.trainTime.toFixed(1) : '—'}</td>
+                  <td className="mono fg-3" style={{ textAlign: 'right' }}>{m.inferLatency > 0 ? m.inferLatency.toFixed(2) : '—'}</td>
+                  <td>
+                    <button className="btn btn-ghost btn-sm" onClick={() => analyze(m.id)}>分析</button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
     </Surface>
   );
 }
@@ -421,23 +638,31 @@ function ExpLogs({ exp }) {
 }
 
 function ExpConfig({ exp }) {
+  const opts = exp.options || {};
   const sections = [
     { title: '資料', rows: [
-      ['Dataset', 'churn (12,450 列 × 14 欄)'],
-      ['Target', 'churn (binary)'],
-      ['Train/Test split', '80% / 20% · random_state=42'],
-    ]},
-    { title: '前處理', rows: [
-      ['Imputation', 'median (numeric), mode (categorical)'],
-      ['Encoding', 'OneHotEncoder (handle_unknown=ignore)'],
-      ['Scaling', 'StandardScaler'],
-      ['Outlier', 'IQR clip @ 1.5x'],
+      ['Dataset', exp.dataset || '?'],
+      ['Target', exp.target || '?'],
+      ['任務類型', exp.task === 'regression' ? '回歸' : '分類'],
+      ['Test size', opts.testSize != null ? `${(opts.testSize * 100).toFixed(0)}%` : '預設 20%'],
+      ['Random state', opts.randomState ?? '預設 42'],
+      ['資料來源', (exp.sources || []).join(' + ') || '?'],
     ]},
     { title: '訓練', rows: [
-      ['Engine', 'sklearn'],
-      ['Algorithms', 'XGBoost, LightGBM, CatBoost, Random Forest, LogisticRegression'],
-      ['HPO', 'Optuna TPE · 100 trials · 5-fold CV'],
-      ['Metric', 'F1 (macro)'],
+      ['Engine', exp.engine || 'sklearn'],
+      ['Task auto-detect', opts.taskType === 'auto' || !opts.taskType ? '是' : '否'],
+      ['時序模式', opts.timeSeries ? '是' : '否'],
+      ['Metric', opts.metric || 'F1 (macro)'],
+      ['HPO trials', opts.hpoTrials ?? '預設'],
+      ['Fast mode', opts.fast ? '是' : '否'],
+      ['跳過 DL', opts.skipDl ? '是' : '否'],
+      ['跳過 NAS', opts.noNas ? '是' : '否'],
+    ]},
+    { title: '狀態', rows: [
+      ['Run ID', exp.id],
+      ['狀態', exp.status],
+      ['開始', exp.startedAt],
+      ['耗時', exp.duration],
     ]},
   ];
   return (

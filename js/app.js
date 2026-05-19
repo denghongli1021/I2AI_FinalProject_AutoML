@@ -3599,6 +3599,14 @@ function renderRealExperimentsPage() {
   btn.parentNode.replaceChild(newBtn, btn);
   setTrainBtnState(_trainingState);
   newBtn.addEventListener('click', () => {
+    // 訓練中 / 取消中 → 按鈕已不是「開始訓練」,是「取消」,直接 dispatch 到 cancel 然後 return
+    // (避免又跑一次 start training)
+    if (_trainingState === 'training') {
+      cancelCurrentTraining();
+      return;
+    }
+    if (_trainingState === 'cancelling') return;  // 防連點
+
     const engineRadio = document.querySelector('input[name="exp-engine"]:checked');
     const engine = engineRadio ? engineRadio.value : 'sklearn';
     const taskTypeRadio = document.querySelector('input[name="exp-task-type"]:checked');
@@ -3683,15 +3691,14 @@ function setTrainBtnState(state) {
   const btn = document.getElementById('btn-real-train');
   if (!btn) return;
   const spinner = '<div class="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin inline-block mr-2"></div>';
-  // 切換 state 時把 onclick 重置成正常開始訓練 (除了 training 狀態要綁取消)
-  btn.onclick = null;
+  // 點擊行為由 addEventListener 統一處理 (依 _trainingState 分派 start / cancel),
+  // 這裡只負責「外觀」和 disabled flag。不再用 onclick = ...,避免跟 addEventListener 雙重觸發。
   switch (state) {
     case 'training':
       btn.innerHTML = '<svg class="w-4 h-4 inline-block mr-1.5 align-text-bottom"><use href="#i-close"/></svg>取消訓練';
       btn.disabled = false;
       btn.classList.remove('opacity-75');
       btn.classList.add('btn-danger-cancel');
-      btn.onclick = (e) => { e.preventDefault(); e.stopPropagation(); cancelCurrentTraining(); };
       break;
     case 'cancelling':
       btn.innerHTML = spinner + '取消中...';
