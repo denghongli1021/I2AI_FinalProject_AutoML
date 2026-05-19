@@ -216,6 +216,7 @@ def run(
     algorithms: list[str],
     options: dict[str, Any],
     on_progress: Callable[[dict], None] | None = None,
+    cancel_token=None,
 ) -> list[tuple[dict[str, Any], Any, StandardScaler, pd.DataFrame]]:
     """
     從「原始 DataFrame」訓練 — 自己做特徵建構 / 切分。
@@ -273,7 +274,7 @@ def run(
 
     # 5-8. Standardize + train + sort (與 run_prepared 共用)
     return _train_all(X_train, X_test, y_train, y_test, feature_names, target,
-                      task_type, algorithms, _emit, random_state)
+                      task_type, algorithms, _emit, random_state, cancel_token=cancel_token)
 
 
 def run_prepared(
@@ -285,6 +286,7 @@ def run_prepared(
     algorithms: list[str],
     options: dict[str, Any],
     on_progress: Callable[[dict], None] | None = None,
+    cancel_token=None,
 ) -> list[tuple[dict[str, Any], Any, StandardScaler, pd.DataFrame]]:
     """
     從「已預處理好的 train/test」訓練 — 特徵建構與切分都已由 preprocessing 模組做完。
@@ -323,7 +325,7 @@ def run_prepared(
     _emit({"type": "log", "msg": f"任務類型: {'回歸' if task_type == 'regression' else '分類'}", "level": "info"})
 
     return _train_all(X_train, X_test, y_train, y_test, feature_names, target,
-                      task_type, algorithms, _emit, random_state)
+                      task_type, algorithms, _emit, random_state, cancel_token=cancel_token)
 
 
 # ============================================================
@@ -340,6 +342,7 @@ def _train_all(
     algorithms: list[str],
     _emit: Callable[[dict], None],
     random_state: int = 42,
+    cancel_token=None,   # threading.Event;每個演算法之間檢查,set 後 break 早退
 ) -> list[tuple[dict[str, Any], Any, StandardScaler, pd.DataFrame]]:
     # 5. Standardize
     scaler = StandardScaler()
@@ -378,6 +381,12 @@ def _train_all(
 
     results: list[tuple[dict[str, Any], Any, StandardScaler, pd.DataFrame]] = []
     for i, key in enumerate(valid_algos):
+        # Cooperative cancel — sklearn .fit() 無法從外部中斷,但兩個演算法之間可以檢查
+        if cancel_token is not None and cancel_token.is_set():
+            _emit({"type": "log",
+                   "msg": f"收到取消訊號,跳過剩下 {len(valid_algos) - i} 個演算法 (已訓練 {len(results)} 個)",
+                   "level": "warning"})
+            break
         _emit({"type": "progress", "pct": int(i / max(len(valid_algos), 1) * 100),
                "step": f"訓練 {_ALGO_LABELS[key]}"})
         _emit({"type": "log", "msg": f"開始訓練 {_ALGO_LABELS[key]}...", "level": "info"})

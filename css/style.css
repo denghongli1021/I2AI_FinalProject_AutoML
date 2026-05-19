@@ -506,6 +506,17 @@ select option {
 }
 .btn-secondary:hover:not(:disabled) { background: #475569; }
 
+/* 取消訓練專用 — 用 important 覆寫 .btn-primary 的 gradient */
+.btn-danger-cancel {
+  background: linear-gradient(90deg, #dc2626, #b91c1c) !important;
+  color: #fff !important;
+  box-shadow: 0 8px 20px -8px rgba(220, 38, 38, 0.5) !important;
+}
+.btn-danger-cancel:hover:not(:disabled) {
+  background: linear-gradient(90deg, #ef4444, #dc2626) !important;
+  box-shadow: 0 10px 25px -8px rgba(220, 38, 38, 0.65) !important;
+}
+
 .btn-tertiary {
   background: #1e293b;
   color: #cbd5e1;

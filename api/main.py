@@ -356,8 +356,9 @@ def _prefix_event(ev: dict, label: str) -> dict:
     return ev
 
 
-def _run_sources(req: TrainRequest, user, db: DbSession, on_progress=None):
-    """依 req.sources 跑指定的資料來源,回傳 (combined results, dataset_name)。"""
+def _run_sources(req: TrainRequest, user, db: DbSession, on_progress=None, cancel_token=None):
+    """依 req.sources 跑指定的資料來源,回傳 (combined results, dataset_name)。
+    cancel_token (threading.Event):每個演算法之間檢查,set 後 break — 已訓練的模型保留。"""
     sources = req.sources or ["raw"]
     multi = len([s for s in sources if s in ("raw", "preprocessed")]) > 1
     combined: list = []
@@ -365,9 +366,12 @@ def _run_sources(req: TrainRequest, user, db: DbSession, on_progress=None):
 
     # --- 來源 1: 原始資料集 ---
     if "raw" in sources:
+        if cancel_token is not None and cancel_token.is_set():
+            return combined, dataset_name or "dataset"
         df, dataset_name = _resolve_dataset(req, user, db)
         emit = (lambda ev: on_progress(_prefix_event(ev, "原始"))) if on_progress else None
-        raw_results = train.run(df, req.target, req.features, req.algorithms, req.options, on_progress=emit)
+        raw_results = train.run(df, req.target, req.features, req.algorithms, req.options,
+                                on_progress=emit, cancel_token=cancel_token)
         for bundle, est, scaler, xtdf in raw_results:
             bundle["dataSource"] = "raw"
             bundle["dataSourceLabel"] = "原始資料"
@@ -377,6 +381,12 @@ def _run_sources(req: TrainRequest, user, db: DbSession, on_progress=None):
 
     # --- 來源 2: 已預處理資料 ---
     if "preprocessed" in sources:
+        if cancel_token is not None and cancel_token.is_set():
+            if not combined:
+                return [], dataset_name or "dataset"
+            # 已有 raw 的結果,直接帶走
+            combined.sort(key=lambda r: r[0]["metrics"].get("testScore", 0.0), reverse=True)
+            return combined, dataset_name or "dataset"
         if not req.preprocessorId:
             raise HTTPException(status_code=400, detail="選了「已預處理資料」但未提供 preprocessorId")
         entry = storage.get_preprocessor(req.preprocessorId, user, db)
@@ -390,7 +400,8 @@ def _run_sources(req: TrainRequest, user, db: DbSession, on_progress=None):
         emit = (lambda ev: on_progress(_prefix_event(ev, "預處理"))) if on_progress else None
         pp_results = train.run_prepared(
             entry["X_train"], entry["X_test"], entry["y_train"], entry["y_test"],
-            entry["target"], req.algorithms, req.options, on_progress=emit,
+            entry["target"], req.algorithms, req.options,
+            on_progress=emit, cancel_token=cancel_token,
         )
         for bundle, est, scaler, xtdf in pp_results:
             bundle["dataSource"] = "preprocessed"
@@ -938,11 +949,13 @@ def train_stream_endpoint(
     def event_stream():
         q: queue.Queue = queue.Queue()
         result_box: dict[str, Any] = {"results": None, "dataset_name": None, "error": None}
+        cancel_token = threading.Event()   # 前端 SSE 斷線時 set,worker 在演算法之間 cooperative check
 
         def worker():
             try:
                 results, ds_name = _run_sources(
                     req, user, db, on_progress=lambda ev: q.put(ev),
+                    cancel_token=cancel_token,
                 )
                 result_box["results"] = results
                 result_box["dataset_name"] = ds_name
@@ -955,10 +968,19 @@ def train_stream_endpoint(
 
         threading.Thread(target=worker, daemon=True).start()
 
-        while True:
-            ev = q.get()
-            if ev is None: break
-            yield f"data: {json.dumps(ev, ensure_ascii=False)}\n\n"
+        try:
+            while True:
+                ev = q.get()
+                if ev is None: break
+                yield f"data: {json.dumps(ev, ensure_ascii=False)}\n\n"
+        except (GeneratorExit, asyncio.CancelledError):
+            # 前端 SSE 斷線 (取消按鈕 / 關分頁) → 告訴 worker 在下一個演算法前停下
+            cancel_token.set()
+            try: storage.finish_training_run(run_id, user, db, status="failed",
+                                             error_msg="使用者取消",
+                                             elapsed_sec=round(time.time() - t_start, 2))
+            except Exception: pass
+            raise
 
         if result_box["error"]:
             storage.finish_training_run(run_id, user, db, status="failed",

@@ -3690,7 +3690,7 @@ function setTrainBtnState(state) {
       btn.innerHTML = '<svg class="w-4 h-4 inline-block mr-1.5 align-text-bottom"><use href="#i-close"/></svg>取消訓練';
       btn.disabled = false;
       btn.classList.remove('opacity-75');
-      btn.classList.add('!bg-danger-600', 'hover:!bg-danger-500');
+      btn.classList.add('btn-danger-cancel');
       btn.onclick = (e) => { e.preventDefault(); e.stopPropagation(); cancelCurrentTraining(); };
       break;
     case 'cancelling':
@@ -3701,17 +3701,17 @@ function setTrainBtnState(state) {
     case 'completed':
       btn.innerHTML = '重新訓練';
       btn.disabled = false;
-      btn.classList.remove('opacity-75', '!bg-danger-600', 'hover:!bg-danger-500');
+      btn.classList.remove('opacity-75', 'btn-danger-cancel');
       break;
     case 'failed':
       btn.innerHTML = '重試訓練';
       btn.disabled = false;
-      btn.classList.remove('opacity-75', '!bg-danger-600', 'hover:!bg-danger-500');
+      btn.classList.remove('opacity-75', 'btn-danger-cancel');
       break;
     default: // 'idle'
       btn.innerHTML = '開始訓練';
       btn.disabled = false;
-      btn.classList.remove('opacity-75', '!bg-danger-600', 'hover:!bg-danger-500');
+      btn.classList.remove('opacity-75', 'btn-danger-cancel');
   }
 }
 
