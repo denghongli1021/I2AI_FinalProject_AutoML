@@ -25,8 +25,14 @@ class DatetimeFeatureExtractor(BaseEstimator, TransformerMixin):
         extracted_features = []
 
         for col in df.columns:
-            # 強制轉換為時間格式，遇到無法解析的亂碼轉為 NaT (空值)
-            dt_series = pd.to_datetime(df[col], errors='coerce')
+            # 🚀 AutoML 智慧時間解析機制
+            try:
+                # 策略 1：盲猜最符合國際標準、速度最快的 ISO8601 格式
+                dt_series = pd.to_datetime(df[col], format='ISO8601', errors='coerce')
+            except ValueError:
+                # 策略 2：如果資料格式太髒或不統一，啟用 'mixed' 模式
+                # 這會明確告訴 Pandas：「我知道格式很亂，請你處理，不要再噴警告了」
+                dt_series = pd.to_datetime(df[col], format='mixed', errors='coerce')
 
             # 1. 基礎日期特徵萃取
             features = pd.DataFrame({

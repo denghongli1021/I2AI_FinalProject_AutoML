@@ -18,13 +18,25 @@
 import numpy as np
 import pandas as pd
 import scipy.sparse as sp
-from typing import Tuple, Dict, Any, Optional
+from typing import Tuple, Dict, Any, Optional, Union, List
 from sklearn.model_selection import train_test_split
 
 # 保留原版 import 方式，依賴 core/__init__.py 的 export 設定
 from .core import AutoRouter, PipelineAssembler
 from .utils.data_health import generate_health_report
 
+
+from preprocessing.data_loader import load_and_merge_data
+
+import warnings
+
+# 忽略預期中的 Imputer 幽靈警告，保持 Log 乾淨
+warnings.filterwarnings(
+    "ignore",
+    category=UserWarning,
+    module="sklearn.impute",
+    message=".*Skipping features without any observed values.*"
+)
 
 # ──────────────────────────────────────────────────────────────────
 # 私有輔助函式（原版沒有，新增用來處理 inf 值與稀疏矩陣）
@@ -34,32 +46,41 @@ def _clean_raw_data(df: pd.DataFrame) -> pd.DataFrame:
     """
     進場前清理（在進入 sklearn 管線之前完成）。
 
-    處理兩件 sklearn Pipeline 無法自動處理的事：
+    處理三件 sklearn Pipeline 無法自動處理的事：
     1. inf / -inf → NaN
        StandardScaler / KNNImputer 碰到 inf 會直接拋 ValueError。
     2. 刪除完全重複列
        重複列若跨越 train/test split，模型等於偷看過測試集答案，評估虛高。
+    3. 刪除幽靈欄位 (100% 缺失值)
+       Imputer 無法填補完全沒有觀測值的欄位，會引發警告並偷偷改變矩陣維度。
 
     為什麼不在 Processor 裡做？
        Processor 的 fit / transform 不能刪列（維度必須一致）。
-       這兩件事必須在「進管線之前」完成，interface 層最合適。
+       這三件事必須在「進管線之前」完成，interface 層最合適。
     """
     cleaned = df.copy()
 
-    # inf → NaN
+    # 1. inf → NaN
     numeric_cols = cleaned.select_dtypes(include=[np.number]).columns
     n_inf = np.isinf(cleaned[numeric_cols]).sum().sum()
     if n_inf > 0:
         cleaned.replace([np.inf, -np.inf], np.nan, inplace=True)
         print(f"  [前處理] 替換了 {n_inf:,} 個 inf / -inf 值為 NaN")
 
-    # 刪重複列
+    # 2. 刪除完全重複列
     n_before = len(cleaned)
     cleaned.drop_duplicates(inplace=True)
     n_dropped = n_before - len(cleaned)
     if n_dropped > 0:
         cleaned.reset_index(drop=True, inplace=True)
         print(f"  [前處理] 刪除了 {n_dropped:,} 筆完全重複列")
+
+    # 3. 👻 刪除幽靈欄位 (100% 缺失值)
+    ghost_cols = cleaned.columns[cleaned.isnull().all()].tolist()
+    if ghost_cols:
+        print(f"  [前處理] ⚠️ 警告：偵測到 {len(ghost_cols)} 個欄位缺失率高達 100%！")
+        print(f"  [前處理] 🔪 已自動刪除無效欄位 (範例: {ghost_cols[:5]}...)")
+        cleaned.drop(columns=ghost_cols, inplace=True)
 
     return cleaned
 
@@ -120,32 +141,46 @@ def run_data_audit(
 
 
 def preprocess_for_training(
-    raw_df: pd.DataFrame,
+    data_source: Union[pd.DataFrame, str, List[str]],  # 💡 修改 1: 放寬輸入型態
     target_col: str,
     test_size: float = 0.2,
     schema_override: Optional[Dict[str, str]] = None,
+    main_file_index: int = 0,  # 💡 修改 2: 新增主表索引參數，給多檔案合併使用
 ) -> Tuple[pd.DataFrame, pd.DataFrame, pd.Series, pd.Series, Any]:
     """
     [提供給 模型組] 執行端對端的預處理管線。
-    包含偵測有害資料、處理缺失值以及特徵提取。
+    包含多檔智慧載入、偵測有害資料、處理缺失值以及特徵提取。
 
     Parameters
     ----------
-    raw_df : pd.DataFrame
-        原始資料（含 target 欄）
+    data_source : Union[pd.DataFrame, str, List[str]]
+        資料來源。可接受：
+        1. 已讀取的 DataFrame
+        2. 單一 CSV 檔案路徑字串
+        3. 多個 CSV 檔案路徑清單 (將自動執行 Join)
     target_col : str
         目標欄位名稱
     test_size : float
-        測試集比例，預設 0.2（與原版一致）
+        測試集比例，預設 0.2
     schema_override : dict, optional
-        手動覆蓋 Router 的自動判斷。例：{"zipcode": "high_cardinality"}
-        原版沒有此參數，此為新增，預設 None 不影響原有行為。
+        手動覆蓋 Router 的自動判斷。
+    main_file_index : int
+        當傳入多個檔案時，指定哪一個是主表 (預設 0)。
 
     Returns
     -------
     (X_train_clean, X_test_clean, y_train, y_test, fitted_preprocessor)
     """
-    print("[預處理模組] 開始執行...")
+    print(">>> 🔵 Phase 1: 資料載入與整合 (Data Ingestion)")
+    
+    # 💡 修改 3: 呼叫載入器。出來的 raw_df 絕對是乾淨、壓縮過、合併好的 DataFrame！
+    raw_df = load_and_merge_data(data_source, main_file_index=main_file_index)
+
+    print(">>> 🔵 Phase 2: 特徵預處理管線 (Feature Engineering)")
+
+    # ---------------------------------------------------------
+    # 👇 以下完全保留你原本的完美防護邏輯，完全不需要更動 👇
+    # ---------------------------------------------------------
 
     # 驗證 target_col 存在
     if target_col not in raw_df.columns:
@@ -178,7 +213,7 @@ def preprocess_for_training(
         X, y, test_size=test_size, random_state=42, stratify=stratify
     )
 
-    print(f"[預處理模組] 正在針對 {len(X_train_raw)} 筆訓練資料進行分析...")
+    print(f"[預處理模組] 正在針對 {len(X_train_raw):,} 筆訓練資料進行分析...")
 
     # 3. 啟動分類大腦 (Router) 掃描訓練集
     # 使用我們設定好的參數：超過 50 種算文字，平均字串長度大於 20 算 NLP 文字
@@ -201,6 +236,7 @@ def preprocess_for_training(
 
     # 取得欄位名稱 (ColumnTransformer 的特有方法)
     feature_names = fitted_preprocessor.get_feature_names_out()
+    
     # 使用輔助函式安全轉換（處理 TF-IDF 可能產生的 sparse matrix）
     X_train_clean = _array_to_dataframe(X_train_clean_array, feature_names)
 
@@ -215,29 +251,33 @@ def preprocess_for_training(
 
 
 def preprocess_for_inference(
-    new_data_df: pd.DataFrame,
+    data_source: Union[pd.DataFrame, str, List[str]],
     fitted_preprocessor: Any,
+    training_features: List[str],
+    main_file_index: int = 0,
 ) -> pd.DataFrame:
     """
-    [提供給 系統推論/預測使用]
-    使用已經擬合好的參數處理新資料，確保結果的一致性。
-
-    原版此函式是空殼（直接回傳原始資料），已補上完整實作。
-
+    [提供給 上線部署/預測組] 執行推論期的預處理管線。
+    負責載入測試資料、執行特徵對齊，並進行純轉換 (Transform Only)。
+    
     ※ 只能 transform，絕對不能 fit。
-    ※ 推論階段不能刪列（每一列都是要預測的資料）。
+    ※ 推論階段絕對不能刪列（每一列都是要預測的客戶資料）。
 
     Parameters
     ----------
-    new_data_df : pd.DataFrame
-        需要預測的新資料（不含 target 欄）
-    fitted_preprocessor : sklearn ColumnTransformer
-        由 preprocess_for_training() 回傳的第五個值
+    data_source : Union[pd.DataFrame, str, List[str]]
+        測試資料來源 (如 test_transaction.csv 與 test_identity.csv)。
+    fitted_preprocessor : Any
+        在 preprocess_for_training 中訓練好的管線物件。
+    training_features : List[str]
+        訓練時「進管線前」的原始特徵清單 (用來對齊)。
+    main_file_index : int
+        多表合併時的主表索引。
 
     Returns
     -------
     pd.DataFrame
-        轉換後的特徵矩陣，欄位名稱與訓練集輸出完全一致
+        可以直接餵給 XGBoost/LightGBM 的乾淨測試特徵矩陣。
     """
     if fitted_preprocessor is None:
         raise ValueError(
@@ -246,15 +286,41 @@ def preprocess_for_inference(
             "再傳入此函式。"
         )
 
-    # inf → NaN（推論階段不刪列，只清 inf）
-    cleaned = new_data_df.copy()
-    numeric_cols = cleaned.select_dtypes(include=[np.number]).columns
-    n_inf = np.isinf(cleaned[numeric_cols]).sum().sum()
+    print(">>> 🟢 推論期 Phase 1: 測試資料載入與整合")
+    # 1. 智慧載入器 (支援多表 Join 與 記憶體壓縮)
+    raw_df = load_and_merge_data(data_source, main_file_index=main_file_index)
+    
+    print(">>> 🟢 推論期 Phase 2: 基礎清理 (不刪除任何資料列)")
+    # ⚠️ 注意：這裡不能呼叫 _clean_raw_data，因為推論階段絕對不能刪除重複列！
+    # 我們只手動替換 inf -> NaN
+    clean_df = raw_df.copy()
+    numeric_cols = clean_df.select_dtypes(include=[np.number]).columns
+    n_inf = np.isinf(clean_df[numeric_cols]).sum().sum()
     if n_inf > 0:
-        cleaned.replace([np.inf, -np.inf], np.nan, inplace=True)
-        print(f"  [推論前處理] 替換了 {n_inf:,} 個 inf / -inf 值")
+        clean_df.replace([np.inf, -np.inf], np.nan, inplace=True)
+        print(f"  [推論清理] 替換了 {n_inf:,} 個 inf / -inf 值為 NaN")
+    
+    X_new = clean_df
 
-    # 直接套用之前存下來的轉換規則（只 transform，不 fit）
-    result_array  = fitted_preprocessor.transform(cleaned)
-    feature_names  = fitted_preprocessor.get_feature_names_out()
-    return _array_to_dataframe(result_array, feature_names)
+    print(">>> 🟢 推論期 Phase 3: 特徵強制對齊")
+    # 2. 特徵對齊裝甲 (Feature Alignment)
+    missing_cols = set(training_features) - set(X_new.columns)
+    extra_cols = set(X_new.columns) - set(training_features)
+    
+    if missing_cols:
+        print(f"  [推論對齊] ⚠️ 警告：測試資料缺少 {len(missing_cols)} 個訓練欄位 (將自動補 NaN)。")
+    if extra_cols:
+        print(f"  [推論對齊] 🔪 提示：測試資料多出 {len(extra_cols)} 個未知欄位 (已自動捨棄)。")
+        
+    # 一行搞定補齊與捨棄，並確保順序與訓練時完全一致
+    X_aligned = X_new.reindex(columns=training_features)
+
+    print(">>> 🟢 推論期 Phase 4: 執行純轉換 (Transform Only)")
+    # 3. 絕對只能用 transform！
+    X_clean_array = fitted_preprocessor.transform(X_aligned)
+    
+    feature_names = fitted_preprocessor.get_feature_names_out()
+    X_test_clean = _array_to_dataframe(X_clean_array, feature_names)
+    
+    print("[推論模組] 測試資料轉換完成，準備預測！")
+    return X_test_clean

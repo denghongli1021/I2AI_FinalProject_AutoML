@@ -1,69 +1,48 @@
-# test_run.py
-import warnings
+import os
 import pandas as pd
-
-# 關閉未來版本的 Pandas 警告，讓終端機輸出更乾淨
-warnings.simplefilter(action='ignore', category=FutureWarning)
-
-from preprocessing.interface import run_data_audit, preprocess_for_training
-from preprocessing.utils.data_health import print_health_report
+from preprocessing.interface import preprocess_for_training
 
 if __name__ == "__main__":
-    print("="*70)
-    print("🚀 AutoML Preprocessing Engine - 真實資料實戰測試")
-    print("="*70)
+    # 1. 設定真實 Kaggle 檔案路徑
+    # 溫馨提醒：請確保這兩個檔案已經下載並放在與 test_run.py 同一個資料夾內
+    file_main = "train_transaction.csv"
+    file_side = "train_identity.csv" 
     
-    # ==========================================
-    # 1. 讀取真實資料
-    # ==========================================
-    try:
-        # 請確認 train1.csv 放在與這個腳本相同的目錄下
-        raw_df = pd.read_csv('train1.csv')
-        print(f"✅ 成功讀取 train1.csv，共 {raw_df.shape[0]} 列 × {raw_df.shape[1]} 欄")
-    except FileNotFoundError:
-        print("❌ 找不到 train1.csv，請確認檔案路徑是否正確！")
-        exit()
+    # 如果你真的是想測試把 transaction 跟 transaction 自己 Join，
+    # 可以把 file_side 改成 "train_transaction.csv"。
+    
+    csv_files = [file_main, file_side]
+    
+    # 2. 安全檢查：檔案到底在不在？
+    missing_files = [f for f in csv_files if not os.path.exists(f)]
+    if missing_files:
+        print(f"❌ 找不到真實資料集！請確認以下檔案與 test_run.py 放在同一目錄：\n{missing_files}")
+        print("💡 提示：你可以去 Kaggle 下載 'IEEE-CIS Fraud Detection' 的資料集。")
+        exit(1)
 
-    # ⚠️ 這裡非常重要：請把 'Your_Target_Column' 換成你 train1.csv 裡面的真實「標籤/預測目標」欄位名稱
-    # 例如：'label', 'is_malware', 'click', 'price' 等等
-    TARGET_COL = 'SalePrice'  
-    
-    if TARGET_COL not in raw_df.columns:
-        print(f"\n❌ 錯誤：在資料集中找不到目標欄位 '{TARGET_COL}'。")
-        print(f"現有欄位包含: {list(raw_df.columns)[:10]} ...等")
-        print("👉 請修改 test_run.py 裡的 TARGET_COL 變數！")
-        exit()
-
-    # ==========================================
-    # Phase 1: 健檢中心 (Data Audit)
-    # ==========================================
-    print("\n\n>>> 🟢 Phase 1: 啟動健檢中心")
-    report = run_data_audit(raw_df, target_col=TARGET_COL)
-    print_health_report(report)
-    
-    # ==========================================
-    # Phase 2: 訓練管線 (Training Pipeline)
-    # ==========================================
-    print("\n\n>>> 🔵 Phase 2: 啟動訓練管線")
+    print(f"📂 成功尋獲真實資料！準備讀取: {csv_files}")
+    print("🚀 啟動 AutoML 2.0 預處理引擎 (真實壓力測試)...\n" + "="*60)
+    custom_schema = {
+        "TransactionDT": "numeric",     # 救回被誤殺的時間差特徵
+        "M4": "categorical",            # 糾正 M4 被誤判為日期的問題
+        "DeviceType": "categorical",    # 救回裝置類型特徵
+    }
     
     try:
-        # 如果有特定欄位你想強制覆蓋處理邏輯，可以寫在這裡
-        # config = {'某個郵遞區號欄位': 'high_cardinality'}
-        config = {}
-        
+        # 3. 呼叫大腦：把路徑 List 直接餵給引擎
         X_train, X_test, y_train, y_test, preprocessor = preprocess_for_training(
-            raw_df=raw_df,
-            target_col=TARGET_COL,
+            data_source=csv_files,
+            target_col='isFraud',  # Kaggle 這題的目標變數是 isFraud
             test_size=0.2,
-            schema_override=config
+            main_file_index=0,     # 指定第 0 個檔案 (transaction) 為主表進行 Left Join
+            schema_override=custom_schema
         )
         
-        print("\n✅ 訓練管線執行成功！")
-        print(f"   [原始資料維度]: {raw_df.shape[0]} 列 × {raw_df.shape[1]-1} 欄 (不含目標)")
-        print(f"   [最終訓練特徵]: {X_train.shape[0]} 列 × {X_train.shape[1]} 欄")
-        
-        print("\n   [X_train 預覽 (前 5 筆, 顯示前 8 個特徵)]:")
-        print(X_train.iloc[:, :8].head(5).round(3).to_string())
+        print("\n" + "="*60)
+        print("🏆 恭喜！挑戰 Kaggle 魔王成功！引擎成功存活！")
+        print(f"✅ 訓練集 X_train 形狀: {X_train.shape}")
+        print(f"✅ 產生的特徵範例: {list(X_train.columns)[:10]} ...")
         
     except Exception as e:
-        print(f"\n❌ 訓練管線執行失敗: {e}")
+        print("\n" + "="*60)
+        print(f"💀 引擎在真實世界的壓力下崩潰了！請檢查以下錯誤訊息：\n{e}")
