@@ -1,6 +1,6 @@
 import pandas as pd
 from typing import List, Union
-# 引入夥伴 A 寫的記憶體優化器
+
 from preprocessing.utils.memory_optimizer import reduce_mem_usage
 
 def load_and_merge_data(data_source: Union[pd.DataFrame, str, List[str]], main_file_index: int = 0) -> pd.DataFrame:
