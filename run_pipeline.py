@@ -46,10 +46,27 @@ def _find_target_col(df: pd.DataFrame) -> str:
     return df.columns[-1]
 
 
-def _find_datasets(openml_dir: str, ts_dir: str, top_n: int):
-    """回傳 (csv_path, is_ts) 列表：前 top_n 個 OpenML + 前 top_n 個 UCR。"""
-    openml = sorted(f for f in os.listdir(openml_dir) if f.endswith(".csv"))[:top_n]
-    ts     = sorted(f for f in os.listdir(ts_dir)     if f.endswith(".csv"))[:top_n]
+def _prepare_X(df: pd.DataFrame, target_col: str) -> np.ndarray:
+    """選取特徵欄並轉為 float32；全為 object 欄時自動 OrdinalEncode。"""
+    from sklearn.preprocessing import OrdinalEncoder
+    feat_df = df.drop(columns=[target_col])
+    X_num = feat_df.select_dtypes(include=[np.number])
+    if X_num.shape[1] == 0:
+        obj_df = feat_df.select_dtypes(include=["object", "category"])
+        enc = OrdinalEncoder(handle_unknown="use_encoded_value", unknown_value=-1)
+        X_num = pd.DataFrame(
+            enc.fit_transform(obj_df.fillna("__missing__")),
+            columns=obj_df.columns,
+        )
+    return X_num.fillna(0).values.astype(np.float32)
+
+
+def _find_datasets(openml_dir: str, ts_dir: str, top_n: int, last: bool = False):
+    """回傳 (csv_path, is_ts) 列表：取前 top_n 個或後 top_n 個 OpenML + UCR。"""
+    openml_all = sorted(f for f in os.listdir(openml_dir) if f.endswith(".csv"))
+    ts_all     = sorted(f for f in os.listdir(ts_dir)     if f.endswith(".csv"))
+    openml = openml_all[-top_n:] if last else openml_all[:top_n]
+    ts     = ts_all[-top_n:]     if last else ts_all[:top_n]
     return (
         [(os.path.join(openml_dir, f), False) for f in openml] +
         [(os.path.join(ts_dir,     f), True)  for f in ts]
@@ -66,12 +83,17 @@ def run_batch(args):
         if not os.path.isdir(d):
             print(f"[錯誤] 找不到目錄：{d}"); sys.exit(1)
 
-    datasets = _find_datasets(openml_dir, ts_dir, args.top_n)
+    datasets = _find_datasets(openml_dir, ts_dir, args.top_n, last=args.last)
     print(f"\n{'='*65}")
     print(f"  Pipeline 批次評估  ─  {len(datasets)} 個資料集  "
           f"（OpenML×{args.top_n} + UCR×{args.top_n}）  fast={args.fast}")
     print(f"{'='*65}")
     results = []
+    out_path = os.path.join(HERE, "pipeline_batch_results.csv")
+
+    def _flush_results():
+        if results:
+            pd.DataFrame(results).to_csv(out_path, index=False)
 
     for csv_path, is_ts in datasets:
         dataset_name = os.path.splitext(os.path.basename(csv_path))[0]
@@ -91,11 +113,10 @@ def run_batch(args):
                 print("  [SKIP] 回歸任務暫不支援批次 Pipeline")
                 results.append({"dataset": dataset_name, "type": dtype_label,
                                  "task": task, "note": "regression skipped"})
+                _flush_results()
                 continue
 
-            X_all = (df.drop(columns=[target_col])
-                       .select_dtypes(include=[np.number])
-                       .fillna(0).values.astype(np.float32))
+            X_all = _prepare_X(df, target_col)
             le        = LabelEncoder()
             y_all     = le.fit_transform(y_raw.astype(str).values)
             n_classes = len(le.classes_)
@@ -172,6 +193,7 @@ def run_batch(args):
                 "score":     best_score,
                 "elapsed_s": elapsed,
             })
+            _flush_results()
 
         except Exception:
             traceback.print_exc()
@@ -186,6 +208,7 @@ def run_batch(args):
                 "score":     None,
                 "elapsed_s": round(time.time() - t_ds, 1),
             })
+            _flush_results()
 
     # ── 總結 ─────────────────────────────────────────────────────────────────
     print(f"\n{'='*65}")
@@ -193,9 +216,8 @@ def run_batch(args):
     print(f"{'='*65}")
     summary = pd.DataFrame(results)
     print(summary.to_string(index=False))
-    out = os.path.join(HERE, "pipeline_batch_results.csv")
-    summary.to_csv(out, index=False)
-    print(f"\n  結果已儲存 → {out}")
+    _flush_results()
+    print(f"\n  結果已儲存 → {out_path}")
     print(f"{'='*65}\n")
 
 
@@ -240,9 +262,7 @@ def run_single(args):
         print("  [SKIP] 回歸任務暫不支援 Pipeline")
         return
 
-    X_all = (df.drop(columns=[target_col])
-               .select_dtypes(include=[np.number])
-               .fillna(0).values.astype(np.float32))
+    X_all = _prepare_X(df, target_col)
     le = LabelEncoder()
     y_all = le.fit_transform(y_raw.astype(str).values)
     n_classes = len(le.classes_)
@@ -315,6 +335,8 @@ def main():
                         help="UCR 時序 CSV 目錄（批次模式用）")
     parser.add_argument("--top-n",        type=int, default=5,
                         help="每目錄取前 N 個資料集（批次模式用）")
+    parser.add_argument("--last",         action="store_true",
+                        help="取每目錄最後 top-n 個（批次模式用）")
 
     # 單一 CSV 模式旗標
     parser.add_argument("--csv",          type=str, default=None,

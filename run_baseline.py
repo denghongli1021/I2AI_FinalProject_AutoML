@@ -80,10 +80,12 @@ def get_metrics(task: str, y_true, y_pred) -> dict:
         return {"rmse": round(rmse, 4), "r2": round(r2, 4)}
 
 
-def _find_datasets(openml_dir: str, ts_dir: str, top_n: int):
-    """回傳 (csv_path, is_ts) 的列表：前 top_n 個 OpenML + 前 top_n 個 UCR。"""
-    openml_files = sorted(f for f in os.listdir(openml_dir) if f.endswith(".csv"))[:top_n]
-    ts_files = sorted(f for f in os.listdir(ts_dir) if f.endswith(".csv"))[:top_n]
+def _find_datasets(openml_dir: str, ts_dir: str, top_n: int, last: bool = False):
+    """回傳 (csv_path, is_ts) 的列表：取前 top_n 個或後 top_n 個 OpenML + UCR。"""
+    openml_all = sorted(f for f in os.listdir(openml_dir) if f.endswith(".csv"))
+    ts_all = sorted(f for f in os.listdir(ts_dir) if f.endswith(".csv"))
+    openml_files = openml_all[-top_n:] if last else openml_all[:top_n]
+    ts_files = ts_all[-top_n:] if last else ts_all[:top_n]
     return (
         [(os.path.join(openml_dir, f), False) for f in openml_files] +
         [(os.path.join(ts_dir, f), True) for f in ts_files]
@@ -103,7 +105,7 @@ def run_batch(args):
         print(f"[錯誤] 找不到 UCR 目錄：{ts_dir}")
         sys.exit(1)
 
-    datasets = _find_datasets(openml_dir, ts_dir, args.top_n)
+    datasets = _find_datasets(openml_dir, ts_dir, args.top_n, last=args.last)
     print(f"\n{'='*65}")
     print(f"  AutoGluon 批次基準  ─  {len(datasets)} 個資料集  "
           f"（OpenML×{args.top_n} + UCR×{args.top_n}）")
@@ -120,6 +122,11 @@ def run_batch(args):
         try:
             df = pd.read_csv(csv_path)
             target_col = find_target_col(df)
+            # Drop rows where target is NaN (AutoGluon rejects non-finite labels)
+            n_before = len(df)
+            df = df.dropna(subset=[target_col]).reset_index(drop=True)
+            if len(df) < n_before:
+                print(f"  [info] dropped {n_before - len(df)} rows with NaN target")
             y = df[target_col]
             X = df.drop(columns=[target_col]).dropna(axis=1, how="all")
             task = auto_detect_task(y)
@@ -242,6 +249,8 @@ def main():
                         help="UCR 時序 CSV 目錄")
     parser.add_argument("--top-n",      type=int, default=1,
                         help="每個目錄取前幾個資料集（預設 5）")
+    parser.add_argument("--last",       action="store_true",
+                        help="取每目錄最後 top-n 個資料集")
     
     args = parser.parse_args()
 
@@ -264,6 +273,11 @@ def main():
     if target_col not in df.columns:
         print(f"[錯誤] 找不到欄位 '{target_col}'，可用：{df.columns.tolist()}")
         sys.exit(1)
+
+    n_before = len(df)
+    df = df.dropna(subset=[target_col]).reset_index(drop=True)
+    if len(df) < n_before:
+        print(f"  [info] dropped {n_before - len(df)} rows with NaN target")
 
     y = df[target_col]
     X = df.drop(columns=[target_col]).dropna(axis=1, how="all")

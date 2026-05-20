@@ -1,7 +1,17 @@
-此檔案提供 Claude Code 在此專案中的操作指引。
+# AutoML Pipeline — 人工智慧 Final Project
 
-## 安裝套件
-執行 requirements.txt
+自製 AutoML 系統，支援表格資料分類與時序資料分類 / 回歸。以 AutoGluon 為對照組，在 OpenML-CC18 與 UCR 時序資料集上進行批次評估。
+
+---
+
+## 安裝
+
+```cmd
+conda activate ml_platform
+pip install -r requirements.txt
+```
+
+---
 
 ## 常用指令
 
@@ -10,6 +20,9 @@
 ```cmd
 # 批次評估：前 5 個 OpenML + 前 5 個 UCR 資料集（80/20 split）
 python run_pipeline.py --batch --top-n 5
+
+# 批次評估：後 10 個（--last 旗標）
+python run_pipeline.py --batch --top-n 10 --last
 
 # 快速模式（縮減 HPO/NAS 次數）
 python run_pipeline.py --batch --fast --top-n 5
@@ -26,6 +39,9 @@ python run_pipeline.py --batch --no-nas
 # 指定評估指標（預設 f1）
 python run_pipeline.py --batch --metric accuracy
 
+# 競賽模式（讀取 test/train.csv + test/test.csv，輸出提交 CSV）
+python test/run_submission.py
+
 # 單一 CSV 評估（表格資料）
 python run_pipeline.py --csv openml_cc18_data/37_diabetes.csv
 
@@ -34,7 +50,32 @@ python run_pipeline.py --csv "ucr_ts_80(時序資料)/dataset.csv" --ts
 
 # 單一 CSV 評估（指定目標欄）
 python run_pipeline.py --csv data.csv --target label --ts
+```
 
+### 時序專用 Pipeline（分類 + 回歸）
+
+```cmd
+# 批次評估：UCR 資料夾前 10 個（自動偵測 CLS/REG）
+python run_pipeline_time.py --batch --top-n 10
+
+# 批次評估：後 10 個（斷點續跑，已完成的 dataset 自動跳過）
+python run_pipeline_time.py --batch --top-n 10 --last
+
+# 快速模式
+python run_pipeline_time.py --batch --fast --top-n 5
+
+# 指定分類 / 回歸指標
+python run_pipeline_time.py --batch --cls-metric accuracy --reg-metric r2
+
+# 單一 CSV（自動偵測：REG_* 前綴 → 回歸，其他 → 分類）
+python run_pipeline_time.py --csv "ucr_ts_80(時序資料)/REG_VentilatorPressure.csv"
+```
+
+### 合併批次結果
+
+```cmd
+# 合併 pipeline + baseline + pipeline_time 三份結果到 pipeline_batch_results.csv
+python merge_final_results.py
 ```
 
 ### 對照組 AutoGluon Baseline
@@ -42,6 +83,9 @@ python run_pipeline.py --csv data.csv --target label --ts
 ```cmd
 # 批次模式
 python run_baseline.py --batch --top-n 5
+
+# 批次評估：後 10 個
+python run_baseline.py --batch --top-n 10 --last
 
 # 單一資料集
 python run_baseline.py --csv openml_cc18_data/22_mfeat-zernike.csv
@@ -64,10 +108,14 @@ python data_collect_time.py
 
 ## 架構概覽
 
-整個 Pipeline 分為兩個執行層：
+整個系統分為四個執行入口與兩個 Pipeline 引擎：
 
-- **`run_pipeline.py`**：資料載入、80/20 split、特徵前處理、呼叫 pipeline 引擎、結果輸出
-- **`pipeline.py`**：Pipeline 引擎，負責 HPO → NAS → CV → Ensemble 全流程
+| 入口腳本 | 引擎 | 任務 |
+|---------|------|------|
+| `run_pipeline.py` | `pipeline.py` | 表格分類（+ UCR TS 分類視為樣本獨立） |
+| `run_pipeline_time.py` | `pipeline_time.py` | TS 分類（委派 pipeline.py）+ TS 回歸 |
+| `run_baseline.py` | AutoGluon | 表格分類與回歸（對照組） |
+| `merge_final_results.py` | — | 合併三份批次結果 CSV |
 
 ### Pipeline 執行流程（`pipeline.py`）
 
@@ -77,7 +125,7 @@ python data_collect_time.py
   ▼
 [1] 資料前處理（run_pipeline.py / preprocess.py）
       robust_clean_dataframe：datetime 解析、型別修正、常數欄移除
-      FeatureBuilder：8 種特徵集（見下方）
+      FeatureBuilder：10 種特徵集（見下方）
       TSFeatureBuilder（時序模式）：lag/rolling/momentum/diff 特徵
   │
   ▼
@@ -134,14 +182,17 @@ python data_collect_time.py
 
 ```
 人工智慧project/
-├── pipeline.py             # Pipeline 引擎（HPO/NAS/CV/Ensemble）
-├── run_pipeline.py         # 批次 + 競賽執行入口
-├── run_baseline.py         # AutoGluon 對照組
+├── pipeline.py             # 通用 Pipeline 引擎（分類；HPO/NAS/CV/Ensemble）
+├── pipeline_time.py        # 時序專用 Pipeline 引擎（分類 + 回歸）
+├── run_pipeline.py         # 批次 + 單 CSV 執行入口（分類）
+├── run_pipeline_time.py    # 時序專用執行入口（CLS + REG，支援斷點續跑）
+├── run_baseline.py         # AutoGluon 對照組（分類 + 回歸）
+├── merge_final_results.py  # 合併三份批次結果 CSV → pipeline_batch_results.csv
 ├── data_collect.py         # 下載 OpenML-CC18 資料集
 ├── data_collect_time.py    # 下載 UCR 時序資料集
 ├── src/
 │   ├── config.py           # 全域設定（SEED=42, DEVICE, ARTIFACTS_DIR）
-│   ├── preprocess.py       # FeatureBuilder（8 種特徵集）+ TSFeatureBuilder
+│   ├── preprocess.py       # FeatureBuilder（10 種特徵集）+ TSFeatureBuilder + robust_clean_dataframe
 │   ├── data.py             # get_folds(), get_ts_folds(), TabularDataset
 │   ├── metrics.py          # calculate_score(), get_metric_name()
 │   ├── hpo.py              # TabularHPO, DLHPO, MLPTrainHPO, TSNetTrainHPO
@@ -155,8 +206,13 @@ python data_collect_time.py
 │       ├── cnn1d.py        # CNN1D, ResNet1D_18, TCN
 │       ├── transformer.py  # SignalTransformer, PatchTST
 │       └── tabular.py      # build_tabular_model() 工廠函式
-├── openml_cc18_data/       # 72 個 OpenML-CC18 表格資料集（CSV）from data_collect.py 
-├── ucr_ts_80(時序資料)/    # UCR 時序資料集（每列為一條序列） from data_collect_time.py
+├── test/
+│   ├── run_submission.py         # 競賽提交（v3 完整 pipeline）
+│   ├── run_baseline_submission.py # AutoGluon 競賽提交
+│   └── compare_submissions.py    # 比較三份提交 CSV
+├── pipeline_batch_results.csv    # 合併後的完整批次結果（pipeline + baseline + pipeline_time）
+├── openml_cc18_data/       # OpenML-CC18 表格資料集（CSV）
+├── ucr_ts_80(時序資料)/    # UCR 時序資料集（每列為一條序列）
 ├── artifacts/              # OOF/test 預測快取（.npy，run_cv 自動建立）
 ├── submissions/            # 最終提交 CSV
 └── autogluon_models/       # AutoGluon 模型快取
@@ -172,7 +228,11 @@ python data_collect_time.py
 ### 任務自動判斷邏輯（`run_pipeline.py:_auto_detect_task`）
 - `dtype == object / bool` → 分類
 - 整數且 `nunique ≤ 50` 且比例 < 30% → 分類
-- 否則 → 回歸（批次模式暫時跳過）
+- 否則 → 回歸（`run_pipeline.py` 批次模式跳過；`run_pipeline_time.py` 支援）
+
+### 時序任務判斷（`run_pipeline_time.py:_auto_detect_task`）
+- 檔名以 `REG_` 開頭 → 回歸（走 `pipeline_time.run_regression()`）
+- 否則依 dtype + nunique 判斷（與 run_pipeline.py 相同）
 
 ### 10 種特徵集（`src/preprocess.py`）
 
@@ -213,16 +273,35 @@ python data_collect_time.py
 | ≥ 50,000 筆 | 大資料：縮減 trial 數，關閉 kpca/kmeans |
 
 ### 時序模式特殊行為
-- **切分策略**：`get_folds(is_timeseries=True)` → TimeSeriesSplit Walk-forward；非 TS → StratifiedKFold
+
+**分類（UCR 格式，樣本獨立）**
+- **切分策略**：UCR 分類視為樣本獨立 → StratifiedKFold（非 TimeSeriesSplit）
+- **DL 模型**：TSNet（取代 MLP）+ TCN（取代 CNN1D）+ PatchTST（取代 Transformer）
 - **NAS**：TSNASSearcher 搜尋 4 種算子（conv_k3 / conv_k5 / tcn_d2 / tcn_d4）
   - `--no-nas` 時使用 `_DEFAULT_TSNET_ARCH`（conv_k3 + tcn_d2 + tcn_d4，channels=64）
-- **DL 模型**：TSNet（取代 MLP）+ TCN（取代 CNN1D）+ PatchTST（取代 Transformer）
-- **Tabular 特徵集**：`ts_tabular` / `ts_tabular_fft`（per-row 時序視窗特徵）
-- **DL 特徵集**：`raw` / `signal`（lag/rolling 已內嵌於特徵集）
 - **Mixup 停用**：時序模式下訓練自動停用（防混合引入未來資訊洩漏）
-- **make_loader**：`drop_last=False`，確保每一筆資料都被訓練/預測到
 - `TSFeatureBuilder`（跨時間步特徵）：lag=(1,2,3,7)、rolling window=(3,5,10,20)、momentum、diff
+
+**回歸（`REG_*` 前綴 CSV，時間序列預測）**
+- **入口**：`run_pipeline_time.py` + `pipeline_time.run_regression()`
+- **切分策略**：Chronological 順序切分（最後 20% 為測試集）
+- **Tabular 模型**：LGBMRegressor / XGBRegressor / CatBoostRegressor / Ridge / RF / ExtraTrees / KNN
+- **DL 模型**：TSNet + TCN + PatchTST（MSE loss）；**不做 NAS**（固定 `_DEFAULT_TSNET_ARCH`）
+- **CV**：KFold Walk-forward（`get_ts_folds()`）
+- **Ensemble**：Nelder-Mead 加權算術平均 + Meta-Learner Stacking（Ridge / LGBMRegressor）
+- **評估指標**：RMSE + R²（`--reg-metric rmse/r2/mae`，預設 rmse）
 
 ### artifacts 快取機制
 `artifacts/{dataset_name}/{tag}_oof.npy` + `_test.npy`：CV 完成後自動儲存，重複執行直接載入。
 
+### 斷點續跑（`run_pipeline_time.py`）
+批次模式啟動時自動載入既有 `pipeline_time_batch_results.csv`，跳過已有有效結果的 dataset；錯誤列（`task == "?"`）會重新嘗試。
+
+---
+
+## 已知問題 / 改善備忘
+
+- **大數據 poly2 OOM**：> 100k 筆時 poly 交互項 tensor 可能 GPU OOM → 已加自適應 n_top 上限（50M 元素預算）
+- **小數據過擬合**：< 500 筆時 poly2 + NAS + Stacking 三重風險 → n_repeats/n_seeds 已加大
+- **CatBoost 高維 timeout**：n_features > 300 時自動設 per-model timeout 防卡住
+- **NAS 在小表格資料跳過**：< 2000 筆自動略過 NAS 與 CNN/Transformer HPO
