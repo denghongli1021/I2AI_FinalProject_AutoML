@@ -809,6 +809,19 @@ async def train_pipeline_stream_endpoint(
                 if ev is None:
                     break
                 yield f"data: {json.dumps(ev, ensure_ascii=False)}\n\n"
+                # 旁路把 progress / log 寫進 DB,給跨分頁 polling 看 (throttled 內部 2s 一次)
+                try:
+                    if ev.get("type") == "progress":
+                        storage.update_training_progress(
+                            pipeline_run_id, user, db,
+                            pct=ev.get("pct"), step=ev.get("step"),
+                        )
+                    elif ev.get("type") == "log":
+                        storage.update_training_progress(
+                            pipeline_run_id, user, db,
+                            log_line={"msg": ev.get("msg", ""), "level": ev.get("level", "info")},
+                        )
+                except Exception: pass
         except (GeneratorExit, asyncio.CancelledError):
             # 前端 SSE 斷線 (取消訓練 / 關分頁) → 告知 worker 立刻收尾
             cancel_token.set()
@@ -883,6 +896,21 @@ def get_training_run_endpoint(
     db: DbSession = Depends(get_db),
 ) -> dict[str, Any]:
     return storage.get_training_run(run_id, user, db)
+
+
+@app.get("/api/training-runs/{run_id}/progress")
+def get_training_progress_endpoint(
+    run_id: str,
+    user = Depends(get_current_user),
+    db: DbSession = Depends(get_db),
+) -> dict[str, Any]:
+    """輕量 polling endpoint — 給跨分頁/裝置看訓練即時進度。
+    回 progressPct / currentStep / latestLog / lastSeenAt / status。
+    若 run 不存在或非該 user → 404。"""
+    data = storage.get_training_progress(run_id, user, db)
+    if data is None:
+        raise HTTPException(status_code=404, detail="training run 不存在")
+    return data
 
 
 # ============================================================
@@ -973,6 +1001,19 @@ def train_stream_endpoint(
                 ev = q.get()
                 if ev is None: break
                 yield f"data: {json.dumps(ev, ensure_ascii=False)}\n\n"
+                # 旁路把 progress / log 寫進 DB
+                try:
+                    if ev.get("type") == "progress":
+                        storage.update_training_progress(
+                            run_id, user, db,
+                            pct=ev.get("pct"), step=ev.get("step"),
+                        )
+                    elif ev.get("type") == "log":
+                        storage.update_training_progress(
+                            run_id, user, db,
+                            log_line={"msg": ev.get("msg", ""), "level": ev.get("level", "info")},
+                        )
+                except Exception: pass
         except (GeneratorExit, asyncio.CancelledError):
             # 前端 SSE 斷線 (取消按鈕 / 關分頁) → 告訴 worker 在下一個演算法前停下
             cancel_token.set()
@@ -1086,8 +1127,8 @@ def train_stream_endpoint(
                                                ensure_ascii=False, default=str)
                 yield f"data: {model_payload}\n\n"
 
-            # 最後的 sentinel — 小小一個,前端用來知道「全部收完了」
-            yield f"data: {json.dumps({'type': 'done', 'count': len(bundles)}, ensure_ascii=False)}\n\n"
+            # 最後的 sentinel — 小小一個,前端用來知道「全部收完了」(帶 runId 給新 UI 跳結果)
+            yield f"data: {json.dumps({'type': 'done', 'count': len(bundles), 'runId': run_id}, ensure_ascii=False)}\n\n"
 
     return StreamingResponse(
         event_stream(),

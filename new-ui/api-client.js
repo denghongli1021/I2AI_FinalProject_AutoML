@@ -104,6 +104,53 @@ NewUI.api = (() => {
     return data;
   }
 
+  // ----------------------------------------------------------------
+  // SSE streaming — POST 一個 body,逐個解析 "data: {...}\n\n" 事件。
+  //   body: JSON object (會 JSON.stringify) 或 FormData
+  //   onEvent: (ev) => void  每個事件回呼
+  //   signal: AbortSignal (取消用)
+  // 回傳 Promise,結束時 resolve。
+  // ----------------------------------------------------------------
+  async function streamSSE(path, body, onEvent, signal) {
+    const headers = new Headers();
+    const t = token();
+    if (t) headers.set('Authorization', `Bearer ${t}`);
+    let payload = body;
+    if (body && !(body instanceof FormData)) {
+      headers.set('Content-Type', 'application/json');
+      payload = JSON.stringify(body);
+    }
+    const res = await fetch(`${baseUrl()}${path}`, {
+      method: 'POST', headers, body: payload, signal,
+    });
+    if (!res.ok || !res.body) {
+      let detail = `${res.status} ${res.statusText}`;
+      try { const e = await res.json(); if (e.detail) detail = e.detail; } catch (e) {}
+      throw new Error(detail);
+    }
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder('utf-8');
+    let buf = '';
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      let idx;
+      while ((idx = buf.indexOf('\n\n')) !== -1) {
+        const chunk = buf.slice(0, idx);
+        buf = buf.slice(idx + 2);
+        for (const line of chunk.split('\n')) {
+          const s = line.trim();
+          if (!s.startsWith('data:')) continue;
+          const json = s.slice(5).trim();
+          if (!json) continue;
+          try { onEvent(JSON.parse(json)); }
+          catch (e) { console.warn('[streamSSE] parse fail', e, json.slice(0, 80)); }
+        }
+      }
+    }
+  }
+
   return {
     baseUrl,
     token,
@@ -117,6 +164,7 @@ NewUI.api = (() => {
     getCached,
     post: (path, body)  => request(path, { method: 'POST', body: body instanceof FormData ? body : JSON.stringify(body) }),
     del:  (path)        => request(path, { method: 'DELETE' }),
+    streamSSE,
     // Cache control
     invalidate,
     clearCache,

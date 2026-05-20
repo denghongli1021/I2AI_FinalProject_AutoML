@@ -61,18 +61,20 @@ function PageExperiments({ onNavigate }) {
   const [search, setSearch]   = React.useState('');
   const [statusFilter, setStatusFilter] = React.useState('all');
 
-  React.useEffect(() => {
+  const loadRuns = React.useCallback((force = false) => {
     setLoading(true);
     Promise.all([
-      NewUI.api.getCached('/api/training-runs?limit=200').then(r => r.runs || []).catch(() => []),
-      NewUI.api.getCached('/api/models?limit=1000').then(r => (r.models || []).map(m => ({ ...m, bundle: m.bundle || {} }))).catch(() => []),
+      NewUI.api.getCached('/api/training-runs?limit=200', { force }).then(r => r.runs || []).catch(() => []),
+      NewUI.api.getCached('/api/models?limit=1000', { force }).then(r => (r.models || []).map(m => ({ ...m, bundle: m.bundle || {} }))).catch(() => []),
     ]).then(([rRuns, rModels]) => {
       setRuns(rRuns);
       setModels(rModels);
       setLoading(false);
       if (!selectedId && rRuns.length > 0) setSelectedId(rRuns[0].id);
     }).catch(err => { setError(err.message); setLoading(false); });
-  }, []);
+  }, [selectedId]);
+
+  React.useEffect(() => { loadRuns(false); }, []);
 
   const experiments = React.useMemo(() => runs.map(r => _runToExp(r, models)), [runs, models]);
   const counts = React.useMemo(() => ({
@@ -169,7 +171,13 @@ function PageExperiments({ onNavigate }) {
       {/* ===== Right: detail or new ===== */}
       <div style={{ overflow: 'auto' }}>
         {mode === 'new'
-          ? <NewExperimentRedirect onCancel={() => setMode('detail')} />
+          ? <NewExperimentReal onCancel={() => setMode('detail')}
+                               onDone={(runId) => {
+                                 // 訓練完成 → 強制重抓 runs 列表,再切到該 run 的 detail
+                                 loadRuns(true);
+                                 setMode('detail');
+                                 if (runId) setSelectedId(runId);
+                               }} />
           : (selected ? <ExperimentDetail exp={selected} onNavigate={onNavigate} /> : null)
         }
       </div>
@@ -177,28 +185,353 @@ function PageExperiments({ onNavigate }) {
   );
 }
 
-// 新實驗:目前不接 SSE,只提示去舊介面
-function NewExperimentRedirect({ onCancel }) {
+// 後端接受的演算法 keys (對應 api/train/train.py _ALGO_LABELS)
+const SKLEARN_ALGOS = [
+  { id: 'logistic',              name: 'Logistic Regression', kind: 'linear', task: 'cls' },
+  { id: 'naive_bayes',          name: 'Naive Bayes',         kind: 'prob',   task: 'cls' },
+  { id: 'knn_5',                name: 'KNN (k=5)',           kind: 'instance', task: 'both' },
+  { id: 'decision_tree',        name: 'Decision Tree',       kind: 'tree',   task: 'both' },
+  { id: 'random_forest',        name: 'Random Forest',       kind: 'tree',   task: 'both' },
+  { id: 'gradient_boosting',    name: 'Gradient Boosting',   kind: 'gbm',    task: 'both' },
+  { id: 'hist_gradient_boosting', name: 'HistGradientBoosting', kind: 'gbm', task: 'both' },
+  { id: 'xgboost',              name: 'XGBoost',             kind: 'gbm',    task: 'both' },
+  { id: 'lightgbm',             name: 'LightGBM',            kind: 'gbm',    task: 'both' },
+  { id: 'catboost',             name: 'CatBoost',            kind: 'gbm',    task: 'both' },
+  { id: 'svc',                  name: 'SVC',                 kind: 'kernel', task: 'cls' },
+  { id: 'voting',               name: 'Voting Ensemble',     kind: 'ens',    task: 'both' },
+  { id: 'stacking',             name: 'Stacking Ensemble',   kind: 'ens',    task: 'both' },
+  // regression-only
+  { id: 'linear_regression',    name: 'Linear Regression',   kind: 'linear', task: 'reg' },
+  { id: 'ridge',                name: 'Ridge',               kind: 'linear', task: 'reg' },
+  { id: 'lasso',                name: 'Lasso',               kind: 'linear', task: 'reg' },
+  { id: 'svr',                  name: 'SVR',                 kind: 'kernel', task: 'reg' },
+];
+const SKLEARN_DEFAULT = ['logistic', 'random_forest', 'xgboost', 'lightgbm'];
+
+function NewExperimentReal({ onCancel, onDone }) {
+  // ---- 載入 datasets ----
+  const [datasets, setDatasets] = React.useState([]);
+  const [loadingDs, setLoadingDs] = React.useState(true);
+  const [datasetId, setDatasetId] = React.useState(null);
+  const [detail, setDetail] = React.useState(null);     // 選定 dataset 的欄位資訊
+  const [target, setTarget] = React.useState(null);
+
+  const [engine, setEngine] = React.useState('sklearn');
+  const [taskType, setTaskType] = React.useState('auto');
+  const [algos, setAlgos] = React.useState(SKLEARN_DEFAULT);
+  const [testSize, setTestSize] = React.useState(20);
+
+  // pipeline 選項
+  const [pFast, setPFast] = React.useState(true);
+  const [pSkipDL, setPSkipDL] = React.useState(false);
+  const [pSkipNAS, setPSkipNAS] = React.useState(false);
+  const [pTimeSeries, setPTimeSeries] = React.useState(false);
+  const [pMetric, setPMetric] = React.useState('f1');
+  const [pTimeLimit, setPTimeLimit] = React.useState(0);
+
+  // 訓練狀態
+  const [training, setTraining] = React.useState(false);
+  const [log, setLog] = React.useState([]);
+  const [progress, setProgress] = React.useState(0);
+  const [step, setStep] = React.useState('');
+  const [doneRunId, setDoneRunId] = React.useState(null);
+  const abortRef = React.useRef(null);
+  const logBoxRef = React.useRef(null);
+
+  React.useEffect(() => {
+    NewUI.api.getCached('/api/dataset/list')
+      .then(r => {
+        const list = r.datasets || [];
+        setDatasets(list);
+        if (list.length > 0) setDatasetId(list[0].id);
+      })
+      .finally(() => setLoadingDs(false));
+  }, []);
+
+  // 選 dataset → 拉欄位 + 預設 target = 最後一欄
+  React.useEffect(() => {
+    if (!datasetId) { setDetail(null); return; }
+    NewUI.api.getCached(`/api/dataset/${encodeURIComponent(datasetId)}`)
+      .then(d => {
+        setDetail(d);
+        const headers = d.headers || [];
+        if (headers.length > 0) setTarget(headers[headers.length - 1]);
+      })
+      .catch(() => setDetail(null));
+  }, [datasetId]);
+
+  // log 自動捲到底
+  React.useEffect(() => {
+    if (logBoxRef.current) logBoxRef.current.scrollTop = logBoxRef.current.scrollHeight;
+  }, [log]);
+
+  const headers = detail?.headers || [];
+  const ds = datasets.find(d => d.id === datasetId);
+  const visibleAlgos = SKLEARN_ALGOS.filter(a => {
+    if (taskType === 'classification') return a.task === 'cls' || a.task === 'both';
+    if (taskType === 'regression') return a.task === 'reg' || a.task === 'both';
+    return a.task !== 'reg';  // auto 預設展示分類 + both (回歸演算法 auto 時不主動列)
+  });
+
+  function addLog(msg, level = 'info') {
+    const ts = new Date().toLocaleTimeString('zh-TW', { hour12: false });
+    setLog(prev => [...prev.slice(-200), { ts, msg, level }]);
+  }
+
+  async function startTraining() {
+    if (!datasetId || !target) { alert('請選 dataset 和 target'); return; }
+    if (engine === 'sklearn' && algos.length === 0) { alert('請至少選一個演算法'); return; }
+    setTraining(true);
+    setLog([]);
+    setProgress(0);
+    setStep('準備中...');
+    setDoneRunId(null);
+    abortRef.current = new AbortController();
+
+    addLog(`啟動 ${engine} 訓練 — dataset=${ds?.fileName} target=${target}`, 'info');
+
+    try {
+      if (engine === 'sklearn') {
+        await NewUI.api.streamSSE('/api/train/stream', {
+          datasetId, target,
+          features: null,                  // null = 用全部特徵
+          algorithms: algos,
+          options: { taskType, testSize: testSize / 100, randomState: 42 },
+          sources: ['raw'],
+          preprocessorId: null,
+        }, onEvent, abortRef.current.signal);
+      } else {
+        // pipeline 走 FormData
+        const form = new FormData();
+        form.append('datasetId', datasetId);
+        form.append('target', target);
+        form.append('sources', JSON.stringify(['raw']));   // 後端用 json.loads 解析
+        form.append('fast', String(pFast));
+        form.append('skipDl', String(pSkipDL));
+        form.append('noNas', String(pSkipNAS));
+        form.append('timeSeries', String(pTimeSeries));
+        form.append('metric', pMetric);
+        form.append('timeLimit', String(pTimeLimit));
+        await NewUI.api.streamSSE('/api/train/pipeline/stream', form, onEvent, abortRef.current.signal);
+      }
+    } catch (err) {
+      if (err.name === 'AbortError') {
+        addLog('已取消訓練', 'warning');
+      } else {
+        addLog(`錯誤: ${err.message}`, 'error');
+      }
+    } finally {
+      setTraining(false);
+      // 訓練結束 → 清 cache + 通知 sidebar 重抓
+      NewUI.api.invalidate('/api/training-runs');
+      NewUI.api.invalidate('/api/models');
+      window.dispatchEvent(new CustomEvent('newui:refresh-counts'));
+    }
+  }
+
+  function onEvent(ev) {
+    if (ev.type === 'log') {
+      addLog(ev.msg, ev.level || ev.logType || 'info');
+    } else if (ev.type === 'progress') {
+      if (typeof ev.pct === 'number') setProgress(ev.pct);
+      if (ev.step) setStep(ev.step);
+    } else if (ev.type === 'model') {
+      // sklearn 每個 model 一個事件
+      const b = ev.bundle || {};
+      addLog(`✓ 模型完成: ${b.name || b.type}`, 'success');
+    } else if (ev.type === 'done') {
+      setProgress(100);
+      setStep('完成');
+      addLog('✓ 訓練完成', 'success');
+      if (ev.runId) setDoneRunId(ev.runId);
+    } else if (ev.type === 'error') {
+      addLog(`✗ ${ev.message}`, 'error');
+    }
+  }
+
+  function cancel() {
+    if (abortRef.current) abortRef.current.abort();
+  }
+
+  if (loadingDs) {
+    return <div style={{ padding: 24, color: 'var(--fg-muted)' }}><span className="t-label">載入數據集...</span></div>;
+  }
+  if (datasets.length === 0) {
+    return (
+      <div style={{ padding: 24 }}>
+        <Surface style={{ padding: 32, textAlign: 'center' }}>
+          <Icon name="data" size={32} style={{ color: 'var(--primary)', marginBottom: 12 }} />
+          <div className="t-title">還沒有數據集</div>
+          <div className="t-label" style={{ marginTop: 6, marginBottom: 16 }}>先到「數據」頁上傳 CSV</div>
+          <Button variant="ghost" onClick={onCancel}>返回</Button>
+        </Surface>
+      </div>
+    );
+  }
+
   return (
     <div style={{ padding: 24 }}>
-      <Row align="end" style={{ justifyContent: 'space-between', marginBottom: 16 }}>
+      <Row style={{ justifyContent: 'space-between', marginBottom: 16 }}>
         <div>
           <h1 className="t-h1">新實驗</h1>
-          <p className="t-label" style={{ marginTop: 4 }}>選 dataset、target、演算法 → 開始訓練</p>
+          <p className="t-label" style={{ marginTop: 4 }}>選 dataset、target、引擎 → 開始訓練 (即時 log)</p>
         </div>
-        <Button variant="ghost" size="sm" onClick={onCancel}>返回列表</Button>
+        <Button variant="ghost" onClick={onCancel} disabled={training}>取消</Button>
       </Row>
-      <Surface style={{ padding: 32, textAlign: 'center' }}>
-        <Icon name="warning" size={32} style={{ color: 'var(--warn)', marginBottom: 12 }} />
-        <div className="t-title">新介面尚未實作訓練表單</div>
-        <div className="t-label" style={{ marginTop: 8, marginBottom: 20, maxWidth: 480, margin: '8px auto 20px' }}>
-          訓練流程涉及多步表單 (引擎切換、預處理選擇、特徵勾選、SSE 進度推送等),
-          目前先在舊介面跑,完成後回到這裡可以看到結果。
-        </div>
-        <Button variant="primary" icon="arrowLeft" onClick={() => { window.location.href = 'index.html#experiments'; }}>
-          開新分頁到舊介面跑訓練
-        </Button>
-      </Surface>
+
+      <Stack gap={12} style={{ maxWidth: 920 }}>
+        {/* Essentials */}
+        <Surface>
+          <CardHeader title="基本設定" />
+          <div style={{ padding: 16, display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: 16 }}>
+            <Field label="數據集">
+              <select className="input" value={datasetId || ''} onChange={e => setDatasetId(e.target.value)} disabled={training}>
+                {datasets.map(d => (
+                  <option key={d.id} value={d.id}>{d.fileName} ({(d.rowCount || 0).toLocaleString()} 列)</option>
+                ))}
+              </select>
+            </Field>
+            <Field label="目標欄位 (target)" hint={headers.length ? `共 ${headers.length} 欄` : '載入中...'}>
+              <select className="input" value={target || ''} onChange={e => setTarget(e.target.value)} disabled={training}>
+                {headers.map(h => <option key={h} value={h}>{h}</option>)}
+              </select>
+            </Field>
+            <Field label="任務類型">
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 6 }}>
+                {[{ id: 'auto', label: '自動' }, { id: 'classification', label: '分類' }, { id: 'regression', label: '回歸' }].map(opt => (
+                  <button key={opt.id} onClick={() => setTaskType(opt.id)} disabled={training}
+                          className={taskType === opt.id ? 'btn btn-primary btn-sm' : 'btn btn-ghost btn-sm'}>
+                    {opt.label}
+                  </button>
+                ))}
+              </div>
+            </Field>
+            <Field label="測試集比例" hint={`${100 - testSize}% 訓練 / ${testSize}% 測試`}>
+              <Range value={testSize} onChange={setTestSize} min={10} max={50} step={5} format={v => v + '%'} />
+            </Field>
+          </div>
+        </Surface>
+
+        {/* Engine */}
+        <Surface>
+          <CardHeader title="訓練引擎" />
+          <div style={{ padding: 16, display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+            {[
+              { id: 'sklearn', name: 'sklearn (預設)', body: '多演算法 · 秒~分鐘級', recommended: true },
+              { id: 'pipeline', name: 'pipeline (深度)', body: 'HPO + NAS + Stacking · 數分鐘起', warning: '僅分類 · CPU 慢' },
+            ].map(opt => (
+              <button key={opt.id} onClick={() => !training && setEngine(opt.id)} disabled={training}
+                      style={{
+                        textAlign: 'left', padding: 14, borderRadius: 8, cursor: training ? 'not-allowed' : 'pointer',
+                        background: engine === opt.id ? 'var(--primary-soft)' : 'var(--bg-sunken)',
+                        border: '1px solid ' + (engine === opt.id ? 'var(--primary-line)' : 'var(--bd-subtle)'),
+                      }}>
+                <Row style={{ justifyContent: 'space-between', marginBottom: 6 }}>
+                  <span className="t-body-lg fg-1" style={{ fontWeight: 500 }}>{opt.name}</span>
+                  {opt.recommended && <Chip tone="primary" className="mono">建議</Chip>}
+                  {opt.warning && <Chip tone="warn" className="mono">注意</Chip>}
+                </Row>
+                <div className="t-label">{opt.body}</div>
+              </button>
+            ))}
+          </div>
+        </Surface>
+
+        {/* sklearn algorithms */}
+        {engine === 'sklearn' && (
+          <Surface>
+            <CardHeader title="演算法" subtitle={`已選 ${algos.length}`}
+                        right={<Row gap={6}>
+                          <Button variant="bare" size="sm" onClick={() => setAlgos(visibleAlgos.map(a => a.id))}>全選</Button>
+                          <Button variant="bare" size="sm" onClick={() => setAlgos(SKLEARN_DEFAULT)}>建議</Button>
+                          <Button variant="bare" size="sm" onClick={() => setAlgos([])}>清除</Button>
+                        </Row>} />
+            <div style={{ padding: 14, display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 8 }}>
+              {visibleAlgos.map(a => (
+                <label key={a.id} style={{
+                  padding: '8px 10px',
+                  background: algos.includes(a.id) ? 'var(--primary-soft)' : 'var(--bg-sunken)',
+                  border: '1px solid ' + (algos.includes(a.id) ? 'var(--primary-line)' : 'var(--bd-subtle)'),
+                  borderRadius: 6, cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 8,
+                }}>
+                  <input type="checkbox" checked={algos.includes(a.id)} disabled={training}
+                         onChange={e => setAlgos(prev => e.target.checked ? [...prev, a.id] : prev.filter(x => x !== a.id))}
+                         style={{ accentColor: 'var(--primary)' }} />
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div className="t-body fg-1">{a.name}</div>
+                    <div className="t-label mono" style={{ fontSize: 10 }}>{a.kind}</div>
+                  </div>
+                </label>
+              ))}
+            </div>
+          </Surface>
+        )}
+
+        {/* pipeline options */}
+        {engine === 'pipeline' && (
+          <Surface style={{ borderColor: 'var(--warn)', borderLeftWidth: 2 }}>
+            <CardHeader title="Pipeline 進階設定" right={<Chip tone="warn">僅分類</Chip>} />
+            <div style={{ padding: 16, display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 12 }}>
+              <ToggleCard label="快速模式" hint="縮減 trials" checked={pFast} onChange={setPFast} />
+              <ToggleCard label="跳過 DL" hint="只跑傳統 ML" checked={pSkipDL} onChange={setPSkipDL} />
+              <ToggleCard label="跳過 NAS" hint="用預設架構" checked={pSkipNAS} onChange={setPSkipNAS} />
+              <ToggleCard label="時序模式" hint="TCN/PatchTST" checked={pTimeSeries} onChange={setPTimeSeries} />
+            </div>
+            <div style={{ padding: 16, paddingTop: 0, display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+              <Field label="最佳化指標">
+                <select className="input" value={pMetric} onChange={e => setPMetric(e.target.value)}>
+                  <option value="f1">F1 (macro)</option>
+                  <option value="accuracy">Accuracy</option>
+                </select>
+              </Field>
+              <Field label="時間上限 (秒)" hint="0 = 不限">
+                <input type="number" className="input mono" value={pTimeLimit} min={0} step={60}
+                       onChange={e => setPTimeLimit(parseInt(e.target.value) || 0)} />
+              </Field>
+            </div>
+          </Surface>
+        )}
+
+        {/* Footer / start */}
+        {!training && !doneRunId && (
+          <Row style={{ justifyContent: 'flex-end', paddingTop: 4 }}>
+            <Button variant="primary" iconRight="play" onClick={startTraining}>開始訓練</Button>
+          </Row>
+        )}
+
+        {/* Live training log */}
+        {(training || log.length > 0) && (
+          <Surface>
+            <CardHeader title="訓練進度"
+                        subtitle={step}
+                        right={training
+                          ? <button className="btn btn-danger-cancel btn-sm" onClick={cancel}>
+                              <Icon name="close" size={12} /> 取消訓練
+                            </button>
+                          : doneRunId
+                            ? <Button variant="primary" size="sm" iconRight="arrowRight" onClick={() => onDone(doneRunId)}>看結果</Button>
+                            : null} />
+            <div style={{ padding: 16 }}>
+              <div style={{ height: 4, background: 'var(--bg-sunken)', borderRadius: 2, overflow: 'hidden', marginBottom: 12 }}>
+                <div style={{ height: '100%', width: `${progress}%`, background: 'var(--primary)', transition: 'width .3s' }} />
+              </div>
+              <div ref={logBoxRef} style={{
+                maxHeight: 320, overflow: 'auto', background: 'var(--bg-sunken)',
+                borderRadius: 7, padding: 12, fontFamily: 'JetBrains Mono, monospace', fontSize: 11, lineHeight: 1.6,
+              }}>
+                {log.map((l, i) => {
+                  const color = l.level === 'error' ? 'var(--bad)'
+                              : l.level === 'warning' ? 'var(--warn)'
+                              : l.level === 'success' ? 'var(--good)'
+                              : l.level === 'muted' ? 'var(--fg-faint)'
+                              : 'var(--fg-default)';
+                  return <div key={i} style={{ color, whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}>[{l.ts}] {l.msg}</div>;
+                })}
+              </div>
+            </div>
+          </Surface>
+        )}
+      </Stack>
     </div>
   );
 }
@@ -409,133 +742,135 @@ function ExpSummary({ exp, onNavigate }) {
   );
 }
 
+// 真實的即時訓練面板 — 每 3 秒 poll /api/training-runs/{id}/progress
+// 後端 SSE 旁路把 progress / log / last_seen_at 寫進 DB,這裡只負責顯示
 function ExpRunningView({ exp }) {
-  const [progress, setProgress] = React.useState(exp.progress * 100);
-  const [trial, setTrial] = React.useState(47);
+  const [progress, setProgress] = React.useState({
+    progressPct: 0, currentStep: '等待後端回報...', latestLog: [],
+    lastSeenAt: null, status: 'running', errorMsg: null,
+  });
+  const [pollError, setPollError] = React.useState(null);
+
   React.useEffect(() => {
-    const t = setInterval(() => {
-      setProgress(p => Math.min(p + 0.6, 100));
-      setTrial(t => t + 1);
-    }, 800);
-    return () => clearInterval(t);
-  }, []);
-  const stages = [
-    { id: 'split',   label: '切分資料',  status: 'done' },
-    { id: 'feat',    label: '特徵處理',  status: 'done' },
-    { id: 'hpo',     label: 'HPO 搜尋',  status: 'active' },
-    { id: 'cv',      label: '交叉驗證',  status: 'pending' },
-    { id: 'final',   label: '最終評估',  status: 'pending' },
-  ];
+    let alive = true;
+    const poll = async () => {
+      try {
+        const data = await NewUI.api.get(`/api/training-runs/${encodeURIComponent(exp.id)}/progress`);
+        if (!alive) return;
+        setProgress(data);
+        setPollError(null);
+        // 跑完或失敗就停 polling
+        if (data.status !== 'running') {
+          clearInterval(timer);
+        }
+      } catch (e) {
+        if (!alive) return;
+        setPollError(e.message || 'poll failed');
+      }
+    };
+    poll();   // 立刻第一次
+    const timer = setInterval(poll, 3000);
+    return () => { alive = false; clearInterval(timer); };
+  }, [exp.id]);
+
+  // 推算 staleness — 60 秒沒新訊號 = 可疑,5 分鐘 = 大概死了
+  const staleness = React.useMemo(() => {
+    if (!progress.lastSeenAt) return null;
+    const ageSec = Math.floor(Date.now() / 1000 - progress.lastSeenAt);
+    if (ageSec > 300) return { level: 'bad', ageSec, msg: '超過 5 分鐘沒收到後端進度,可能已死掉' };
+    if (ageSec > 60)  return { level: 'warn', ageSec, msg: `${ageSec} 秒沒收到後端進度,可能卡住或暫停` };
+    return { level: 'good', ageSec, msg: `${ageSec} 秒前更新` };
+  }, [progress.lastSeenAt]);
+
+  const log = progress.latestLog || [];
+  const pct = progress.progressPct || 0;
 
   return (
     <div>
+      {/* Top status bar */}
       <Surface style={{ marginBottom: 12 }}>
         <div style={{ padding: 16 }}>
           <Row style={{ justifyContent: 'space-between', marginBottom: 12 }}>
             <Row gap={10}>
-              <Dot tone="active" />
-              <span className="t-title">執行中</span>
-              <span className="t-label mono">trial {trial}/100 · LightGBM (lr=0.025)</span>
+              <Dot tone={progress.status === 'completed' ? 'good' : progress.status === 'failed' ? 'bad' : 'active'} />
+              <span className="t-title">
+                {progress.status === 'running' ? '執行中' : progress.status === 'completed' ? '已完成' : progress.status === 'failed' ? '失敗' : progress.status}
+              </span>
+              <span className="t-label mono">{progress.currentStep || '?'}</span>
             </Row>
             <Row gap={8}>
-              <Button variant="ghost" icon="pause" size="sm">暫停</Button>
-              <Button variant="ghost" size="sm">停止</Button>
+              {staleness && (
+                <Chip tone={staleness.level}>{staleness.msg}</Chip>
+              )}
+              {pollError && (
+                <Chip tone="warn">poll 失敗: {pollError}</Chip>
+              )}
             </Row>
           </Row>
           <div style={{ height: 4, background: 'var(--bg-sunken)', borderRadius: 2, overflow: 'hidden' }}>
-            <div style={{ height: '100%', width: `${progress}%`, background: 'var(--primary)', transition: 'width .4s' }} />
+            <div style={{ height: '100%', width: `${pct}%`, background: 'var(--primary)', transition: 'width .4s' }} />
           </div>
           <Row style={{ marginTop: 6, justifyContent: 'space-between' }}>
-            <span className="t-label mono">{progress.toFixed(0)}% · ~{((100 - progress) / 10).toFixed(1)}m 剩餘</span>
-            <span className="t-label mono">截至目前最佳 F1 = 0.938</span>
+            <span className="t-label mono">{pct}% 完成</span>
+            <span className="t-label mono">
+              {progress.startedAt && `啟動 ${_fmtTimeAgo(progress.startedAt)} 前`}
+            </span>
           </Row>
         </div>
-        <div className="divider-t" style={{ padding: '14px 16px' }}>
-          <Row gap={0} style={{ alignItems: 'stretch' }}>
-            {stages.map((st, i) => (
-              <Row key={st.id} gap={0} style={{ flex: 1 }}>
-                <div style={{
-                  flex: 1, padding: '12px 14px',
-                  border: '1px solid',
-                  borderColor: st.status === 'active' ? 'var(--primary-line)' : 'var(--bd-subtle)',
-                  background: st.status === 'active' ? 'var(--primary-soft)' : 'var(--bg-sunken)',
-                  borderRadius: 7,
-                }}>
-                  <Row gap={6}>
-                    <span style={{
-                      width: 16, height: 16, borderRadius: '50%',
-                      background: st.status === 'done' ? 'var(--good-soft)' : st.status === 'active' ? 'var(--primary-soft)' : 'var(--bg-canvas)',
-                      color: st.status === 'done' ? 'var(--good)' : st.status === 'active' ? 'var(--primary)' : 'var(--fg-faint)',
-                      display: 'inline-flex', alignItems: 'center', justifyContent: 'center', fontSize: 9, fontWeight: 700,
-                    }} className="mono">
-                      {st.status === 'done' ? '✓' : i + 1}
-                    </span>
-                    <span className="t-label" style={{ color: st.status === 'pending' ? 'var(--fg-faint)' : 'var(--fg-default)' }}>{st.label}</span>
-                  </Row>
-                </div>
-                {i < stages.length - 1 && <div style={{ width: 8, alignSelf: 'center', height: 1, background: 'var(--bd-subtle)' }} />}
-              </Row>
-            ))}
-          </Row>
+        {progress.errorMsg && (
+          <div className="divider-t" style={{ padding: '12px 16px', background: 'color-mix(in srgb, var(--bad) 8%, transparent)' }}>
+            <Row gap={8}>
+              <Icon name="warning" size={14} style={{ color: 'var(--bad)' }} />
+              <span className="t-label" style={{ color: 'var(--bad)' }}>{progress.errorMsg}</span>
+            </Row>
+          </div>
+        )}
+      </Surface>
+
+      {/* Live log */}
+      <Surface>
+        <CardHeader title="即時 log"
+                    subtitle={`最近 ${log.length} 行 (後端旁路寫入,每 ~2s 更新一次)`}
+                    right={<span className="t-label mono">poll 3s</span>} />
+        <div style={{ padding: 12, maxHeight: 380, minHeight: 200, overflow: 'auto',
+                       background: 'var(--bg-sunken)', fontFamily: 'JetBrains Mono, monospace',
+                       fontSize: 11, lineHeight: 1.6 }}>
+          {log.length === 0 ? (
+            <div style={{ padding: 16, color: 'var(--fg-faint)', textAlign: 'center' }}>
+              還沒有 log — 訓練可能剛啟動或這個分頁不是訓練啟動的分頁
+            </div>
+          ) : log.map((line, i) => {
+            const level = line.level || 'info';
+            const color = level === 'error' ? 'var(--bad)'
+                        : level === 'warning' ? 'var(--warn)'
+                        : level === 'success' ? 'var(--good)'
+                        : level === 'muted' ? 'var(--fg-faint)'
+                        : 'var(--fg-default)';
+            return (
+              <div key={i} style={{ color, whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}>
+                {line.msg}
+              </div>
+            );
+          })}
         </div>
       </Surface>
 
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
-        <Surface>
-          <CardHeader title="HPO 搜尋歷程" subtitle="即時更新" />
-          <div style={{ padding: 14, height: 180 }}>
-            <HPOChart progress={progress} />
-          </div>
-        </Surface>
-        <Surface>
-          <CardHeader title="即時 log" right={<span className="t-label mono">tail -f</span>} />
-          <div style={{ padding: 12, height: 180, overflow: 'auto', background: 'var(--bg-sunken)', fontFamily: 'JetBrains Mono, monospace', fontSize: 11, lineHeight: 1.6 }}>
-            <div className="fg-3">[14:30:15] starting trial #{trial - 3}</div>
-            <div className="fg-2">[14:30:18] LightGBM · lr=0.023 depth=6 leaves=31</div>
-            <div className="fg-2">[14:30:21] CV fold 1/5 F1=0.929</div>
-            <div className="fg-2">[14:30:24] CV fold 2/5 F1=0.935</div>
-            <div className="fg-2">[14:30:27] CV fold 3/5 F1=0.941</div>
-            <div className="fg-2">[14:30:30] CV fold 4/5 F1=0.937</div>
-            <div className="fg-2">[14:30:33] CV fold 5/5 F1=0.940</div>
-            <div style={{ color: 'var(--good)' }}>[14:30:34] ★ new best! mean F1 = 0.938</div>
-            <div className="fg-3">[14:30:35] starting trial #{trial - 2}</div>
-            <div className="fg-2">[14:30:38] XGBoost · lr=0.05 depth=8</div>
-            <div className="fg-3">[14:30:42] starting trial #{trial - 1}</div>
-            <div className="fg-2">[14:30:46] CatBoost · lr=0.03 depth=7</div>
-            <div className="fg-3">[14:30:50] starting trial #{trial} ...</div>
-          </div>
-        </Surface>
+      <div style={{ marginTop: 12, padding: 12, textAlign: 'center', color: 'var(--fg-muted)' }}>
+        <span className="t-label">
+          提示:即時 log 從 DB 拉,所以 1) 跨分頁/裝置都看得到 2) 後端 throttle 每 2 秒寫一次,有延遲
+        </span>
       </div>
     </div>
   );
 }
 
-function HPOChart({ progress }) {
-  // Fake trials trending up
-  const n = Math.max(5, Math.floor(progress));
-  const pts = Array.from({ length: n }, (_, i) => 0.82 + Math.random() * 0.04 + (i / n) * 0.12);
-  pts[Math.floor(n / 2)] = 0.945;
-  const maxY = 0.96, minY = 0.78;
-  const xs = i => (i / (n - 1)) * 100;
-  const ys = v => (1 - (v - minY) / (maxY - minY)) * 100;
-  const running = pts.reduce((acc, v, i) => [...acc, Math.max(acc[i - 1] || v, v)], []);
-
-  return (
-    <svg viewBox="0 0 100 100" preserveAspectRatio="none" style={{ width: '100%', height: '100%' }}>
-      <g stroke="var(--bd-subtle)" strokeWidth="0.3">
-        <line x1="0" y1="25" x2="100" y2="25" />
-        <line x1="0" y1="50" x2="100" y2="50" />
-        <line x1="0" y1="75" x2="100" y2="75" />
-      </g>
-      {/* trials as dots */}
-      {pts.map((v, i) => (
-        <circle key={i} cx={xs(i)} cy={ys(v)} r="0.8" fill="var(--fg-faint)" />
-      ))}
-      {/* running best line */}
-      <path d={running.map((v, i) => `${i === 0 ? 'M' : 'L'}${xs(i)},${ys(v)}`).join(' ')}
-            fill="none" stroke="var(--primary)" strokeWidth="0.7" vectorEffect="non-scaling-stroke" />
-    </svg>
-  );
+function _fmtTimeAgo(sec) {
+  if (!sec) return '?';
+  const diff = Math.floor(Date.now() / 1000 - sec);
+  if (diff < 60)   return `${diff}s`;
+  if (diff < 3600) return `${Math.floor(diff / 60)}m`;
+  if (diff < 86400) return `${Math.floor(diff / 3600)}h`;
+  return `${Math.floor(diff / 86400)}d`;
 }
 
 function ExpModelsList({ exp, onNavigate }) {

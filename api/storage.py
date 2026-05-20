@@ -550,7 +550,89 @@ def finish_training_run(
         run.model_ids_json = json.dumps(model_ids)
     run.has_predictions = has_predictions
     run.error_msg = error_msg
+    # 進度欄位:完成時設 100%,失敗就保持當下進度。讓 frontend 看得到「跑到哪裡死的」
+    run.last_seen_at = datetime.utcnow()
+    if status == "completed":
+        run.progress_pct = 100
+        run.current_step = "完成"
     db.commit()
+
+
+# ============================================================
+# 即時進度 — SSE 訓練中旁路寫進 DB (throttled 每 2 秒最多一次)
+# 給其他分頁 / 裝置 poll training_runs/{id}/progress 用
+# ============================================================
+_PROGRESS_THROTTLE: dict[str, float] = {}     # run_id → last write timestamp
+_PROGRESS_LOG_BUF:  dict[str, list] = {}      # run_id → ring buffer of last log lines
+_LOG_BUF_MAX = 30
+
+def update_training_progress(
+    run_id: Optional[str], user, db: Session,
+    *,
+    pct: Optional[int] = None,
+    step: Optional[str] = None,
+    log_line: Optional[dict] = None,    # {"msg": str, "level": str, "ts": str}
+    force: bool = False,                # True 跳過 throttle (例如 first/last write)
+) -> None:
+    """寫 training run 即時進度。每 2 秒最多寫一次 (但 log buffer 仍會持續累積)。"""
+    if run_id is None or not _is_authed(user):
+        return
+    # 先把 log 累積進 in-memory ring buffer (不寫 DB,讓 throttle 決定何時 flush)
+    buf = _PROGRESS_LOG_BUF.setdefault(run_id, [])
+    if log_line:
+        buf.append(log_line)
+        if len(buf) > _LOG_BUF_MAX:
+            del buf[: len(buf) - _LOG_BUF_MAX]
+
+    # Throttle: 距離上次寫 DB < 2 秒就跳過 (除非強制)
+    now = time.time()
+    last = _PROGRESS_THROTTLE.get(run_id, 0)
+    if not force and now - last < 2.0:
+        return
+    _PROGRESS_THROTTLE[run_id] = now
+
+    try:
+        run = db.query(DbTrainingRun).filter_by(id=run_id, user_id=user.id).first()
+        if run is None:
+            return
+        if pct is not None:
+            run.progress_pct = max(0, min(100, int(pct)))
+        if step is not None:
+            run.current_step = str(step)[:120]
+        if buf:
+            run.latest_log_json = json.dumps(buf, ensure_ascii=False, default=_json_default)
+        run.last_seen_at = datetime.utcnow()
+        db.commit()
+    except Exception as e:
+        # 寫進度失敗不能影響訓練 — 印 log 就放掉
+        print(f"[update_training_progress] {run_id}: {e}", flush=True)
+        try: db.rollback()
+        except Exception: pass
+
+
+def get_training_progress(run_id: str, user, db: Session) -> Optional[dict]:
+    """讀 training run 的即時進度 (給 polling endpoint 用,輕量,不抓 results_summary 等大欄位)。"""
+    if not _is_authed(user):
+        return None
+    run = db.query(DbTrainingRun).filter_by(id=run_id, user_id=user.id).first()
+    if run is None:
+        return None
+    log_lines = []
+    if run.latest_log_json:
+        try: log_lines = json.loads(run.latest_log_json)
+        except Exception: pass
+    return {
+        "id": run.id,
+        "status": run.status,
+        "progressPct": run.progress_pct or 0,
+        "currentStep": run.current_step,
+        "latestLog": log_lines,
+        "lastSeenAt": run.last_seen_at.timestamp() if run.last_seen_at else None,
+        "startedAt": run.started_at.timestamp() if run.started_at else None,
+        "finishedAt": run.finished_at.timestamp() if run.finished_at else None,
+        "elapsedSec": run.elapsed_sec,
+        "errorMsg": run.error_msg,
+    }
 
 
 def list_training_runs(

@@ -35,11 +35,19 @@ def _get_database_url() -> str:
 _DATABASE_URL = _get_database_url()
 _IS_SQLITE = _DATABASE_URL.startswith("sqlite")
 
+# Supabase 免費版 session pooler (port 5432) 整個專案上限 15 連線。
+# 多個部署 (HF Space + Render + local dev) 同時開,SQLAlchemy 預設 pool_size=5 + max_overflow=10
+# 三個 server 加起來輕鬆超過 15 → 連 init_db 都進不了 DB。
+# 縮小 pool 確保單一 server 最多 5 條,讓多副本可以共存。
+# (理想是改用 transaction pooler port 6543,但要改 DATABASE_URL secret;這裡先把 pool 縮小當作雙保險)
+_PG_POOL_KWARGS = {} if _IS_SQLITE else {"pool_size": 2, "max_overflow": 3, "pool_recycle": 1800}
+
 # SQLite 多執行緒需要 check_same_thread=False;Postgres 不用
 engine = create_engine(
     _DATABASE_URL,
     connect_args={"check_same_thread": False} if _IS_SQLITE else {},
     pool_pre_ping=True,
+    **_PG_POOL_KWARGS,
 )
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
@@ -148,6 +156,11 @@ class TrainingRun(Base):  # sklearn + pipeline 兩個引擎共用
     started_at      = Column(DateTime, default=datetime.utcnow, index=True, nullable=False)
     finished_at     = Column(DateTime, nullable=True)
     elapsed_sec     = Column(Float, nullable=True)
+    # 即時進度 (sklearn / pipeline 訓練中,SSE event 旁路寫入 DB,給其他分頁/裝置 poll)
+    progress_pct    = Column(Integer, default=0)        # 0~100
+    current_step    = Column(String(120), nullable=True)   # 例如 "訓練 XGBoost" / "[原始] Scout XGB"
+    latest_log_json = Column(Text, nullable=True)       # 最近 ~30 行 log,JSON list
+    last_seen_at    = Column(DateTime, nullable=True)   # 上次 SSE 寫進度的時間,給 staleness 判斷
 
 
 class PredictionArtifact(Base):  # pipeline Option B 的 test.csv 輸入 + 預測輸出
@@ -162,9 +175,9 @@ class PredictionArtifact(Base):  # pipeline Option B 的 test.csv 輸入 + 預�
 
 
 def init_db() -> None:
-    """app 啟動時呼叫 — 建表 (若已存在則 no-op) + 必要的線上欄位擴寬。"""
+    """app 啟動時呼叫 — 建表 (若已存在則 no-op) + 必要的線上欄位擴寬 / 補欄位。"""
     Base.metadata.create_all(bind=engine)
-    # Postgres 不會自動跟著 model 改變欄位寬度;這裡做 idempotent migration。
+    # Postgres 不會自動跟著 model 改變欄位寬度 / 加新欄位;這裡做 idempotent migration。
     if not _IS_SQLITE:
         from sqlalchemy import text
         with engine.begin() as conn:
@@ -172,6 +185,14 @@ def init_db() -> None:
                 "ALTER TABLE prediction_artifacts "
                 "ALTER COLUMN kind TYPE VARCHAR(40)"
             ))
+            # 進度即時欄位 (新加,IF NOT EXISTS 才安全)
+            conn.execute(text("""
+                ALTER TABLE training_runs
+                    ADD COLUMN IF NOT EXISTS progress_pct INTEGER DEFAULT 0,
+                    ADD COLUMN IF NOT EXISTS current_step VARCHAR(120),
+                    ADD COLUMN IF NOT EXISTS latest_log_json TEXT,
+                    ADD COLUMN IF NOT EXISTS last_seen_at TIMESTAMP
+            """))
 
 
 @contextmanager
