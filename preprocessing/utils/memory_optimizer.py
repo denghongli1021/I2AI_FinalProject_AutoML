@@ -4,7 +4,7 @@ from pandas.api.types import is_numeric_dtype
 
 def reduce_mem_usage(df, use_float32_safeguard=True):
     """
-    自動掃描 DataFrame 的數值欄位進行壓縮。
+    自動掃描 DataFrame 的數值與字串欄位進行壓縮。
     :param use_float32_safeguard: 若為 True，則浮點數最低只會壓縮到 float32，避免特徵工程時發生 float16 溢位 (inf)。
     """
     start_mem = df.memory_usage().sum() / 1024**2
@@ -45,6 +45,16 @@ def reduce_mem_usage(df, use_float32_safeguard=True):
                         df[col] = df[col].astype(np.float32)
                     else:
                         df[col] = df[col].astype(np.float64)
+                        
+        # 🆕 處理字串 (Object -> Category)
+        elif df[col].dtype == 'object':
+            num_unique = df[col].nunique()
+            num_total = len(df[col])
+            
+            # 判斷邏輯：如果這個字串欄位的「不重複值」少於總資料量的 50%
+            # 代表重複率極高，轉成 category 可以獲得巨大效益
+            if num_unique / num_total < 0.5:
+                df[col] = df[col].astype('category')
 
     end_mem = df.memory_usage().sum() / 1024**2
     print(f'✅ [記憶體壓縮] 壓縮後大小: {end_mem:.2f} MB (減少了 {100 * (start_mem - end_mem) / start_mem:.1f}%)')

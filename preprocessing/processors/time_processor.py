@@ -11,6 +11,7 @@ class DatetimeFeatureExtractor(BaseEstimator, TransformerMixin):
     [時間特徵萃取器]
     自動將傳入的 Datetime 欄位拆解成：年、月、日、星期幾、是否為週末。
     若包含具體時間，還會進一步萃取：小時、分鐘。
+    🆕 包含「週期性編碼 (Cyclical Encoding)」，保留時間的循環特性。
     """
     def __init__(self, extract_time: bool = True):
         self.extract_time = extract_time
@@ -41,13 +42,25 @@ class DatetimeFeatureExtractor(BaseEstimator, TransformerMixin):
                 f'day': dt_series.dt.day,
                 f'dayofweek': dt_series.dt.dayofweek, # 0=星期一, 6=星期日
                 # 💡 領域知識注入：是否為週末 (這對商業預測、資安異常登入都超級重要)
-                f'is_weekend': dt_series.dt.dayofweek.isin([5, 6]).astype(float)
+                f'is_weekend': dt_series.dt.dayofweek.isin([5, 6]).astype(float),
+                
+                # 🆕 3. 週期性特徵轉換 (Cyclical Encoding)
+                # 月份的週期是 12
+                f'month_sin': np.sin(2 * np.pi * dt_series.dt.month / 12.0),
+                f'month_cos': np.cos(2 * np.pi * dt_series.dt.month / 12.0),
+                # 星期幾的週期是 7
+                f'dayofweek_sin': np.sin(2 * np.pi * dt_series.dt.dayofweek / 7.0),
+                f'dayofweek_cos': np.cos(2 * np.pi * dt_series.dt.dayofweek / 7.0)
             })
 
             # 2. 進階時間特徵萃取 (如果資料精確到秒)
             if self.extract_time:
                 features[f'hour'] = dt_series.dt.hour
                 features[f'minute'] = dt_series.dt.minute
+                
+                # 🆕 小時的週期是 24
+                features[f'hour_sin'] = np.sin(2 * np.pi * dt_series.dt.hour / 24.0)
+                features[f'hour_cos'] = np.cos(2 * np.pi * dt_series.dt.hour / 24.0)
 
             extracted_features.append(features)
 
@@ -61,9 +74,17 @@ class DatetimeFeatureExtractor(BaseEstimator, TransformerMixin):
         
         out_features = []
         for col in input_features:
-            base = [f"{col}_year", f"{col}_month", f"{col}_day", f"{col}_dayofweek", f"{col}_is_weekend"]
+            base = [
+                f"{col}_year", f"{col}_month", f"{col}_day", 
+                f"{col}_dayofweek", f"{col}_is_weekend",
+                f"{col}_month_sin", f"{col}_month_cos",       # 🆕 新增對齊
+                f"{col}_dayofweek_sin", f"{col}_dayofweek_cos"  # 🆕 新增對齊
+            ]
             if self.extract_time:
-                base.extend([f"{col}_hour", f"{col}_minute"])
+                base.extend([
+                    f"{col}_hour", f"{col}_minute",
+                    f"{col}_hour_sin", f"{col}_hour_cos"      # 🆕 新增對齊
+                ])
             out_features.extend(base)
         return np.array(out_features)
 

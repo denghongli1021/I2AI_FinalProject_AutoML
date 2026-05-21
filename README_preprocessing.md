@@ -29,24 +29,26 @@ X_train, X_test, y_train, y_test, preprocessor = preprocess_for_training(
 ```
 preprocessing/
 ├── __init__.py
-├── interface.py            ← 對外唯一入口（其他人只跟這個互動）
+├── interface.py               ← 對外唯一入口（其他人只跟這個互動）
 │
 ├── core/
-│   ├── __init__.py         ← 匯出 AutoRouter, PipelineAssembler
-│   ├── router.py           ← 欄位分類大腦（本文件說明）
-│   └── assembler.py        ← 管線組裝廠（本文件說明）
+│   ├── __init__.py            ← 匯出 AutoRouter, PipelineAssembler
+│   ├── router.py              ← 欄位分類大腦（本文件說明）
+│   └── assembler.py           ← 管線組裝廠（本文件說明）
 │
-├── processors/             ← 其他組員負責，本模組呼叫
-│   ├── numeric_processor.py
-│   ├── category_processor.py
-│   ├── text_processor.py
-│   ├── time_processor.py
-│   └── image_processor.py  （目前空白，未實作）
+├── processors/                ← 各種處理器
+│   ├── numeric_processor.py   ← 數值處理器
+│   ├── category_processor.py  ← 類別(低基數)處理器
+│   ├── text_processor.py      ← 文字處理器
+│   ├── time_processor.py      ← 時間處理器
+│   ├── image_processor.py     ← 圖片處理器
+│   └── feature_generator.py   ← 生成新特徵
 │
 └── utils/
     ├── __init__.py
-    ├── data_health.py      ← 體檢報告生成器（本文件說明）
-    └── custom_transformers.py  （目前空白，供未來擴充）
+    ├── data_health.py         ← 體檢報告生成器（本文件說明）
+    ├── memory_optimizer.py    ← 記憶體壓縮工具
+    └── custom_transformers.py ← 目前空白，供未來擴充
 ```
 
 **原則：其他組員（UI 組、模型組）只需要 import `interface.py` 的函式，不需要直接碰 router、assembler、data_health。**

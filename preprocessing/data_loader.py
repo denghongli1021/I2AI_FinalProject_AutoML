@@ -1,4 +1,5 @@
 import pandas as pd
+import gc  # 🆕 引入 Python 內建的垃圾回收模組
 from typing import List, Union
 
 from preprocessing.utils.memory_optimizer import reduce_mem_usage
@@ -14,7 +15,7 @@ def load_and_merge_data(data_source: Union[pd.DataFrame, str, List[str]], main_f
     # 情況 1: 使用者已經自己讀好 DataFrame 傳進來了
     if isinstance(data_source, pd.DataFrame):
         print("📥 偵測到 DataFrame 輸入，進行記憶體壓縮...")
-        return reduce_mem_usage(data_source.copy())
+        return reduce_mem_usage(data_source)
     
     # 情況 2: 使用者傳入單一檔案路徑
     if isinstance(data_source, str):
@@ -43,6 +44,15 @@ def load_and_merge_data(data_source: Union[pd.DataFrame, str, List[str]], main_f
                 main_df = main_df.merge(df, on=common_cols, how='left')
             else:
                 print(f"⚠️ 無法在檔案 {i} 找到與主表的共同 ID，已跳過合併。")
+                
+        # 🆕 =========================================================
+        # 🧹 主動式垃圾回收機制 (Active Garbage Collection)
+        # 斬斷暫存清單與過期變數的參照，防止在大數據合併後 RAM 居高不下
+        # =========================================================
+        del dfs  # 徹底銷毀包含所有原始子表的清單
+        collected = gc.collect()  # 強制核心立刻回收無效的記憶體碎片
+        print(f"🧹 [記憶體清理] 成功回收 {collected} 個快取與過期參考，確保巔峰記憶體安全降落！")
+        # =========================================================
                 
         return main_df
     

@@ -1,48 +1,54 @@
-import os
 import pandas as pd
+import time
+import gc
+
+# 引入你剛修改好的主入口
 from preprocessing.interface import preprocess_for_training
 
-if __name__ == "__main__":
-    # 1. 設定真實 Kaggle 檔案路徑
-    # 溫馨提醒：請確保這兩個檔案已經下載並放在與 test_run.py 同一個資料夾內
-    file_main = "train_transaction.csv"
-    file_side = "train_identity.csv" 
+def run_test():
+    print("==================================================")
+    print("🚀 啟動測試：AutoML 2.0 裝甲預處理引擎")
+    print("==================================================")
     
-    # 如果你真的是想測試把 transaction 跟 transaction 自己 Join，
-    # 可以把 file_side 改成 "train_transaction.csv"。
+    # 1. 設定資料路徑 (請確認你的路徑正確)
+    DATA_DIR = 'data/'
+    train_files = [f"{DATA_DIR}train_transaction.csv", f"{DATA_DIR}train_identity.csv"]
     
-    csv_files = [file_main, file_side]
-    
-    # 2. 安全檢查：檔案到底在不在？
-    missing_files = [f for f in csv_files if not os.path.exists(f)]
-    if missing_files:
-        print(f"❌ 找不到真實資料集！請確認以下檔案與 test_run.py 放在同一目錄：\n{missing_files}")
-        print("💡 提示：你可以去 Kaggle 下載 'IEEE-CIS Fraud Detection' 的資料集。")
-        exit(1)
-
-    print(f"📂 成功尋獲真實資料！準備讀取: {csv_files}")
-    print("🚀 啟動 AutoML 2.0 預處理引擎 (真實壓力測試)...\n" + "="*60)
-    custom_schema = {
-        "TransactionDT": "numeric",     # 救回被誤殺的時間差特徵
-        "M4": "categorical",            # 糾正 M4 被誤判為日期的問題
-        "DeviceType": "categorical",    # 救回裝置類型特徵
-    }
+    start_time = time.time()
     
     try:
-        # 3. 呼叫大腦：把路徑 List 直接餵給引擎
-        X_train, X_test, y_train, y_test, preprocessor = preprocess_for_training(
-            data_source=csv_files,
-            target_col='isFraud',  # Kaggle 這題的目標變數是 isFraud
-            test_size=0.2,
-            main_file_index=0,     # 指定第 0 個檔案 (transaction) 為主表進行 Left Join
-            schema_override=custom_schema
+        # 2. 直接呼叫你的裝甲引擎！
+        # 這裡設定 test_size=0.1 讓它切 10% 出來當驗證集測試
+        X_train_clean, X_test_clean, y_train, y_test, fitted_preprocessor = preprocess_for_training(
+            data_source=train_files, 
+            target_col='isFraud', 
+            test_size=0.1
         )
         
-        print("\n" + "="*60)
-        print("🏆 恭喜！挑戰 Kaggle 魔王成功！引擎成功存活！")
-        print(f"✅ 訓練集 X_train 形狀: {X_train.shape}")
-        print(f"✅ 產生的特徵範例: {list(X_train.columns)[:10]} ...")
+        print("\n🌟🌟🌟🌟🌟🌟🌟🌟🌟🌟🌟🌟🌟🌟🌟🌟🌟🌟🌟🌟🌟")
+        print("✅ 測試大成功！引擎完美運轉，沒有崩潰！")
+        print("🌟🌟🌟🌟🌟🌟🌟🌟🌟🌟🌟🌟🌟🌟🌟🌟🌟🌟🌟🌟🌟\n")
         
+        print(f"⏱️ 總耗時: {time.time() - start_time:.1f} 秒")
+        print(f"📊 產出的訓練集特徵矩陣大小: {X_train_clean.shape}")
+        print(f"📊 產出的測試集特徵矩陣大小: {X_test_clean.shape}")
+        
+        # 抽查一下最終煉金出來的特徵長什麼樣子
+        features = fitted_preprocessor.get_feature_names_out()
+        print(f"🔍 總特徵數量: {len(features)}")
+        print(f"🔍 抽查前 10 個特徵名稱:\n {features[:10]}")
+        
+        # 檢查是否還有殘留的字串或缺失值
+        print("\n🛡️ 防禦盾牌檢查報告：")
+        nan_count = X_train_clean.isna().sum().sum()
+        print(f"   ➤ 殘留空值 (NaN) 數量: {nan_count} (必須為 0)")
+        object_cols = X_train_clean.select_dtypes(include=['object']).columns
+        print(f"   ➤ 殘留未處理的字串欄位數: {len(object_cols)} (必須為 0)")
+
     except Exception as e:
-        print("\n" + "="*60)
-        print(f"💀 引擎在真實世界的壓力下崩潰了！請檢查以下錯誤訊息：\n{e}")
+        print("\n❌ 引擎啟動失敗！捕捉到錯誤訊息：")
+        import traceback
+        traceback.print_exc()
+
+if __name__ == "__main__":
+    run_test()
