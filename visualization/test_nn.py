@@ -127,13 +127,11 @@ def run_nn_test():
     print("\nStep 5: 產出 SHAP 視覺化圖表（fallback 路徑）...")
     print("  注意：神經網路使用近似解，計算時間比樹模型長")
 
-    # 為了加速，只用 X_test 的前 200 筆做 SHAP
-    # 實際使用時可以調整這個數字
-    X_test_sample = X_test.iloc[:200].reset_index(drop=True)
+    # visualizer 會自動優化樣本數，不需要手動限制
 
     viz = AutoMLVisualizer(
         model=wrapped_model,
-        X_test=X_test_sample,
+        X_test=X_test,
         output_dir="nn_results"
     )
 

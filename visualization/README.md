@@ -1,5 +1,6 @@
-# 可視化 module — SHAP 
+# 可視化模組 — SHAP 解釋引擎
 
+本模組實作 AutoML Pipeline 中的可視化與決策支援層。  
 接收訓練完成的模型與測試集，計算 SHAP 值，並輸出三種可解釋性圖表。
 
 ---
@@ -15,7 +16,7 @@
    ↓
 模型訓練（XGBoost / LightGBM / 神經網路）
    ↓
-【AutoMLVisualizer】← this module
+【AutoMLVisualizer】← 這裡
    ↓
 Global / Local / Interaction 圖表（PNG）
 ```
@@ -69,7 +70,7 @@ viz.generate_all_plots(
 | LightGBM | TreeExplainer | 快 | 精確解 |
 | CatBoost | TreeExplainer | 快 | 精確解 |
 | Random Forest | TreeExplainer | 快 | 精確解 |
-| 神經網路（TCN、LSTM 等） | shap.Explainer（fallback） | 慢 | 近似解 |
+| 神經網路（TCN、LSTM 等） | PermutationExplainer（fallback） | 慢 | 近似解 |
 
 模組在初始化時自動偵測模型類型，切換模型不需要修改任何程式碼。
 
@@ -183,3 +184,16 @@ visualization/
 ├── diabetes_results/
 └── nn_results/
 ```
+
+---
+
+## 給其他模組
+
+**預處理**
+- 傳入的 `X_test` 欄位名稱必須具有業務語意。OpenML 資料集的原始代號（`x1`、`x2`…）需在前處理階段完成映射。
+- 編碼完成後統一執行 `X = X.astype(float)`。Pandas 的 `category` dtype 會導致 XGBoost 拋出 `ValueError`。
+
+**模型訓練**
+- 直接傳入訓練完成的模型物件即可，不需要序列化（pickle / joblib）。
+- 時序任務的 lag features 與 rolling statistics 應由特徵工程模組產生後再傳入。欄位命名建議帶語意（如 `OT_lag1`），避免使用通用名稱（如 `lag_1`）。
+- 使用 `scale_pos_weight` 處理類別不平衡時，SHAP base value 會接近零，屬正常現象。

@@ -17,24 +17,39 @@ class AutoMLVisualizer:
         if not os.path.exists(self.output_dir):
             os.makedirs(self.output_dir)
             
+        import time
         print("Initializing SHAP Explainer...")
         # 自動偵測模型類型，選擇最適合的 Explainer：
         # - 樹模型（XGBoost, LightGBM）→ TreeExplainer（精確解，速度快）
         # - 神經網路（TCN, LSTM 等）   → 自動 fallback 到 PermutationExplainer
         # - 其他模型                   → KernelExplainer
+        _t0 = time.time()
         try:
             self.explainer = shap.TreeExplainer(self.model)
             self.shap_values = self.explainer(self.X_test)
-            print("  Using TreeExplainer (tree-based model detected)")
+            _elapsed = time.time() - _t0
+            print(f"  Using TreeExplainer (tree-based model detected)")
+            print(f"  SHAP computation time: {_elapsed:.2f} seconds ({len(self.X_test)} samples)")
         except Exception:
-            print("  TreeExplainer not applicable, falling back to shap.Explainer...")
-            # 對神經網路，shap.Explainer 需要傳入 predict 函數（而非模型物件本身）
-            # 取 X_test 前 100 筆作為 background（太多會很慢）
-            background = self.X_test.iloc[:100]
+            print("  TreeExplainer not applicable, falling back to PermutationExplainer...")
+            print(f"  Computing SHAP for all {len(self.X_test)} samples (full dataset)...")
+            
+            # 用 PermutationExplainer：
+            # - 支援任何模型（神經網路、SVM 等）
+            # - 全量計算每一筆資料，不採樣
+            # - 比 KernelSHAP 快：計算量 = O(樣本數 × 特徵數 × npermutations)
+            #   npermutations 預設只跑幾輪，不隨樣本數爆炸
+            # - background 只用來建立基準線，取 100 筆隨機樣本即可
+            background_size = min(100, len(self.X_test))
+            background = self.X_test.sample(n=background_size, random_state=42)
+            
             predict_fn = self.model.predict if hasattr(self.model, "predict") else self.model
-            self.explainer = shap.Explainer(predict_fn, background)
+            self.explainer = shap.PermutationExplainer(predict_fn, background)
             self.shap_values = self.explainer(self.X_test)
-            print("  Using shap.Explainer (model-agnostic)")
+            _elapsed = time.time() - _t0
+            mins, secs = divmod(int(_elapsed), 60)
+            time_str = f"{mins}m {secs}s" if mins > 0 else f"{secs}s"
+            print(f"  SHAP computation complete: {len(self.X_test)} samples in {time_str}")
 
     def _get_shap_matrix(self):
         """
@@ -151,10 +166,25 @@ class AutoMLVisualizer:
         print(f"Generated: {filepath}")
 
     def generate_all_plots(self, sample_index=0, target_feature=None, prefix=""):
+        import time
         p = f"{prefix}_" if prefix else ""
         print(f"開始生成 {prefix if prefix else '預設'} 專案圖表...")
+        _total_start = time.time()
+
+        _t = time.time()
         self.generate_beeswarm_plot(filename=f"{p}global.png")
+        print(f"  └─ Global chart: {time.time()-_t:.1f}s")
+
+        _t = time.time()
         self.generate_waterfall_plot(sample_index=sample_index, filename=f"{p}waterfall.png")
+        print(f"  └─ Waterfall chart: {time.time()-_t:.1f}s")
+
         if target_feature is None:
             target_feature = self.X_test.columns[0]
+
+        _t = time.time()
         self.generate_dependence_plot(target_feature=target_feature, filename=f"{p}dependence.png")
+        print(f"  └─ Dependence chart: {time.time()-_t:.1f}s")
+
+        _total = time.time() - _total_start
+        print(f"Total time: {_total:.1f}s")
