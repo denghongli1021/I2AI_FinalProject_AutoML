@@ -1,0 +1,13 @@
+{
+  "name": "i2ai-automl-frontend",
+  "version": "1.0.0",
+  "private": true,
+  "description": "AutoML 平台前端 — Tailwind CSS build (取代舊 UI 的 Play CDN)",
+  "scripts": {
+    "build:css": "tailwindcss -i css/tailwind-input.css -o css/tailwind.css --minify",
+    "watch:css": "tailwindcss -i css/tailwind-input.css -o css/tailwind.css --watch"
+  },
+  "devDependencies": {
+    "tailwindcss": "^3.4.17"
+  }
+}

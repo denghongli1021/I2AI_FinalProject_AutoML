@@ -19,3 +19,7 @@ api/auth.db
 
 catboost_info/
 I2AI-handoff/
+
+# Node / Tailwind build — node_modules 不進 repo;css/tailwind.css 由 CI 編譯產生,不 commit
+node_modules/
+css/tailwind.css

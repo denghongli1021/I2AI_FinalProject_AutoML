@@ -1,0 +1,74 @@
+name: Deploy frontend to GitHub Pages
+
+# 前端是純靜態站 (index.html / index-new.html / css / js / new-ui)。
+# 這個 workflow 取代「Deploy from a branch」:在 CI 用 Tailwind CLI 把
+# css/tailwind.css 編譯出來 (取代舊的 Play CDN),再把整個靜態站發佈到 Pages。
+#
+# ⚠️ 啟用前要先去 GitHub repo → Settings → Pages → Build and deployment →
+#    Source 改成「GitHub Actions」(原本是 Deploy from a branch),否則這支不會生效。
+
+on:
+  push:
+    branches: [main]
+    # 只有前端相關檔案變動才重新發佈 (後端 api/、tools/ 改動不觸發)
+    paths:
+      - 'index.html'
+      - 'index-new.html'
+      - 'icon.png'
+      - 'css/**'
+      - 'js/**'
+      - 'new-ui/**'
+      - 'tailwind.config.js'
+      - 'package.json'
+      - 'package-lock.json'
+      - '.github/workflows/deploy-pages.yml'
+  workflow_dispatch:        # 也可以在 Actions 頁面手動觸發
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# 同時只跑一個發佈,新的會取消舊的進行中發佈
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+
+      - name: Install deps
+        run: npm ci
+
+      - name: Build Tailwind CSS
+        run: npm run build:css
+
+      - name: Stage static site
+        run: |
+          mkdir -p _site
+          cp index.html index-new.html icon.png _site/
+          cp -r css js new-ui _site/
+
+      - uses: actions/configure-pages@v5
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

@@ -5,30 +5,16 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>AutoML</title>
   <link rel="icon" type="image/png" href="icon.png">
-  <script src="https://cdn.tailwindcss.com"></script>
   <script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>
   <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <!-- Tailwind:由 Tailwind CLI 預編譯成 css/tailwind.css(取代舊的 cdn.tailwindcss.com Play CDN)。
+       自訂顏色設定已移到 tailwind.config.js。css/tailwind.css 已 gitignore,CI 會自動 build;
+       本機開發請先跑 `npm run build:css`(或 `npm run watch:css`)產生此檔。 -->
+  <link rel="stylesheet" href="css/tailwind.css?v=1">
   <link rel="stylesheet" href="css/style.css?v=43">
-  <script>
-    tailwind.config = {
-      theme: {
-        extend: {
-          colors: {
-            primary: { 50:'#eff6ff',100:'#dbeafe',200:'#bfdbfe',300:'#93c5fd',400:'#60a5fa',500:'#3b82f6',600:'#2563eb',700:'#1d4ed8',800:'#1e40af',900:'#1e3a8a' },
-            dark: { 50:'#f8fafc',100:'#f1f5f9',200:'#e2e8f0',300:'#cbd5e1',400:'#94a3b8',500:'#64748b',600:'#475569',700:'#334155',800:'#1e293b',900:'#0f172a',950:'#020617' },
-            accent: { 400:'#22d3ee',500:'#06b6d4',600:'#0891b2' },
-            success: { 400:'#34d399',500:'#10b981',600:'#059669' },
-            warning: { 400:'#fbbf24',500:'#f59e0b',600:'#d97706' },
-            danger: { 400:'#f87171',500:'#ef4444',600:'#dc2626' },
-          },
-          fontFamily: { sans: ['Inter','system-ui','sans-serif'] },
-        }
-      }
-    }
-  </script>
 </head>
 <body class="bg-dark-950 text-dark-100 font-sans min-h-screen flex">
 

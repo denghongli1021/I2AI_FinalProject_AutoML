@@ -2070,14 +2070,21 @@ function renderProcessLogItems(container, logs) {
     section.className = 'proc-category mb-4';
 
     // Category header (clickable to collapse)
-    const colorMap = { warning: 'warning-400', danger: 'danger-400', primary: 'primary-400', accent: 'accent-400', success: 'success-400' };
-    const textColor = colorMap[cat.color] || 'dark-300';
-    const bgColor = cat.color + '-500/8';
+    // ⚠️ 用「完整字面 class」對照表,不要用變數拼 (bg-${color}-500/8)。
+    //    Tailwind build 只掃得到字面字串,拼出來的 class 會被 purge 掉 → 標頭掉色。
+    const catStyle = {
+      warning: { bg: 'bg-warning-500/8', text: 'text-warning-400' },
+      danger:  { bg: 'bg-danger-500/8',  text: 'text-danger-400' },
+      primary: { bg: 'bg-primary-500/8', text: 'text-primary-400' },
+      accent:  { bg: 'bg-accent-500/8',  text: 'text-accent-400' },
+      success: { bg: 'bg-success-500/8', text: 'text-success-400' },
+    };
+    const cs = catStyle[cat.color] || { bg: 'bg-dark-700/40', text: 'text-dark-300' };
 
     section.innerHTML = `
-      <div class="proc-cat-header flex items-center gap-2.5 px-3 py-2 rounded-lg bg-${bgColor} cursor-pointer select-none" data-cat="${cat.action}">
-        <svg class="w-4 h-4 text-${textColor} flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="${cat.icon}"/></svg>
-        <span class="text-sm font-semibold text-${textColor}">${cat.label}</span>
+      <div class="proc-cat-header flex items-center gap-2.5 px-3 py-2 rounded-lg ${cs.bg} cursor-pointer select-none" data-cat="${cat.action}">
+        <svg class="w-4 h-4 ${cs.text} flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="${cat.icon}"/></svg>
+        <span class="text-sm font-semibold ${cs.text}">${cat.label}</span>
         <span class="text-[10px] bg-dark-700/60 text-dark-300 px-1.5 py-0.5 rounded-full">${items.length} 個欄位</span>
         <svg class="w-3.5 h-3.5 text-dark-500 ml-auto proc-cat-arrow transition-transform" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/></svg>
       </div>

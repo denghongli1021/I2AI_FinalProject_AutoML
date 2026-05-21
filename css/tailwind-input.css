@@ -1,0 +1,6 @@
+/* Tailwind 進入點 — CLI 會把這三層展開成實際用到的 utility classes。
+   產物 = css/tailwind.css (build 出來的,已 gitignore;CI 會自動 build)。
+   本機開發要看到樣式,先跑一次 `npm run build:css`,或開 `npm run watch:css` 背景編譯。 */
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
