@@ -546,6 +546,10 @@ def finish_training_run(
     run.elapsed_sec = elapsed_sec
     if results_summary is not None:
         run.results_summary_json = json.dumps(results_summary, ensure_ascii=False, default=_json_default)
+        # 補上真正的 dataset 檔名 (create 時是 "(loading)" 佔位,完成才知道實際名稱)
+        ds_name = results_summary.get("datasetName")
+        if ds_name and (not run.dataset_name or run.dataset_name == "(loading)"):
+            run.dataset_name = ds_name
     if model_ids is not None:
         run.model_ids_json = json.dumps(model_ids)
     run.has_predictions = has_predictions
@@ -635,6 +639,23 @@ def get_training_progress(run_id: str, user, db: Session) -> Optional[dict]:
     }
 
 
+def _resolved_dataset_name(r) -> Optional[str]:
+    """run 建立時 dataset_name 先填 "(loading)" 佔位,真正檔名在訓練完成後才寫進
+    results_summary.datasetName。對外回傳時若欄位還是佔位字串,就改用 summary 裡的真名;
+    若是還在跑的 run (沒 summary),維持 "(loading)" 是合理的。"""
+    name = r.dataset_name
+    if name and name != "(loading)":
+        return name
+    try:
+        if r.results_summary_json:
+            ds = json.loads(r.results_summary_json).get("datasetName")
+            if ds:
+                return ds
+    except Exception:
+        pass
+    return name
+
+
 def list_training_runs(
     user, db: Session,
     *,
@@ -654,7 +675,7 @@ def list_training_runs(
     return [{
         "id": r.id,
         "datasetId": r.dataset_id,
-        "datasetName": r.dataset_name,
+        "datasetName": _resolved_dataset_name(r),
         "engine": r.engine,
         "target": r.target,
         "taskType": r.task_type,
@@ -678,7 +699,7 @@ def get_training_run(run_id: str, user, db: Session) -> dict:
     if r is None:
         raise HTTPException(status_code=404, detail="training run 不存在")
     return {
-        "id": r.id, "datasetId": r.dataset_id, "datasetName": r.dataset_name,
+        "id": r.id, "datasetId": r.dataset_id, "datasetName": _resolved_dataset_name(r),
         "engine": r.engine, "target": r.target, "taskType": r.task_type,
         "sources": json.loads(r.sources_json) if r.sources_json else [],
         "options": json.loads(r.options_json) if r.options_json else {},

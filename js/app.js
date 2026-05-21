@@ -456,7 +456,10 @@ async function hydrateUserHistoryFromDb() {
         id: r.id,
         timestamp: r.startedAt ? r.startedAt * 1000 : Date.now(),
         datasetId: r.datasetId,
-        datasetName: r.datasetName || r.resultsSummary?.datasetName || '(未知)',
+        // "(loading)" 是後端建立 run 時的佔位字串,不是真檔名 → 視為無效,往後 fallback
+        datasetName: (r.datasetName && r.datasetName !== '(loading)')
+          ? r.datasetName
+          : (r.resultsSummary?.datasetName || '(未知)'),
         target: r.target,
         taskType: r.taskType,
         sources: r.sources || [],
