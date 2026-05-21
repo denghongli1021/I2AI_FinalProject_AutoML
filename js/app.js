@@ -32,38 +32,71 @@ document.addEventListener('DOMContentLoaded', () => {
   window.addEventListener('auth:changed', async (ev) => {
     const wasInitial = _authInitial;
     _authInitial = false;
-    // 1. 清光上一位使用者的 in-memory 狀態
-    clearAllUserState();
-    // 2. 載入新使用者的訓練歷史 (per-user localStorage key)
-    loadTrainingHistory();
-    // 3. 抓 datasets
-    await restoreUserDatasets();
-    // 4. 登入 user → 從 DB 還原訓練歷史 + 模型 (跨瀏覽器/裝置可看到歷史)
-    //    沒有 _trainingHistory 在 localStorage 但 DB 有時,這步補上;有時跟 DB 合併。
-    if (ev.detail?.user && typeof ApiClient !== 'undefined' && ApiClient.enabled) {
-      await hydrateUserHistoryFromDb();
-    }
-    // 5. 若有歷史,自動套用最新一筆 — dashboard 跟 leaderboard 才有東西可顯示
-    if (_trainingHistory.length > 0) {
-      _activeHistoryRunId = _trainingHistory[0].id;
-      MLEngine.trainedModels = _trainingHistory[0].models || [];
-    }
-    // 4. 重新渲染當前頁面 (不然會卡在舊資料的 render)
-    const visiblePage = document.querySelector('.page-section:not(.hidden)');
-    if (visiblePage) {
-      const pageId = visiblePage.id.replace('page-', '');
-      // 登出 (user 是 null) 而且不在 dashboard → 跳回 dashboard
-      if (!wasInitial && !ev.detail?.user && pageId !== 'dashboard') {
-        navigateTo('dashboard');
-      } else {
-        renderPageCharts(pageId);
+    // 登入 user 才需要抓 DB → 顯示載入遮罩 (guest 沒 DB 抓取,不用)
+    const willFetchDb = ev.detail?.user && typeof ApiClient !== 'undefined' && ApiClient.enabled;
+    if (willFetchDb) showGlobalLoading('載入你的資料集與訓練紀錄...');
+    try {
+      // 1. 清光上一位使用者的 in-memory 狀態
+      clearAllUserState();
+      // 2. 載入新使用者的訓練歷史 (per-user localStorage key)
+      loadTrainingHistory();
+      // 3. 抓 datasets
+      await restoreUserDatasets();
+      // 4. 登入 user → 從 DB 還原訓練歷史 + 模型 (跨瀏覽器/裝置可看到歷史)
+      if (willFetchDb) {
+        await hydrateUserHistoryFromDb();
       }
+      // 5. 若有歷史,自動套用最新一筆 — dashboard 跟 leaderboard 才有東西可顯示
+      if (_trainingHistory.length > 0) {
+        _activeHistoryRunId = _trainingHistory[0].id;
+        MLEngine.trainedModels = _trainingHistory[0].models || [];
+      }
+      // 6. 重新渲染當前頁面 (不然會卡在舊資料的 render)
+      const visiblePage = document.querySelector('.page-section:not(.hidden)');
+      if (visiblePage) {
+        const pageId = visiblePage.id.replace('page-', '');
+        if (!wasInitial && !ev.detail?.user && pageId !== 'dashboard') {
+          navigateTo('dashboard');
+        } else {
+          renderPageCharts(pageId);
+        }
+      }
+    } finally {
+      hideGlobalLoading();
     }
   });
   // Show demo data on first load
   showDemoDataset();
   setTimeout(() => renderPageCharts('dashboard'), 100);
 });
+
+// ===== 全域載入遮罩 (登入後抓 DB 資料時顯示) =====
+function showGlobalLoading(msg = '載入中...') {
+  let el = document.getElementById('global-loading-overlay');
+  if (!el) {
+    el = document.createElement('div');
+    el.id = 'global-loading-overlay';
+    el.style.cssText = [
+      'position:fixed', 'inset:0', 'z-index:9999',
+      'display:flex', 'flex-direction:column', 'align-items:center', 'justify-content:center',
+      'gap:16px', 'background:rgba(10,14,20,0.78)', 'backdrop-filter:blur(4px)',
+    ].join(';');
+    el.innerHTML = `
+      <div style="width:42px;height:42px;border:3px solid rgba(99,102,241,0.25);border-top-color:#6366f1;border-radius:50%;animation:gl-spin 0.8s linear infinite"></div>
+      <p id="global-loading-msg" style="color:#cbd5e1;font-size:14px;letter-spacing:0.02em"></p>
+      <style>@keyframes gl-spin{to{transform:rotate(360deg)}}</style>
+    `;
+    document.body.appendChild(el);
+  }
+  const m = document.getElementById('global-loading-msg');
+  if (m) m.textContent = msg;
+  el.style.display = 'flex';
+}
+
+function hideGlobalLoading() {
+  const el = document.getElementById('global-loading-overlay');
+  if (el) el.style.display = 'none';
+}
 
 // ===== TOAST SYSTEM =====
 // 全域 toast — 取代各區塊散落的 status span,所有非阻塞通知都走這裡。
@@ -437,12 +470,26 @@ async function hydrateUserHistoryFromDb() {
       });
     }
 
-    // 合併 DB 跟 localStorage — 以 id 去重,DB 為主 (有同 id 用 DB 的)
-    const byId = {};
-    for (const h of _trainingHistory) byId[h.id] = h;
-    for (const h of dbHistory) byId[h.id] = h;  // overwrite
-    _trainingHistory = Object.values(byId).sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
-    console.log(`[hydrate] DB 還原 ${dbHistory.length} 個 training runs,合併後共 ${_trainingHistory.length} 筆`);
+    // DB 為唯一真相 (authoritative):fetch 成功 → 直接用 DB 結果取代,不再 merge localStorage。
+    // 這樣 `python tools/wipe_data.py --all` 清空 DB 後,使用者重新整理頁面就會自動看到乾淨畫面
+    // (DB 0 筆 → dbHistory 0 筆 → 覆蓋掉殘留的 localStorage 舊歷史),不需要手動清 local。
+    // ※ 只有 fetch「成功」才覆蓋;前面的 !runsResp.ok 已 return,所以網路暫時失敗不會誤刪歷史。
+    const dbIds = new Set(dbHistory.map(h => h.id));
+    _trainingHistory = dbHistory.sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
+
+    // 最近一筆的「完整版」(latestFull,含 testTrue/testPred 給圖表用) 若還在 DB,套回 index 0;
+    // 若已被 wipe (id 不在 DB),清掉殘留的 latestFull 快取。
+    const latestFull = _loadLatestFull();
+    if (latestFull && dbIds.has(latestFull.id)) {
+      const idx = _trainingHistory.findIndex(h => h.id === latestFull.id);
+      if (idx >= 0) _trainingHistory[idx] = latestFull;
+    } else if (latestFull) {
+      try { localStorage.removeItem(_latestFullKey()); } catch (_) {}
+    }
+
+    // 把 DB 真相寫回 localStorage,讓下次離線載入也是乾淨的 (避免又冒出舊資料)
+    _persistTrainingHistory();
+    console.log(`[hydrate] DB 為準,還原 ${dbHistory.length} 個 training runs (已覆蓋本機殘留歷史)`);
   } catch (e) {
     console.warn('[hydrate] 從 DB 還原歷史失敗:', e.message);
   }
@@ -485,6 +532,85 @@ function _historyKey() {
   // 跟後端 store.owner_id() 同邏輯
   const u = (typeof AuthClient !== 'undefined' && AuthClient.user) ? `u${AuthClient.user.id}` : 'guest';
   return `automl_training_history_${u}`;
+}
+
+// ===== 實驗室表單設定的記憶 (切頁回來不要回復預設) =====
+function _expFormKey() {
+  const u = (typeof AuthClient !== 'undefined' && AuthClient.user) ? `u${AuthClient.user.id}` : 'guest';
+  return `automl_exp_form_${u}`;
+}
+
+// 把目前實驗室表單狀態存進 localStorage (依 datasetId 分開存)
+function saveExpFormState() {
+  try {
+    const ds = DataEngine.currentDataset;
+    if (!ds) return;
+    const get = (id) => document.getElementById(id);
+    const checkedVals = (sel) => Array.from(document.querySelectorAll(sel)).filter(c => c.checked).map(c => c.value);
+    const state = {
+      engine: document.querySelector('input[name="exp-engine"]:checked')?.value,
+      taskType: document.querySelector('input[name="exp-task-type"]:checked')?.value,
+      timeSeries: get('exp-time-series')?.checked,
+      srcRaw: get('exp-src-raw')?.checked,
+      srcPp: get('exp-src-pp')?.checked,
+      danielFast: get('exp-daniel-fast')?.checked,
+      danielSkipDl: get('exp-daniel-skip-dl')?.checked,
+      danielNoNas: get('exp-daniel-no-nas')?.checked,
+      danielMetric: get('exp-daniel-metric')?.value,
+      danielTimeLimit: get('exp-daniel-time-limit')?.value,
+      target: get('exp-target-select')?.value,
+      algos: checkedVals('#exp-algo-checkboxes .exp-algo-cb'),
+      features: checkedVals('#exp-feature-checkboxes .exp-feat-cb'),
+    };
+    const all = JSON.parse(localStorage.getItem(_expFormKey()) || '{}');
+    all[ds.id] = state;
+    localStorage.setItem(_expFormKey(), JSON.stringify(all));
+  } catch (e) { /* localStorage 滿/壞掉就放掉,不影響功能 */ }
+}
+
+// 從 localStorage 還原表單狀態。回傳 true 表示有套用過 (呼叫端可跳過預設)
+function restoreExpFormState() {
+  try {
+    const ds = DataEngine.currentDataset;
+    if (!ds) return false;
+    const all = JSON.parse(localStorage.getItem(_expFormKey()) || '{}');
+    const s = all[ds.id];
+    if (!s) return false;
+    const get = (id) => document.getElementById(id);
+    const setRadio = (name, val) => { const r = document.querySelector(`input[name="${name}"][value="${val}"]`); if (r) r.checked = true; };
+    const setCheck = (id, val) => { const el = get(id); if (el && typeof val === 'boolean') el.checked = val; };
+
+    // 1. target 先設,並觸發 change 重建特徵 checkbox (全勾) → 之後再還原 feature 勾選
+    const tsel = get('exp-target-select');
+    if (s.target && tsel && Array.from(tsel.options).some(o => o.value === s.target)) {
+      tsel.value = s.target;
+      tsel.dispatchEvent(new Event('change'));
+    }
+    // 2. 還原 feature 勾選 (只動還存在的欄位)
+    if (Array.isArray(s.features)) {
+      document.querySelectorAll('#exp-feature-checkboxes .exp-feat-cb').forEach(cb => {
+        cb.checked = s.features.includes(cb.value);
+      });
+    }
+    // 3. 還原 algorithm 勾選
+    if (Array.isArray(s.algos)) {
+      document.querySelectorAll('#exp-algo-checkboxes .exp-algo-cb').forEach(cb => {
+        cb.checked = s.algos.includes(cb.value);
+      });
+    }
+    // 4. 其他控制項
+    if (s.engine) setRadio('exp-engine', s.engine);
+    if (s.taskType) setRadio('exp-task-type', s.taskType);
+    setCheck('exp-time-series', s.timeSeries);
+    setCheck('exp-src-raw', s.srcRaw);
+    if (!get('exp-src-pp')?.disabled) setCheck('exp-src-pp', s.srcPp);  // pp 沒 preprocessor 時別硬開
+    setCheck('exp-daniel-fast', s.danielFast);
+    setCheck('exp-daniel-skip-dl', s.danielSkipDl);
+    setCheck('exp-daniel-no-nas', s.danielNoNas);
+    if (s.danielMetric && get('exp-daniel-metric')) get('exp-daniel-metric').value = s.danielMetric;
+    if (s.danielTimeLimit != null && get('exp-daniel-time-limit')) get('exp-daniel-time-limit').value = s.danielTimeLimit;
+    return true;
+  } catch (e) { return false; }
 }
 
 // 最新一次訓練的完整資料 (含 testTrue/testPred/featureStats) 獨立存一份,
@@ -871,6 +997,12 @@ function showNotificationDetail(btnEl) {
   const idx = parseInt(btnEl.dataset.notifIdx, 10);
   const notif = _notifications[idx];
   if (!notif || !notif.details) return;
+
+  // ★ 把 popover 移到 <body> 底下 — 不然它的祖先 header 有 backdrop-blur,
+  //   會讓 position:fixed 變成相對 header 定位 (不是視窗),導致位置偏掉 / 被切。
+  if (popover.parentElement !== document.body) {
+    document.body.appendChild(popover);
+  }
 
   // 取消任何待執行的隱藏
   if (_notifDetailHideTimer) { clearTimeout(_notifDetailHideTimer); _notifDetailHideTimer = null; }
@@ -3265,10 +3397,23 @@ function renderRealExperimentsPage() {
   const dsInfo = document.getElementById('exp-dataset-info');
   if (dsSelect) {
     dsSelect.innerHTML = '';
+    // 同名 dataset 用上傳時間後綴區分,避免下拉看不出誰是誰
+    const nameCounts = {};
+    DataEngine.datasets.forEach(d => { nameCounts[d.fileName] = (nameCounts[d.fileName] || 0) + 1; });
     DataEngine.datasets.forEach(d => {
       const opt = document.createElement('option');
       opt.value = d.id;
-      opt.textContent = d.fileName;
+      if (nameCounts[d.fileName] > 1) {
+        // 同名 → 加上傳時間 (loadedAt 可能是 Date 或 timestamp)
+        let when = '';
+        try {
+          const t = d.loadedAt instanceof Date ? d.loadedAt : new Date(typeof d.loadedAt === 'number' ? d.loadedAt * (d.loadedAt < 1e12 ? 1000 : 1) : d.loadedAt);
+          when = `${t.getMonth() + 1}/${t.getDate()} ${String(t.getHours()).padStart(2,'0')}:${String(t.getMinutes()).padStart(2,'0')}`;
+        } catch (e) {}
+        opt.textContent = when ? `${d.fileName} (${when})` : `${d.fileName} (${String(d.id).slice(-4)})`;
+      } else {
+        opt.textContent = d.fileName;
+      }
       dsSelect.appendChild(opt);
     });
     // 用 select.value 同步當前 dataset (cloneNode 會掉,這個不會)
@@ -3305,16 +3450,53 @@ function renderRealExperimentsPage() {
   const featBox = document.getElementById('exp-feature-checkboxes');
   const featCountEl = document.getElementById('exp-feature-count');
 
+  // 算每個數值特徵跟 target 的 |Pearson r| → 洩漏風險。
+  //   |r| >= 0.95 高風險 (幾乎確定洩漏);0.85~0.95 中風險。
+  const computeFeatureRisks = (targetCol) => {
+    const risks = {};
+    const tIdx = ds.headers ? ds.headers.indexOf(targetCol) : -1;
+    if (tIdx < 0 || !ds.data || ds.data.length < 10) return risks;
+    const N = Math.min(ds.data.length, 5000);   // 取樣上限,大資料才不會卡
+    const yv = new Array(N);
+    for (let i = 0; i < N; i++) yv[i] = parseFloat(ds.data[i][tIdx]);
+    ds.analysis.filter(c => c.type === 'numeric' && c.name !== targetCol).forEach(col => {
+      const cIdx = ds.headers.indexOf(col.name);
+      if (cIdx < 0) return;
+      let n = 0, sx = 0, sy = 0, sxx = 0, syy = 0, sxy = 0;
+      for (let i = 0; i < N; i++) {
+        const x = parseFloat(ds.data[i][cIdx]), y = yv[i];
+        if (!isFinite(x) || !isFinite(y)) continue;
+        n++; sx += x; sy += y; sxx += x * x; syy += y * y; sxy += x * y;
+      }
+      if (n < 10) return;
+      const cov = sxy - sx * sy / n, vx = sxx - sx * sx / n, vy = syy - sy * sy / n;
+      const r = (vx > 0 && vy > 0) ? cov / Math.sqrt(vx * vy) : 0;
+      const ar = Math.abs(r);
+      if (ar >= 0.95) risks[col.name] = { level: 'high', corr: r };
+      else if (ar >= 0.85) risks[col.name] = { level: 'medium', corr: r };
+    });
+    return risks;
+  };
+
   const buildFeatureCheckboxes = () => {
     const targetCol = targetSel.value;
     const numericCols = ds.analysis.filter(c => c.type === 'numeric' && c.name !== targetCol);
     const dateCols = ds.analysis.filter(c => c.type === 'datetime' && c.name !== targetCol);
+    const risks = computeFeatureRisks(targetCol);
     featBox.innerHTML = '';
-    // Numeric features
+    // Numeric features (帶風險標示)
     numericCols.forEach(col => {
+      const risk = risks[col.name];
       const lbl = document.createElement('label');
       lbl.className = 'flex items-center gap-1.5 text-xs text-dark-300 cursor-pointer hover:text-dark-100 transition-colors';
-      lbl.innerHTML = `<input type="checkbox" class="exp-feat-cb accent-primary-500" value="${escapeHtml(col.name)}" checked> ${escapeHtml(col.name)}`;
+      lbl.dataset.risk = risk ? risk.level : '';
+      let badge = '';
+      if (risk && risk.level === 'high') {
+        badge = `<span class="text-[9px] px-1 py-0.5 rounded bg-danger-500/20 text-danger-300 font-semibold ml-1" title="與 target 相關係數 ${risk.corr.toFixed(3)},極可能洩漏">高風險</span>`;
+      } else if (risk && risk.level === 'medium') {
+        badge = `<span class="text-[9px] px-1 py-0.5 rounded bg-warning-500/20 text-warning-300 font-semibold ml-1" title="與 target 相關係數 ${risk.corr.toFixed(3)},可能洩漏">中風險</span>`;
+      }
+      lbl.innerHTML = `<input type="checkbox" class="exp-feat-cb accent-primary-500" value="${escapeHtml(col.name)}" checked> ${escapeHtml(col.name)}${badge}`;
       featBox.appendChild(lbl);
     });
     // Date-derived features
@@ -3330,11 +3512,17 @@ function renderRealExperimentsPage() {
         const label = dateLabels[suffix] || suffix;
         const lbl = document.createElement('label');
         lbl.className = 'flex items-center gap-1.5 text-xs text-dark-300 cursor-pointer hover:text-dark-100 transition-colors';
+        lbl.dataset.risk = '';   // 日期衍生特徵不算洩漏風險
         lbl.innerHTML = `<input type="checkbox" class="exp-feat-cb accent-primary-500" value="${escapeHtml(fn)}" checked> <span class="text-cyan-400">${escapeHtml(col.name)}</span>_${escapeHtml(label)}`;
         featBox.appendChild(lbl);
       });
     });
     updateFeatureCount();
+    // 刷新風險按鈕顯示 (有偵測到該等級才顯示) — inline 避免 const TDZ
+    const _hasHigh = featBox.querySelector('label[data-risk="high"]');
+    const _hasMed = featBox.querySelector('label[data-risk="medium"]');
+    document.getElementById('exp-feat-drop-high')?.classList.toggle('hidden', !_hasHigh);
+    document.getElementById('exp-feat-drop-med')?.classList.toggle('hidden', !_hasMed);
   };
 
   const updateFeatureCount = () => {
@@ -3346,6 +3534,15 @@ function renderRealExperimentsPage() {
   featBox.addEventListener('change', updateFeatureCount);
   document.getElementById('exp-feat-all').onclick = () => { featBox.querySelectorAll('.exp-feat-cb').forEach(cb => cb.checked = true); updateFeatureCount(); };
   document.getElementById('exp-feat-none').onclick = () => { featBox.querySelectorAll('.exp-feat-cb').forEach(cb => cb.checked = false); updateFeatureCount(); };
+
+  // 取消高/中風險特徵 — 依 label 的 data-risk 取消勾選。只有偵測到該等級時才顯示按鈕。
+  const dropByRisk = (level) => {
+    featBox.querySelectorAll('label[data-risk="' + level + '"] .exp-feat-cb').forEach(cb => { cb.checked = false; });
+    updateFeatureCount();
+    saveExpFormState();
+  };
+  document.getElementById('exp-feat-drop-high').onclick = () => dropByRisk('high');
+  document.getElementById('exp-feat-drop-med').onclick = () => dropByRisk('medium');
 
   // 搜尋欄位 — 即時過濾下方 checkbox
   const featSearch = document.getElementById('exp-feature-search');
@@ -3670,6 +3867,18 @@ function renderRealExperimentsPage() {
   // If already trained, show results
   if (MLEngine.trainedModels.length > 0) {
     document.getElementById('exp-results').classList.remove('hidden');
+  }
+
+  // --- 還原上次的表單設定 (切頁回來不要回復預設) ---
+  // 在所有預設 + listener 都 wire 完之後才套用,確保不被覆寫
+  restoreExpFormState();
+  if (typeof applyEngineUI === 'function') applyEngineUI();  // 還原 engine 後同步顯示/隱藏區塊
+
+  // --- 任一控制項改動就存檔 (delegated,只綁一次) ---
+  const configEl = document.getElementById('exp-real-config');
+  if (configEl && !configEl.__expFormPersist) {
+    configEl.__expFormPersist = true;
+    configEl.addEventListener('change', saveExpFormState);
   }
 }
 
@@ -4005,8 +4214,10 @@ async function startDanielExperimentTraining(ds, targetCol, options) {
     const sortedModels = models.sort((a, b) => (b.metrics.testScore || 0) - (a.metrics.testScore || 0));
     MLEngine.trainedModels = sortedModels;
 
+    // 任務類型:從第一個 result 判斷 (回歸 / 分類),不再寫死分類
+    const pipelineTaskType = okResults[0]?.taskType === 'regression' ? 'regression' : 'classification';
     resultsCard.classList.remove('hidden');
-    renderExperimentResults(sortedModels, { taskType: 'classification', target: targetCol });
+    renderExperimentResults(sortedModels, { taskType: pipelineTaskType, target: targetCol });
 
     // 在訓練結果區插一張 Daniel 專屬詳細卡片 (perModel / Blend vs Stack 切換指標)
     insertDanielDetailCard(finalResults, targetCol);
@@ -4024,10 +4235,10 @@ async function startDanielExperimentTraining(ds, targetCol, options) {
       datasetId: ds.id,
       datasetName: ds.fileName || 'Dataset',
       target: targetCol,
-      taskType: 'classification',
+      taskType: pipelineTaskType,
       sources: options.sources,
       modelCount: sortedModels.length,
-      metric: best.metrics.testScoreLabel || 'F1',
+      metric: best.metrics.testScoreLabel || (pipelineTaskType === 'regression' ? 'R²' : 'F1'),
       bestModel: { name: best.name, score: best.metrics.testScore },
       options: { engine: 'daniel', fast: options.fast, skipDl: options.skipDl, noNas: options.noNas },
       models: sortedModels,
@@ -4081,7 +4292,48 @@ function danielResultToModel(r, rank) {
   const ensembleName = r.bestEnsemble === 'stack' ? 'Stack' : 'Blend';
   const isOof = r.scoreSource === 'oof';
   const oofSuffix = isOof ? ' · OOF' : '';
+  const isReg = r.taskType === 'regression';
   const fakeName = `[${sourceLabel}] Pipeline (${ensembleName})${oofSuffix}`;
+
+  if (isReg) {
+    // 時序回歸:後端回 rmse / r2,沒有 accuracy/f1。testScore 用 R² (越大越好)
+    return {
+      id: `daniel_${rank}_${Date.now()}`,
+      name: fakeName,
+      type: 'daniel_pipeline',
+      taskType: 'regression',
+      targetName: r.target,
+      featureNames: [],
+      metrics: {
+        taskType: 'regression',
+        // 欄位名要跟 renderExperimentResults 的 isReg 分支一致 (testR2 / testRMSE / testMAE)
+        testR2: r.r2 ?? 0,
+        testRMSE: r.rmse ?? 0,
+        testMAE: r.mae ?? 0,
+        testScore: r.bestScore ?? r.r2 ?? 0,   // R²
+        testScoreLabel: 'R²' + (isOof ? ' (OOF)' : ''),
+        bestEnsemble: r.bestEnsemble,
+        scoreSource: r.scoreSource || 'test',
+      },
+      featureImportance: [],
+      testTrue: [],
+      testPred: [],
+      trainTime: (r.elapsedSec || 0) * 1000,
+      inferLatency: 0,
+      trainSize: r.nTrain || 0,
+      testSize: r.nTest || 0,
+      means: [], stds: [], featureStats: [],
+      dataSource: r.dataSource,
+      dataSourceLabel: sourceLabel,
+      preprocessorId: r.preprocessorId,
+      danielPerModel: r.perModel || [],
+      danielSplitMode: r.splitMode,
+      danielIsTs: r.isTimeSeries,
+      danielDevice: r.device,
+      danielNFeatures: r.nFeatures,
+    };
+  }
+
   // testScore 用 bestScore (pipeline 自己挑 Blend vs Stack 較佳者;沒 label 時 fallback OOF max)
   const scoreLabel = (r.metric || 'F1').toUpperCase() + (isOof ? ' (OOF)' : '');
   return {
@@ -4282,14 +4534,15 @@ function renderExperimentResults(models, data) {
       : `<span class="text-dark-400">${i + 1}</span>`;
 
     let col1, col2, col3;
+    const _f = (v, d = 4) => (typeof v === 'number' ? v.toFixed(d) : '—');
     if (isReg) {
-      col1 = m.metrics.testR2.toFixed(4);
-      col2 = m.metrics.testRMSE.toFixed(4);
-      col3 = m.metrics.testMAE.toFixed(4);
+      col1 = _f(m.metrics.testR2);
+      col2 = _f(m.metrics.testRMSE);
+      col3 = _f(m.metrics.testMAE);
     } else {
-      col1 = (m.metrics.testAccuracy * 100).toFixed(2) + '%';
-      col2 = m.metrics.f1.toFixed(4);
-      col3 = m.metrics.precision.toFixed(4);
+      col1 = typeof m.metrics.testAccuracy === 'number' ? (m.metrics.testAccuracy * 100).toFixed(2) + '%' : '—';
+      col2 = _f(m.metrics.f1);
+      col3 = _f(m.metrics.precision);
     }
 
     const score = m.metrics.testScore;
@@ -4541,6 +4794,28 @@ function renderExpPredictionChart(model, data) {
   chart.resize();
 }
 
+// 把 model.hyperparameters dict 轉成一排 chip HTML。
+// 回傳 { count, html };沒有可顯示的超參數時回傳 ''(falsy,呼叫端可直接 if 判斷)。
+function _hyperparamChipsHtml(hp, maxItems = 16) {
+  if (!hp || typeof hp !== 'object') return '';
+  const entries = Object.entries(hp)
+    .filter(([_, v]) => v !== null && v !== undefined && !(Array.isArray(v) && v.length === 0))
+    .sort((a, b) => a[0].localeCompare(b[0]));
+  if (!entries.length) return '';
+  const shown = entries.slice(0, maxItems);
+  const chips = shown.map(([k, v]) => {
+    const valStr = typeof v === 'number'
+      ? (Number.isInteger(v) ? String(v) : v.toFixed(4))
+      : (typeof v === 'object' ? JSON.stringify(v) : String(v));
+    const valTrunc = valStr.length > 28 ? valStr.slice(0, 26) + '…' : valStr;
+    return `<span class="inline-block text-[10px] px-1.5 py-0.5 rounded bg-dark-800 text-dark-300 mr-1 mb-1" title="${escapeHtml(k)} = ${escapeHtml(valStr)}"><span class="text-dark-500">${escapeHtml(k)}</span>=<span class="font-mono text-dark-200">${escapeHtml(valTrunc)}</span></span>`;
+  }).join('');
+  const more = entries.length > maxItems
+    ? `<span class="text-[10px] text-dark-500">+${entries.length - maxItems} 個…</span>`
+    : '';
+  return { count: entries.length, html: chips + more };
+}
+
 // ===== REAL LEADERBOARD =====
 function renderRealLeaderboard() {
   const models = MLEngine.trainedModels;
@@ -4645,6 +4920,25 @@ function renderRealLeaderboard() {
       <td class="py-3 px-4">${actions}</td>
     `;
     tbody.appendChild(tr);
+
+    // 超參數展開列 — sklearn 模型有細部超參數;pipeline ensemble 通常無,則不插這列
+    const hpInfo = _hyperparamChipsHtml(m.hyperparameters, 16);
+    if (hpInfo) {
+      const hpTr = document.createElement('tr');
+      hpTr.className = 'bg-dark-900/20 border-b border-dark-700/30';
+      hpTr.innerHTML = `
+        <td></td>
+        <td colspan="10" class="py-1.5 px-4">
+          <details>
+            <summary class="text-[11px] text-dark-400 cursor-pointer hover:text-primary-300 select-none inline-flex items-center gap-1">
+              <span>⚙</span><span>超參數 (${hpInfo.count})</span>
+            </summary>
+            <div class="mt-1.5 leading-relaxed">${hpInfo.html}</div>
+          </details>
+        </td>
+      `;
+      tbody.appendChild(hpTr);
+    }
   });
 
   // Bind compare functionality for real models

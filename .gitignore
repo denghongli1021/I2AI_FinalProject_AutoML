@@ -4,11 +4,10 @@ ucr_ts_80(時序資料)/
 visualization/dataset/
 visualization/plots/
 
-I2AI_FinalProject_AutoML-feat-preprocessing/
-I2AI_FinalProject_AutoML-feat-preprocessingv2/
-
-I2AI_FinalProject_AutoML-feat-visualization/
-I2AI_FinalProject_AutoML-daniel/
+# 隊友分支的 git worktree (用 git worktree add 建,各自 checkout 一個 origin/* 分支)
+# 不是普通資料夾,不要 commit 進主分支
+teammate-branches/
+i2ai-team.code-workspace
 autogluon/
 .claude/
 

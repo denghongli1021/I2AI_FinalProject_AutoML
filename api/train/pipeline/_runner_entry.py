@@ -55,6 +55,91 @@ def _prepare_xy(df, target_col, np, le=None):
     return X, y_enc, le
 
 
+def _prepare_xy_reg(df, target_col, np):
+    """回歸專用:X (數值矩陣) + y (float 連續值,不編碼)。"""
+    X = (df.drop(columns=[target_col])
+           .select_dtypes(include=[np.number])
+           .fillna(0).values.astype(np.float32))
+    y = df[target_col].astype(float).fillna(df[target_col].astype(float).mean()).values.astype(np.float32)
+    return X, y
+
+
+def _run_ts_regression(X_tr, y_tr, X_te, y_te, target_col, source_tag, test_has_label, args, t0):
+    """時序回歸 pipeline (用 daniel 的 pipeline_time.run_regression)。
+    自己輸出 __RESULT_JSON__,回傳 exit code。"""
+    import json as _json
+    import numpy as _np
+    from src.config import ARTIFACTS_DIR, DEVICE
+    import pipeline_time as _pt
+    from sklearn.metrics import mean_squared_error, r2_score, mean_absolute_error
+
+    budget = _pt.TimeBudget(limit_sec=args.time_limit, t_start=t0)
+    cfg = _pt.get_cfg_time(args.fast, n_samples=len(y_tr))
+
+    result = _pt.run_regression(
+        X_tr, y_tr, X_te, cfg, budget,
+        skip_tabular=args.skip_tabular,
+        skip_dl=args.skip_dl,
+        artifacts_dir=os.path.join(ARTIFACTS_DIR, "api", source_tag),
+        metric="rmse",
+    )
+
+    # test_blend / test_stack 是回歸單值預測 (1D)
+    blend = _np.asarray(result.test_blend).ravel()
+    stack = _np.asarray(result.test_stack).ravel()
+
+    def _reg_scores(y_true, y_pred):
+        y_true = _np.asarray(y_true, dtype=float).ravel()
+        y_pred = _np.asarray(y_pred, dtype=float).ravel()
+        rmse = float(_np.sqrt(mean_squared_error(y_true, y_pred)))
+        r2 = float(r2_score(y_true, y_pred))
+        mae = float(mean_absolute_error(y_true, y_pred))
+        return rmse, r2, mae
+
+    rmse = r2 = mae = None
+    best_pred = stack  # 預設用 stack
+    best_ensemble = "stack"
+    if test_has_label and y_te is not None:
+        rmse_b, r2_b, _ = _reg_scores(y_te, blend)
+        rmse_s, r2_s, _ = _reg_scores(y_te, stack)
+        # RMSE 越小越好
+        if rmse_b < rmse_s:
+            best_pred, best_ensemble = blend, "blend"
+            rmse, r2, mae = _reg_scores(y_te, blend)
+        else:
+            best_pred, best_ensemble = stack, "stack"
+            rmse, r2, mae = _reg_scores(y_te, stack)
+
+    def _r(v): return round(v, 4) if v is not None else None
+
+    out = {
+        "ok": True,
+        "taskType": "regression",
+        "metric": "RMSE",
+        "bestEnsemble": best_ensemble,
+        "rmse": _r(rmse),
+        "r2": _r(r2),
+        "mae": _r(mae),
+        # 給前端排行榜用:回歸用 R² 當 testScore (越大越好),沒 label 時 None
+        "bestScore": _r(r2),
+        "scoreSource": "test" if test_has_label else "none",
+        "nTrain": int(len(y_tr)),
+        "nTest": int(X_te.shape[0]),
+        "nFeatures": int(X_tr.shape[1]),
+        "elapsedSec": round(time.time() - t0, 2),
+        "splitMode": "Chronological (TS regression)",
+        "isTimeSeries": True,
+        "device": DEVICE,
+        "target": target_col,
+        "testHasLabel": bool(test_has_label),
+        "predictions": [float(v) for v in best_pred.tolist()],
+        "predictionsBlend": [float(v) for v in blend.tolist()],
+        "predictionsStack": [float(v) for v in stack.tolist()],
+    }
+    print(f"__RESULT_JSON__:{_json.dumps(out, ensure_ascii=False)}")
+    return 0
+
+
 def main():
     parser = argparse.ArgumentParser()
     # 模式 A
@@ -127,7 +212,23 @@ def main():
                 fit_target_series = df_tr[target_col]
 
             if task == "regression":
-                print(f"__RESULT_JSON__:{json.dumps({'ok': False, 'error': '回歸任務暫不支援 pipeline'})}")
+                if args.ts:
+                    # 時序回歸 → 走 pipeline_time.run_regression
+                    X_tr_r, y_tr_r = _prepare_xy_reg(df_tr, target_col, np)
+                    if test_has_label:
+                        X_te_r, y_te_r = _prepare_xy_reg(df_te, target_col, np)
+                    else:
+                        X_te_r = (df_te.select_dtypes(include=[np.number]).fillna(0).values.astype(np.float32))
+                        y_te_r = None
+                    if X_tr_r.shape[1] != X_te_r.shape[1]:
+                        print(f"__RESULT_JSON__:{json.dumps({'ok': False, 'error': f'train ({X_tr_r.shape[1]}) / test ({X_te_r.shape[1]}) 特徵數不一致'})}")
+                        return 1
+                    src_tag = os.path.splitext(os.path.basename(args.train_csv))[0]
+                    print(f"[Pipeline] target={target_col} n_train={len(y_tr_r)} n_test={X_te_r.shape[0]} "
+                          f"task=regression(TS) device={DEVICE} test_has_label={test_has_label}")
+                    sys.stdout.flush()
+                    return _run_ts_regression(X_tr_r, y_tr_r, X_te_r, y_te_r, target_col, src_tag, test_has_label, args, t0)
+                print(f"__RESULT_JSON__:{json.dumps({'ok': False, 'error': '非時序回歸暫不支援 pipeline (請勾選時序模式,或改用 sklearn 引擎)'})}")
                 return 1
 
             le = LabelEncoder()
@@ -163,7 +264,21 @@ def main():
             task = _detect_task(y_raw)
 
             if task == "regression":
-                print(f"__RESULT_JSON__:{json.dumps({'ok': False, 'error': '回歸任務暫不支援 pipeline (設計上只跑分類)'})}")
+                if args.ts:
+                    # 時序回歸 → 自己做 80/20 時序切分後走 pipeline_time
+                    X_all_r, y_all_r = _prepare_xy_reg(df, target_col, np)
+                    if X_all_r.shape[1] == 0:
+                        print(f"__RESULT_JSON__:{json.dumps({'ok': False, 'error': '沒有可用的數值欄位'})}")
+                        return 1
+                    idx = int(len(X_all_r) * 0.8)
+                    X_tr_r, X_te_r = X_all_r[:idx], X_all_r[idx:]
+                    y_tr_r, y_te_r = y_all_r[:idx], y_all_r[idx:]
+                    src_tag = os.path.splitext(os.path.basename(args.csv))[0]
+                    print(f"[Pipeline] target={target_col} n_train={len(y_tr_r)} n_test={len(y_te_r)} "
+                          f"task=regression(TS) device={DEVICE} split=Chronological")
+                    sys.stdout.flush()
+                    return _run_ts_regression(X_tr_r, y_tr_r, X_te_r, y_te_r, target_col, src_tag, True, args, t0)
+                print(f"__RESULT_JSON__:{json.dumps({'ok': False, 'error': '非時序回歸暫不支援 pipeline (請勾選時序模式,或改用 sklearn 引擎)'})}")
                 return 1
 
             X_all, y_all, le = _prepare_xy(df, target_col, np)

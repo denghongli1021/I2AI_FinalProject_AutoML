@@ -92,8 +92,9 @@ const DataEngine = {
       loadedAt: new Date(),
     };
 
-    // Check if same fileName already exists; replace it
-    const existIdx = this.datasets.findIndex(d => d.fileName === fileName);
+    // 用 id 去重 (id = Date.now() 每次上傳都不同),所以同名但不同內容的 dataset 會共存,
+    // 不再因為 fileName 相同就覆蓋掉前一個。
+    const existIdx = this.datasets.findIndex(d => d.id === dataset.id);
     if (existIdx >= 0) {
       this.datasets[existIdx] = dataset;
     } else {

@@ -1065,7 +1065,7 @@ def train_stream_endpoint(
                 bundles.append(bundle)
 
             # 一次性 commit 所有 add — 比一筆一筆 commit 快數十倍
-            yield f"data: {json.dumps({'type': 'log', 'msg': f'⬆️ 一次上傳 {total} 個模型到 DB (Supabase 韓國機房,可能需要幾秒)...', 'level': 'info'}, ensure_ascii=False)}\n\n"
+            yield f"data: {json.dumps({'type': 'log', 'msg': f'⬆️ 一次上傳 {total} 個模型到 DB (Supabase)...', 'level': 'info'}, ensure_ascii=False)}\n\n"
             yield f"data: {json.dumps({'type': 'progress', 'pct': 97, 'step': '上傳到 DB'}, ensure_ascii=False)}\n\n"
             commit_t = time.time()
             try:

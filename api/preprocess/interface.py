@@ -34,32 +34,40 @@ def _clean_raw_data(df: pd.DataFrame) -> pd.DataFrame:
     """
     進場前清理（在進入 sklearn 管線之前完成）。
 
-    處理兩件 sklearn Pipeline 無法自動處理的事：
+    處理三件 sklearn Pipeline 無法自動處理的事：
     1. inf / -inf → NaN
        StandardScaler / KNNImputer 碰到 inf 會直接拋 ValueError。
     2. 刪除完全重複列
        重複列若跨越 train/test split，模型等於偷看過測試集答案，評估虛高。
+    3. 刪除幽靈欄位 (100% 缺失值)
+       Imputer 補不了完全沒有觀測值的欄位,會噴 warning 且偷偷改變矩陣維度。
 
     為什麼不在 Processor 裡做？
-       Processor 的 fit / transform 不能刪列（維度必須一致）。
-       這兩件事必須在「進管線之前」完成，interface 層最合適。
+       Processor 的 fit / transform 不能刪列/欄（維度必須一致）。
+       這三件事必須在「進管線之前」完成，interface 層最合適。
     """
     cleaned = df.copy()
 
-    # inf → NaN
+    # 1. inf → NaN
     numeric_cols = cleaned.select_dtypes(include=[np.number]).columns
     n_inf = np.isinf(cleaned[numeric_cols]).sum().sum()
     if n_inf > 0:
         cleaned.replace([np.inf, -np.inf], np.nan, inplace=True)
         print(f"  [前處理] 替換了 {n_inf:,} 個 inf / -inf 值為 NaN")
 
-    # 刪重複列
+    # 2. 刪重複列
     n_before = len(cleaned)
     cleaned.drop_duplicates(inplace=True)
     n_dropped = n_before - len(cleaned)
     if n_dropped > 0:
         cleaned.reset_index(drop=True, inplace=True)
         print(f"  [前處理] 刪除了 {n_dropped:,} 筆完全重複列")
+
+    # 3. 刪除幽靈欄位 (100% 缺失值) — 整合自 preprocessingv2
+    ghost_cols = cleaned.columns[cleaned.isnull().all()].tolist()
+    if ghost_cols:
+        print(f"  [前處理] ⚠️ 偵測到 {len(ghost_cols)} 個欄位 100% 缺失,自動刪除 (範例: {ghost_cols[:5]})")
+        cleaned.drop(columns=ghost_cols, inplace=True)
 
     return cleaned
 

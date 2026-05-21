@@ -1182,6 +1182,8 @@
                     <div class="flex items-center gap-2">
                       <button type="button" id="exp-feat-all" class="text-[11px] px-2 py-1 bg-dark-800 border border-dark-700 rounded text-dark-300 hover:text-primary-400 transition-colors">全選</button>
                       <button type="button" id="exp-feat-none" class="text-[11px] px-2 py-1 bg-dark-800 border border-dark-700 rounded text-dark-300 hover:text-dark-100 transition-colors">清除</button>
+                      <button type="button" id="exp-feat-drop-high" class="hidden text-[11px] px-2 py-1 bg-danger-500/15 border border-danger-500/30 rounded text-danger-300 hover:bg-danger-500/25 transition-colors" title="取消勾選所有與 target 高度相關 (可能洩漏) 的特徵">取消高風險</button>
+                      <button type="button" id="exp-feat-drop-med" class="hidden text-[11px] px-2 py-1 bg-warning-500/15 border border-warning-500/30 rounded text-warning-300 hover:bg-warning-500/25 transition-colors" title="取消勾選所有中度相關的特徵">取消中風險</button>
                     </div>
                   </div>
                   <div id="exp-feature-checkboxes" class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-2 max-h-48 overflow-y-auto p-3 rounded-lg bg-dark-900/50 border border-dark-700/50">
@@ -2530,6 +2532,6 @@
   <script src="js/charts.js?v=36"></script>
   <script src="js/auth.js?v=36"></script>
   <script src="js/api.js?v=36"></script>
-  <script src="js/app.js?v=44"></script>
+  <script src="js/app.js?v=50"></script>
 </body>
 </html>

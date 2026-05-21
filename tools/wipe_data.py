@@ -139,8 +139,35 @@ def main():
             print(f"  ✓ 刪除 {name}: {d} 筆")
         db.commit()
         print(f"\n✅ 完成。總計刪除 {sum(deleted.values())} 筆。")
+
+        _print_local_clear_hint()
     finally:
         db.close()
+
+
+def _print_local_clear_hint():
+    """
+    DB 清空後,瀏覽器 localStorage 仍可能殘留舊訓練歷史 / 表單設定。
+    這支 CLI 在伺服器端執行,碰不到瀏覽器,所以這裡做兩件事:
+      1. 說明:舊 UI 的 hydrate 已改為「DB 為唯一真相」,
+         登入狀態下重新整理頁面 (F5) 就會自動清掉本機殘留歷史。
+      2. 對於「已經開著、不會重新整理」的分頁,提供一段 console 指令手動清。
+    """
+    snippet = (
+        "Object.keys(localStorage)"
+        ".filter(k => k.startsWith('automl_training_history') "
+        "|| k.startsWith('automl_latest_full') "
+        "|| k.startsWith('automl_exp_form'))"
+        ".forEach(k => localStorage.removeItem(k)); location.reload();"
+    )
+    print("\n" + "=" * 60)
+    print("🧹 清 local (瀏覽器端)")
+    print("=" * 60)
+    print("DB 已清空。本機 (localStorage) 的清除方式:")
+    print("  • 已登入 → 重新整理頁面 (F5) 即自動清乾淨 (DB 為唯一真相)。")
+    print("  • 未登入 / 想立即清「已開著的分頁」→ 在瀏覽器 Console 貼上:\n")
+    print("    " + snippet)
+    print()
 
 
 if __name__ == "__main__":
