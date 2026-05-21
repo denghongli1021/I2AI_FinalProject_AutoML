@@ -9,7 +9,9 @@ name: Deploy frontend to GitHub Pages
 
 on:
   push:
-    branches: [main]
+    # 這個 repo 的「預設分支」是 feature/python-api (不是 main),平常都 push 到這條,
+    # 所以 workflow 也監聽它。之後若改用 main 當主線,把這裡換成 main 即可。
+    branches: [feature/python-api]
     # 只有前端相關檔案變動才重新發佈 (後端 api/、tools/ 改動不觸發)
     paths:
       - 'index.html'
