@@ -1,7 +1,8 @@
 """
 run_pipeline_time.py — 時序專用 Pipeline 入口（v1）
 
-僅掃 ucr_ts_80(時序資料)/，每個資料集自動偵測 task：
+僅掃 ucr_ts_80_new(時序資料)/（預切分格式：*_TRAIN.csv + *_TEST.csv），
+每個資料集依前綴自動偵測 task：
   - REG_* 前綴   → 回歸（用 pipeline_time.run_regression，Walk-forward 時序切分）
   - 其他（含 CLS_*）→ 分類（用 pipeline_time.run_classification，即 pipeline.run(is_ts=True)）
 
@@ -11,8 +12,8 @@ run_pipeline_time.py — 時序專用 Pipeline 入口（v1）
     python run_pipeline_time.py --batch --last --top-n 10
     python run_pipeline_time.py --batch --fast
 
-    # 單一 CSV
-    python run_pipeline_time.py --csv "ucr_ts_80(時序資料)/REG_VentilatorPressure.csv"
+    # 單一 TRAIN CSV（自動尋找對應 TEST CSV）
+    python run_pipeline_time.py --csv "ucr_ts_80_new(時序資料)/REG_VentilatorPressure_TRAIN.csv"
 
 結果輸出：pipeline_time_batch_results.csv（每跑完一個資料集即 flush）
 """
@@ -58,9 +59,16 @@ def _auto_detect_task(filename: str, y: pd.Series) -> str:
 
 
 def _ts_datasets(ts_dir: str, top_n: int, last: bool) -> list:
-    files = sorted(f for f in os.listdir(ts_dir) if f.endswith(".csv"))
-    chosen = files[-top_n:] if last else files[:top_n]
-    return [os.path.join(ts_dir, f) for f in chosen]
+    """回傳 (base_name, train_path, test_path) 列表（ucr_ts_80_new 預切分格式）。"""
+    trains = sorted(f for f in os.listdir(ts_dir) if f.endswith("_TRAIN.csv"))
+    chosen = trains[-top_n:] if last else trains[:top_n]
+    result = []
+    for f in chosen:
+        base = f[:-10]  # strip "_TRAIN.csv"
+        result.append((base,
+                       os.path.join(ts_dir, f),
+                       os.path.join(ts_dir, base + "_TEST.csv")))
+    return result
 
 
 # ── 單一資料集執行 ───────────────────────────────────────────────────────────
@@ -201,6 +209,186 @@ def _process_one(csv_path: str, args, t_ds: float) -> dict:
     }
 
 
+# ── time_results.csv 工具 ────────────────────────────────────────────────────
+
+_TIME_RESULT_COLS = [
+    "source", "dataset", "type", "task", "n_train", "n_test",
+    "accuracy", "f1_macro", "rmse", "r2", "score", "elapsed_s",
+]
+
+
+def _append_time_result(out_path: str, row: dict):
+    """Append one result row; write header only when file is new."""
+    df = pd.DataFrame([{c: row.get(c) for c in _TIME_RESULT_COLS}])
+    df.to_csv(out_path, mode="a", header=not os.path.exists(out_path), index=False)
+
+
+# ── 新TS批次（ucr_ts_80_new）────────────────────────────────────────────────
+
+def _process_new_ts_one(base_name: str, train_df: pd.DataFrame,
+                        test_df: pd.DataFrame, args, t_ds: float) -> dict:
+    """Run pipeline on one pre-split TRAIN/TEST dataset pair."""
+    task = "regression" if base_name.startswith("REG_") else "classification"
+    target_col = _find_target_col(train_df)
+
+    train_df = train_df.dropna(subset=[target_col]).reset_index(drop=True)
+    test_df  = test_df.dropna(subset=[target_col]).reset_index(drop=True)
+
+    y_tr_raw = train_df[target_col]
+    y_te_raw = test_df[target_col]
+
+    X_tr = (train_df.drop(columns=[target_col])
+              .select_dtypes(include=[np.number])
+              .fillna(0).values.astype(np.float32))
+    X_te = (test_df.drop(columns=[target_col])
+              .select_dtypes(include=[np.number])
+              .fillna(0).values.astype(np.float32))
+
+    if X_tr.shape[1] == 0:
+        raise ValueError("無可用數值特徵（select_dtypes 後 0 欄）")
+
+    # Truncate to the minimum feature count if TRAIN/TEST column counts differ
+    min_cols = min(X_tr.shape[1], X_te.shape[1])
+    X_tr = X_tr[:, :min_cols]
+    X_te = X_te[:, :min_cols]
+
+    if task == "classification":
+        from sklearn.preprocessing import LabelEncoder as _LE
+        le = _LE()
+        y_tr = le.fit_transform(y_tr_raw.astype(str).values)
+        # Map unseen test labels to class 0 rather than crashing
+        classes_set = set(le.classes_)
+        y_te = np.array(
+            [le.transform([str(v)])[0] if str(v) in classes_set else 0
+             for v in y_te_raw],
+            dtype=np.int64,
+        )
+        n_classes = len(le.classes_)
+        print(f"  [Task] classification  n_train={len(y_tr)}  n_test={len(y_te)}  n_classes={n_classes}")
+
+        budget = _pt.TimeBudget(limit_sec=args.time_limit, t_start=t_ds)
+        import pipeline as _pl
+        cfg = _pl.get_cfg(args.fast, n_samples=len(y_tr))
+        cfg["is_timeseries"] = False
+
+        result = _pt.run_classification(
+            X_tr, y_tr, X_te, n_classes, cfg, budget,
+            skip_tabular=args.skip_tabular,
+            skip_dl=args.skip_dl,
+            no_nas=args.no_nas,
+            artifacts_dir=os.path.join(ARTIFACTS_DIR, "batch_new_ts", base_name),
+            metric=args.cls_metric,
+        )
+        from src.metrics import calculate_score
+        score_b = calculate_score(y_te, result.test_blend, metric=args.cls_metric)
+        score_s = calculate_score(y_te, result.test_stack, metric=args.cls_metric)
+        best_preds = result.test_stack if score_s >= score_b else result.test_blend
+        acc = round(calculate_score(y_te, best_preds, metric="accuracy"), 4)
+        f1  = round(calculate_score(y_te, best_preds, metric="f1"), 4)
+        elapsed = round(time.time() - t_ds, 1)
+        print(f"\n  [結果] Blend={score_b:.4f}  Stack={score_s:.4f}  ({elapsed}s)")
+
+        return {
+            "source": "pipeline",
+            "dataset": base_name, "type": "TS", "task": task,
+            "n_train": len(y_tr), "n_test": len(y_te),
+            "accuracy": acc, "f1_macro": f1,
+            "rmse": None, "r2": None,
+            "score": round(max(score_b, score_s), 4),
+            "elapsed_s": elapsed,
+        }
+
+    # ── 回歸 ────────────────────────────────────────────────────────────────
+    y_tr = np.asarray(y_tr_raw.values, dtype=np.float32).ravel()
+    y_te = np.asarray(y_te_raw.values, dtype=np.float32).ravel()
+    print(f"  [Task] regression  n_train={len(y_tr)}  n_test={len(y_te)}")
+
+    budget = _pt.TimeBudget(limit_sec=args.time_limit, t_start=t_ds)
+    cfg = _pt.get_cfg_time(args.fast, n_samples=len(y_tr))
+
+    result = _pt.run_regression(
+        X_tr, y_tr, X_te, cfg, budget,
+        skip_tabular=args.skip_tabular,
+        skip_dl=args.skip_dl,
+        artifacts_dir=os.path.join(ARTIFACTS_DIR, "batch_new_ts", base_name),
+        metric=args.reg_metric,
+    )
+
+    from sklearn.metrics import mean_squared_error, r2_score
+    rmse_b = float(np.sqrt(mean_squared_error(y_te, result.test_blend)))
+    rmse_s = float(np.sqrt(mean_squared_error(y_te, result.test_stack)))
+    r2_b   = float(r2_score(y_te, result.test_blend))
+    r2_s   = float(r2_score(y_te, result.test_stack))
+
+    if args.reg_metric == "r2":
+        best_is_stack = r2_s >= r2_b
+        primary_score = max(r2_b, r2_s)
+    else:
+        best_is_stack = rmse_s <= rmse_b
+        primary_score = min(rmse_b, rmse_s)
+
+    best_rmse = rmse_s if best_is_stack else rmse_b
+    best_r2   = r2_s   if best_is_stack else r2_b
+    elapsed = round(time.time() - t_ds, 1)
+    print(f"\n  [結果] Blend → RMSE={rmse_b:.4f}  R2={r2_b:.4f}")
+    print(f"  [結果] Stack → RMSE={rmse_s:.4f}  R2={r2_s:.4f}  ({elapsed}s)")
+
+    return {
+        "source": "pipeline",
+        "dataset": base_name, "type": "TS", "task": task,
+        "n_train": len(y_tr), "n_test": len(y_te),
+        "accuracy": None, "f1_macro": None,
+        "rmse": round(best_rmse, 4), "r2": round(best_r2, 4),
+        "score": round(primary_score, 4),
+        "elapsed_s": elapsed,
+    }
+
+
+def run_new_ts_batch_pipeline(args):
+    """Pipeline-Time evaluation on 3 CLS + 3 REG from ucr_ts_80_new(時序資料)."""
+    new_ts_dir = os.path.join(HERE, "ucr_ts_80_new(時序資料)")
+    if not os.path.isdir(new_ts_dir):
+        print(f"[錯誤] 找不到目錄：{new_ts_dir}"); sys.exit(1)
+
+    train_files = sorted(f for f in os.listdir(new_ts_dir) if f.endswith("_TRAIN.csv"))
+    cls_bases = [f[:-10] for f in train_files if f.startswith("CLS_")][:3]
+    reg_bases = [f[:-10] for f in train_files if f.startswith("REG_")][:3]
+    selected = cls_bases + reg_bases
+
+    out_path = os.path.join(HERE, "time_results.csv")
+
+    print(f"\n{'='*65}")
+    print(f"  Pipeline-Time 新TS批次  ─  {len(selected)} 個資料集  (source=pipeline)")
+    print(f"{'='*65}")
+
+    for base_name in selected:
+        train_path = os.path.join(new_ts_dir, base_name + "_TRAIN.csv")
+        test_path  = os.path.join(new_ts_dir, base_name + "_TEST.csv")
+        task = "regression" if base_name.startswith("REG_") else "classification"
+        print(f"\n{'─'*65}")
+        print(f"  [TS] {base_name}  |  device={DEVICE}")
+        print(f"{'─'*65}")
+        t_ds = time.time()
+        try:
+            train_df = pd.read_csv(train_path)
+            test_df  = pd.read_csv(test_path)
+            row = _process_new_ts_one(base_name, train_df, test_df, args, t_ds)
+        except Exception:
+            traceback.print_exc()
+            row = {
+                "source": "pipeline",
+                "dataset": base_name, "type": "TS", "task": task,
+                "n_train": None, "n_test": None,
+                "accuracy": None, "f1_macro": None,
+                "rmse": None, "r2": None, "score": None,
+                "elapsed_s": round(time.time() - t_ds, 1),
+            }
+        _append_time_result(out_path, row)
+
+    print(f"\n  結果已儲存 → {out_path}")
+    print(f"{'='*65}\n")
+
+
 # ── 批次模式 ────────────────────────────────────────────────────────────────
 
 def run_batch(args):
@@ -237,22 +425,23 @@ def run_batch(args):
         if results:
             pd.DataFrame(results).to_csv(out_path, index=False)
 
-    for csv_path in datasets:
-        name = os.path.splitext(os.path.basename(csv_path))[0]
-        if name in done_datasets:
-            print(f"\n  [Skip] {name}（已有結果，跳過）")
+    for base_name, train_path, test_path in datasets:
+        if base_name in done_datasets:
+            print(f"\n  [Skip] {base_name}（已有結果，跳過）")
             continue
         print(f"\n{'─'*65}")
-        print(f"  [TS] {name}  |  device={DEVICE}")
+        print(f"  [TS] {base_name}  |  device={DEVICE}")
         print(f"{'─'*65}")
         t_ds = time.time()
         try:
-            row = _process_one(csv_path, args, t_ds)
+            train_df = pd.read_csv(train_path)
+            test_df  = pd.read_csv(test_path)
+            row = _process_new_ts_one(base_name, train_df, test_df, args, t_ds)
             results.append(row)
         except Exception:
             traceback.print_exc()
             results.append({
-                "dataset": name, "type": "TS", "task": "?",
+                "dataset": base_name, "type": "TS", "task": "?",
                 "n_train": None, "n_test": None,
                 "accuracy": None, "f1_macro": None,
                 "rmse": None, "r2": None, "score": None,
@@ -270,12 +459,59 @@ def run_batch(args):
     print(f"{'='*65}\n")
 
 
+# ── 預切分單一模式 ────────────────────────────────────────────────────────────
+
+def run_presplit(args):
+    """用戶手動提供 TRAIN / TEST 兩個 CSV，直接使用不再自行切分。"""
+    train_path = os.path.abspath(args.train)
+    test_path  = os.path.abspath(args.test)
+    for p, label in [(train_path, "TRAIN"), (test_path, "TEST")]:
+        if not os.path.isfile(p):
+            print(f"[錯誤] 找不到{label}檔案：{p}")
+            sys.exit(1)
+
+    base = os.path.splitext(os.path.basename(train_path))[0]
+    base_name = base[:-6] if base.endswith("_TRAIN") else base
+
+    print(f"\n{'='*65}")
+    print(f"  Pipeline-Time 預切分模式  ─  {base_name}  |  device={DEVICE}")
+    print(f"{'='*65}")
+    t_ds = time.time()
+    try:
+        train_df = pd.read_csv(train_path)
+        test_df  = pd.read_csv(test_path)
+        row = _process_new_ts_one(base_name, train_df, test_df, args, t_ds)
+        print("\n  [完成]", row)
+    except Exception:
+        traceback.print_exc()
+
+
 # ── 單一 CSV 模式 ────────────────────────────────────────────────────────────
 
 def run_single(args):
     csv_path = args.csv
     if not os.path.isfile(csv_path):
         print(f"[錯誤] 找不到檔案：{csv_path}"); sys.exit(1)
+
+    # 若傳入 _TRAIN.csv，自動尋找對應 _TEST.csv 並使用預切分模式
+    if csv_path.endswith("_TRAIN.csv"):
+        test_path = csv_path[:-10] + "_TEST.csv"
+        if not os.path.isfile(test_path):
+            print(f"[錯誤] 找不到對應 TEST 檔案：{test_path}"); sys.exit(1)
+        base_name = os.path.basename(csv_path)[:-10]
+        print(f"\n{'='*65}")
+        print(f"  Pipeline-Time 單檔  ─  {base_name}  |  device={DEVICE}")
+        print(f"{'='*65}")
+        t_ds = time.time()
+        try:
+            train_df = pd.read_csv(csv_path)
+            test_df  = pd.read_csv(test_path)
+            row = _process_new_ts_one(base_name, train_df, test_df, args, t_ds)
+            print("\n  [完成]", row)
+        except Exception:
+            traceback.print_exc()
+        return
+
     name = os.path.splitext(os.path.basename(csv_path))[0]
     print(f"\n{'='*65}")
     print(f"  Pipeline-Time 單檔  ─  {name}  |  device={DEVICE}")
@@ -308,24 +544,33 @@ def main():
                         help="回歸優化指標")
 
     parser.add_argument("--batch", action="store_true")
-    parser.add_argument("--ts-dir", default="ucr_ts_80(時序資料)")
+    parser.add_argument("--ts-dir", default="ucr_ts_80_new(時序資料)",
+                        help="UCR 時序目錄（預切分格式：含 _TRAIN.csv / _TEST.csv）")
     parser.add_argument("--top-n", type=int, default=5)
     parser.add_argument("--last", action="store_true",
                         help="取每目錄最後 top-n 個")
     parser.add_argument("--out", default="pipeline_time_batch_results.csv",
                         help="批次模式輸出 CSV")
+    parser.add_argument("--new-ts-batch", action="store_true",
+                        help="新TS批次：讀 ucr_ts_80_new，各取3個CLS+REG，寫 time_results.csv")
 
-    parser.add_argument("--csv", default=None)
+    parser.add_argument("--csv",    default=None, help="單一 CSV 路徑（或 _TRAIN.csv 自動找 _TEST.csv）")
+    parser.add_argument("--train",  default=None, help="訓練集 CSV 路徑（搭配 --test 使用預切分模式）")
+    parser.add_argument("--test",   default=None, help="測試集 CSV 路徑（搭配 --train 使用預切分模式）")
     parser.add_argument("--target", default=None)
 
     args = parser.parse_args()
-    if args.csv:
+    if args.new_ts_batch:
+        run_new_ts_batch_pipeline(args)
+    elif args.train and args.test:
+        run_presplit(args)
+    elif args.csv:
         run_single(args)
     elif args.batch:
         run_batch(args)
     else:
         parser.print_help()
-        print("\n[提示] 請指定 --csv <path> 或 --batch。")
+        print("\n[提示] 請指定 --csv、--train/--test、--batch 或 --new-ts-batch。")
 
 
 if __name__ == "__main__":

@@ -33,7 +33,7 @@ from sklearn.linear_model import Ridge
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from sklearn.model_selection import KFold
 from sklearn.neighbors import KNeighborsRegressor
-from sklearn.preprocessing import StandardScaler
+from sklearn.preprocessing import RobustScaler, StandardScaler
 from tqdm import tqdm
 
 import lightgbm as lgb
@@ -1047,6 +1047,15 @@ def run_regression(
     y_train = np.asarray(y_train, dtype=np.float32).ravel()
     direction = reg_metric_direction(metric)
 
+    # RobustScaler uses median/IQR instead of mean/std, so extreme outliers in training
+    # (e.g. SodiumConcentration has 5 values >1000 vs median~35) do not distort the scale.
+    _y_scaler = RobustScaler()
+    y_scaled = _y_scaler.fit_transform(y_train.reshape(-1, 1)).ravel().astype(np.float32)
+    _center = _y_scaler.center_[0]
+    _scale  = _y_scaler.scale_[0]
+    print(f"  [TargetScale] median={_center:.4g}  IQR={_scale:.4g}"
+          f"  range=[{y_train.min():.4g}, {y_train.max():.4g}]")
+
     all_oof = []
     all_test = []
     all_masks = []
@@ -1069,7 +1078,7 @@ def run_regression(
             metric=metric,
             per_model_timeout=_catboost_timeout,
         )
-        scout_scores, scout_best_params = scout.scout(X_train, y_train,
+        scout_scores, scout_best_params = scout.scout(X_train, y_scaled,
                                                       scout_trials=cfg["scout_trials"],
                                                       global_cfg=cfg)
         # 篩選：依方向排序，保留前 2/3 且不偏離 best 太多
@@ -1118,7 +1127,7 @@ def run_regression(
                 metric=metric,
                 per_model_timeout={"catboost": 1200},  # Full HPO: 20 min
             )
-            tabular_configs = hpo.run(X_train, y_train, global_cfg=cfg,
+            tabular_configs = hpo.run(X_train, y_scaled, global_cfg=cfg,
                                       warm_start=scout_best_params,
                                       locked_feature_sets=locked_fs)
     else:
@@ -1135,7 +1144,7 @@ def run_regression(
             tsnet_hpo = DLRegHPO(model_name="tsnet", arch_fixed=_DEFAULT_TSNET_ARCH,
                                  n_trials=cfg["tsnet_trials"], top_k=cfg["tsnet_top_k"],
                                  metric=metric)
-            tsnet_configs = tsnet_hpo.run(X_train, y_train, global_cfg=cfg)
+            tsnet_configs = tsnet_hpo.run(X_train, y_scaled, global_cfg=cfg)
 
         # [5] TCN HPO
         if budget.should_skip(0.20):
@@ -1145,7 +1154,7 @@ def run_regression(
             print(f"\n[5] TCN HPO ({cfg['dl_trials']} trials) ...")
             tcn_hpo = DLRegHPO(model_name="tcn", n_trials=cfg["dl_trials"],
                                top_k=cfg["dl_top_k"], metric=metric)
-            tcn_configs = tcn_hpo.run(X_train, y_train, global_cfg=cfg)
+            tcn_configs = tcn_hpo.run(X_train, y_scaled, global_cfg=cfg)
 
         # [6] PatchTST HPO
         if budget.should_skip(0.20):
@@ -1155,7 +1164,7 @@ def run_regression(
             print(f"\n[6] PatchTST HPO ({cfg['dl_trials']} trials) ...")
             patchtst_hpo = DLRegHPO(model_name="patchtst", n_trials=cfg["dl_trials"],
                                     top_k=cfg["dl_top_k"], metric=metric)
-            patchtst_configs = patchtst_hpo.run(X_train, y_train, global_cfg=cfg)
+            patchtst_configs = patchtst_hpo.run(X_train, y_scaled, global_cfg=cfg)
 
         dl_configs = tsnet_configs + tcn_configs + patchtst_configs
     else:
@@ -1180,7 +1189,8 @@ def run_regression(
 
     print(f"\n[7] 5-Fold TimeSeries CV — {len(all_configs)} 個模型 config ...")
     for i, config in enumerate(all_configs):
-        tag = f"reg_{config['model_name']}_{config['feature_set']}_c{i}".replace("/", "_")
+        # _yrs suffix: robust-scaled predictions (RobustScaler); invalidates old StandardScaler cache
+        tag = f"reg_{config['model_name']}_{config['feature_set']}_c{i}_yrs".replace("/", "_")
         oof_path = os.path.join(artifacts_dir, f"{tag}_oof.npy")
         tst_path = os.path.join(artifacts_dir, f"{tag}_test.npy")
         mask_path = os.path.join(artifacts_dir, f"{tag}_mask.npy")
@@ -1191,7 +1201,7 @@ def run_regression(
             counts = np.load(mask_path)
         else:
             oof, test_pred, counts = run_reg_cv(
-                config, X_train, y_train, X_test,
+                config, X_train, y_scaled, X_test,
                 device=DEVICE, tag=tag, global_cfg=cfg, metric=metric,
             )
             np.save(mask_path, counts)
@@ -1200,18 +1210,46 @@ def run_regression(
         all_masks.append(counts)
         model_tags.append(tag)
 
+    # ── Quality filter: drop models with catastrophically bad OOF R² ────────
+    # R² is scale-invariant, so we can compute it directly on y_scaled predictions.
+    _MIN_OOF_R2 = -2.0
+    _keep = []
+    for _i, (_oof_i, _mask_i) in enumerate(zip(all_oof, all_masks)):
+        _common = _mask_i > 0
+        _r2_i = r2_score(y_scaled[_common], _oof_i[_common]) if _common.sum() >= 2 else 0.0
+        if _r2_i < _MIN_OOF_R2:
+            print(f"  [QFilter] Dropping {model_tags[_i]} — OOF R²={_r2_i:.4f} (< {_MIN_OOF_R2})")
+            _keep.append(False)
+        else:
+            _keep.append(True)
+    if not all(_keep):
+        all_oof    = [o for o, k in zip(all_oof,    _keep) if k]
+        all_test   = [t for t, k in zip(all_test,   _keep) if k]
+        all_masks  = [m for m, k in zip(all_masks,  _keep) if k]
+        model_tags = [t for t, k in zip(model_tags, _keep) if k]
+    if not all_oof:
+        raise RuntimeError("所有 model config 被 quality filter 排除！")
+
     # ── [8] Ensemble A ───────────────────────────────────────────────────────
     print("\n[8] Ensemble A — Nelder-Mead Weighted Blending (RMSE-min) ...")
     blender = NelderMeadRegBlender(n_restarts=cfg["blend_restarts"], metric=metric)
-    blender.fit(all_oof, y_train, oof_masks=all_masks)
-    test_blend = blender.predict(all_test)
+    blender.fit(all_oof, y_scaled, oof_masks=all_masks)
+    # Inverse-transform from scaled space back to original target scale
+    test_blend = _y_scaler.inverse_transform(
+        blender.predict(all_test).reshape(-1, 1)
+    ).ravel()
 
     # ── [9] Ensemble B ───────────────────────────────────────────────────────
     print("\n[9] Ensemble B — Meta-Learner Stacking ...")
     stacker = MetaLearnerRegStacker(n_meta_trials=cfg["meta_trials"], metric=metric,
                                     n_samples=len(y_train))
-    stacker.fit(all_oof, y_train, X_orig=X_train, oof_masks=all_masks)
-    test_stack = stacker.predict(all_test, X_orig=X_test)
+    stacker.fit(all_oof, y_scaled, X_orig=X_train, oof_masks=all_masks)
+    test_stack = _y_scaler.inverse_transform(
+        stacker.predict(all_test, X_orig=X_test).reshape(-1, 1)
+    ).ravel()
+
+    # Inverse-transform OOF to original scale for result consistency
+    all_oof = [_y_scaler.inverse_transform(o.reshape(-1, 1)).ravel() for o in all_oof]
 
     return PipelineRegResult(
         test_blend=test_blend,

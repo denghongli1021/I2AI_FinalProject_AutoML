@@ -2,19 +2,24 @@
 run_baseline.py  ─  對照組：AutoGluon TabularPredictor
 
 用法：
-  # 批次模式（openml_cc18_data/ 前 N 個 + ucr_ts_80(時序資料)/ 前 N 個）
+  # 批次模式（openml_cc18_data/ 前 N 個 + ucr_ts_80_new(時序資料)/ 前 N 個）
   python run_baseline.py --batch
   python run_baseline.py --batch --top-n 5 --time-budget 120 --presets medium_quality
 
-  # 單一資料集
-  python run_baseline.py --csv openml_cc18_data/22_mfeat-zernike.csv
-  python run_baseline.py --csv openml_cc18_data/22_mfeat-zernike.csv --time-budget 120
+  # 單一 CSV（自動 80/20 切分）
+  python run_baseline.py --csv my_data.csv
+  python run_baseline.py --csv my_ts_data.csv --ts        # 時序：回歸改用 chronological split
+
+  # 預切分模式（手動指定 TRAIN / TEST，不再自行切分）
+  python run_baseline.py --train CLS_Adiac_TRAIN.csv --test CLS_Adiac_TEST.csv
+  python run_baseline.py --train REG_Foo_TRAIN.csv   --test REG_Foo_TEST.csv
 """
 import argparse
 import os
 import shutil
 import sys
 import time
+import traceback
 import warnings
 
 import numpy as np
@@ -80,16 +85,153 @@ def get_metrics(task: str, y_true, y_pred) -> dict:
         return {"rmse": round(rmse, 4), "r2": round(r2, 4)}
 
 
+def _get_new_ts_datasets(new_ts_dir: str, n_per_type: int = 3) -> list:
+    """Return first n_per_type CLS and REG base names from ucr_ts_80_new directory."""
+    train_files = sorted(f for f in os.listdir(new_ts_dir) if f.endswith("_TRAIN.csv"))
+    cls_bases = [f[:-10] for f in train_files if f.startswith("CLS_")][:n_per_type]
+    reg_bases = [f[:-10] for f in train_files if f.startswith("REG_")][:n_per_type]
+    return cls_bases + reg_bases
+
+
+_TIME_RESULT_COLS = [
+    "source", "dataset", "type", "task", "n_train", "n_test",
+    "accuracy", "f1_macro", "rmse", "r2", "score", "elapsed_s",
+]
+
+
+def _append_time_result(out_path: str, row: dict):
+    """Append one result row to time_results.csv; write header only if file is new."""
+    df = pd.DataFrame([{c: row.get(c) for c in _TIME_RESULT_COLS}])
+    df.to_csv(out_path, mode="a", header=not os.path.exists(out_path), index=False)
+
+
+def run_new_ts_batch(args):
+    """AutoGluon baseline on 3 CLS + 3 REG datasets from ucr_ts_80_new(時序資料)."""
+    new_ts_dir = os.path.join(HERE, "ucr_ts_80_new(時序資料)")
+    if not os.path.isdir(new_ts_dir):
+        print(f"[錯誤] 找不到目錄：{new_ts_dir}")
+        sys.exit(1)
+
+    selected = _get_new_ts_datasets(new_ts_dir, n_per_type=3)
+    out_path = os.path.join(HERE, "time_results.csv")
+
+    print(f"\n{'='*65}")
+    print(f"  AutoGluon 新TS批次  ─  {len(selected)} 個資料集  (source=baseline)")
+    print(f"{'='*65}")
+
+    for base_name in selected:
+        train_path = os.path.join(new_ts_dir, base_name + "_TRAIN.csv")
+        test_path  = os.path.join(new_ts_dir, base_name + "_TEST.csv")
+        task = "regression" if base_name.startswith("REG_") else "classification"
+        print(f"\n[TS] {base_name}  ({task})")
+        t0 = time.time()
+
+        try:
+            train_df = pd.read_csv(train_path)
+            test_df  = pd.read_csv(test_path)
+
+            target_col = find_target_col(train_df)
+
+            train_df = train_df.dropna(subset=[target_col]).reset_index(drop=True)
+            test_df  = test_df.dropna(subset=[target_col]).reset_index(drop=True)
+
+            y_tr = train_df[target_col]
+            y_te = test_df[target_col]
+
+            train_X = train_df.drop(columns=[target_col]).dropna(axis=1, how="all")
+            test_X  = test_df.drop(columns=[target_col]).dropna(axis=1, how="all")
+
+            # Keep only columns common to both splits
+            common_cols = [c for c in train_X.columns if c in test_X.columns]
+            train_X = train_X[common_cols]
+            test_X  = test_X[common_cols]
+
+            ag_task = (
+                ("multiclass" if y_tr.nunique() > 2 else "binary")
+                if task == "classification" else "regression"
+            )
+
+            ag_dir = os.path.join(HERE, "autogluon_models", base_name)
+            if os.path.exists(ag_dir):
+                shutil.rmtree(ag_dir, ignore_errors=True)
+
+            train_ag = train_X.copy()
+            train_ag[target_col] = y_tr.values
+
+            predictor = TabularPredictor(
+                label=target_col,
+                problem_type=ag_task,
+                path=ag_dir,
+                verbosity=0,
+            ).fit(
+                train_ag,
+                time_limit=args.time_budget,
+                presets=args.presets,
+                dynamic_stacking=False,
+                excluded_model_types=["FASTAI", "NeuralNetTorch"],
+                ag_args_ensemble={"fold_fitting_strategy": "sequential_local"},
+            )
+
+            y_pred = predictor.predict(test_X).values
+            metrics = get_metrics(task, y_te.values, y_pred)
+            elapsed = round(time.time() - t0, 1)
+
+            row = {
+                "source":   "baseline",
+                "dataset":  base_name,
+                "type":     "TS",
+                "task":     task,
+                "n_train":  len(y_tr),
+                "n_test":   len(y_te),
+                "accuracy": metrics.get("accuracy"),
+                "f1_macro": metrics.get("f1_macro"),
+                "rmse":     metrics.get("rmse"),
+                "r2":       metrics.get("r2"),
+                "score":    metrics.get("f1_macro", metrics.get("r2")),
+                "elapsed_s": elapsed,
+            }
+            _append_time_result(out_path, row)
+
+            if task == "classification":
+                print(f"  Accuracy={metrics['accuracy']:.4f}  "
+                      f"F1={metrics['f1_macro']:.4f}  ({elapsed}s)")
+            else:
+                print(f"  RMSE={metrics['rmse']:.4f}  "
+                      f"R2={metrics['r2']:.4f}  ({elapsed}s)")
+
+        except Exception as exc:
+            elapsed = round(time.time() - t0, 1)
+            print(f"  [ERROR] {exc}")
+            traceback.print_exc()
+            _append_time_result(out_path, {
+                "source": "baseline", "dataset": base_name, "type": "TS",
+                "task": task, "n_train": 0, "n_test": 0,
+                "accuracy": None, "f1_macro": None, "rmse": None, "r2": None,
+                "score": None, "elapsed_s": elapsed,
+            })
+
+    print(f"\n  結果已儲存 → {out_path}")
+    print(f"{'='*65}\n")
+
+
 def _find_datasets(openml_dir: str, ts_dir: str, top_n: int, last: bool = False):
-    """回傳 (csv_path, is_ts) 的列表：取前 top_n 個或後 top_n 個 OpenML + UCR。"""
+    """回傳 (dataset_name, is_ts, path_a, path_b) 列表。
+    OpenML: path_b=None → run_batch 做 80/20 split。
+    TS (ucr_ts_80_new): path_a=TRAIN CSV, path_b=TEST CSV → 直接使用預切資料。
+    """
     openml_all = sorted(f for f in os.listdir(openml_dir) if f.endswith(".csv"))
-    ts_all = sorted(f for f in os.listdir(ts_dir) if f.endswith(".csv"))
+    ts_trains = sorted(f for f in os.listdir(ts_dir) if f.endswith("_TRAIN.csv"))
     openml_files = openml_all[-top_n:] if last else openml_all[:top_n]
-    ts_files = ts_all[-top_n:] if last else ts_all[:top_n]
-    return (
-        [(os.path.join(openml_dir, f), False) for f in openml_files] +
-        [(os.path.join(ts_dir, f), True) for f in ts_files]
-    )
+    ts_selected = ts_trains[-top_n:] if last else ts_trains[:top_n]
+    result = []
+    for f in openml_files:
+        result.append((os.path.splitext(f)[0], False, os.path.join(openml_dir, f), None))
+    for f in ts_selected:
+        base = f[:-10]  # strip "_TRAIN.csv"
+        result.append((base, True,
+                       os.path.join(ts_dir, f),
+                       os.path.join(ts_dir, base + "_TEST.csv")))
+    return result
 
 
 # ── 批次模式 ──────────────────────────────────────────────────────────────────
@@ -113,44 +255,58 @@ def run_batch(args):
 
     results = []
 
-    for csv_path, is_ts in datasets:
-        dataset_name = os.path.splitext(os.path.basename(csv_path))[0]
+    for dataset_name, is_ts, path_a, path_b in datasets:
         dtype_label = "TS" if is_ts else "Tab"
         print(f"\n[{dtype_label}] {dataset_name}")
 
         t0 = time.time()
         try:
-            df = pd.read_csv(csv_path)
-            target_col = find_target_col(df)
-            # Drop rows where target is NaN (AutoGluon rejects non-finite labels)
-            n_before = len(df)
-            df = df.dropna(subset=[target_col]).reset_index(drop=True)
-            if len(df) < n_before:
-                print(f"  [info] dropped {n_before - len(df)} rows with NaN target")
-            y = df[target_col]
-            X = df.drop(columns=[target_col]).dropna(axis=1, how="all")
-            task = auto_detect_task(y)
-
-            ag_task = (
-                ("multiclass" if y.nunique() > 2 else "binary")
-                if task == "classification" else task
-            )
-
-            stratify = y if task == "classification" else None
-            try:
-                X_tr, X_te, y_tr, y_te = train_test_split(
-                    X, y, test_size=args.test_size, random_state=args.seed, stratify=stratify
-                )
-            except ValueError:
-                X_tr, X_te, y_tr, y_te = train_test_split(
-                    X, y, test_size=args.test_size, random_state=args.seed
-                )
-
-            train_df = X_tr.copy()
-            train_df[target_col] = y_tr.values
-            test_df = X_te.copy()
-            test_with_label = test_df.copy()
-            test_with_label[target_col] = y_te.values
+            if is_ts:
+                # 時序資料：直接讀取預切好的 TRAIN / TEST（ucr_ts_80_new 格式）
+                train_raw = pd.read_csv(path_a)
+                test_raw  = pd.read_csv(path_b)
+                target_col = find_target_col(train_raw)
+                train_raw = train_raw.dropna(subset=[target_col]).reset_index(drop=True)
+                test_raw  = test_raw.dropna(subset=[target_col]).reset_index(drop=True)
+                y_tr = train_raw[target_col]
+                y_te = test_raw[target_col]
+                train_X = train_raw.drop(columns=[target_col]).dropna(axis=1, how="all")
+                test_X  = test_raw.drop(columns=[target_col]).dropna(axis=1, how="all")
+                common_cols = [c for c in train_X.columns if c in test_X.columns]
+                train_X = train_X[common_cols]
+                test_X  = test_X[common_cols]
+                task = "regression" if dataset_name.startswith("REG_") else auto_detect_task(y_tr)
+                ag_task = (("multiclass" if y_tr.nunique() > 2 else "binary")
+                           if task == "classification" else "regression")
+                train_df = train_X.copy()
+                train_df[target_col] = y_tr.values
+                test_df = test_X
+                print(f"  [Split] Pre-split  n_train={len(y_tr)}  n_test={len(y_te)}")
+            else:
+                # 表格資料：讀取單一 CSV 並做 80/20 split
+                df = pd.read_csv(path_a)
+                target_col = find_target_col(df)
+                n_before = len(df)
+                df = df.dropna(subset=[target_col]).reset_index(drop=True)
+                if len(df) < n_before:
+                    print(f"  [info] dropped {n_before - len(df)} rows with NaN target")
+                y = df[target_col]
+                X = df.drop(columns=[target_col]).dropna(axis=1, how="all")
+                task = auto_detect_task(y)
+                ag_task = (("multiclass" if y.nunique() > 2 else "binary")
+                           if task == "classification" else task)
+                stratify = y if task == "classification" else None
+                try:
+                    X_tr, X_te, y_tr, y_te = train_test_split(
+                        X, y, test_size=args.test_size, random_state=args.seed, stratify=stratify
+                    )
+                except ValueError:
+                    X_tr, X_te, y_tr, y_te = train_test_split(
+                        X, y, test_size=args.test_size, random_state=args.seed
+                    )
+                train_df = X_tr.copy()
+                train_df[target_col] = y_tr.values
+                test_df = X_te.copy()
 
             ag_dir = os.path.join(HERE, "autogluon_models", dataset_name)
             if os.path.exists(ag_dir):
@@ -178,10 +334,12 @@ def run_batch(args):
                 "dataset":  dataset_name,
                 "type":     dtype_label,
                 "task":     task,
-                "n_train":  len(X_tr),
-                "n_test":   len(X_te),
+                "n_train":  len(y_tr),
+                "n_test":   len(y_te),
                 "accuracy": metrics.get("accuracy"),
                 "f1_macro": metrics.get("f1_macro"),
+                "rmse":     metrics.get("rmse"),
+                "r2":       metrics.get("r2"),
                 "score":    metrics.get("f1_macro", metrics.get("r2")),
                 "elapsed_s": elapsed,
             }
@@ -223,15 +381,107 @@ def run_batch(args):
     print(f"{'='*65}\n")
 
 
+# ── 預切分單一模式 ────────────────────────────────────────────────────────────
+
+def run_presplit(args):
+    """用戶手動提供 TRAIN / TEST 兩個 CSV，直接使用不再自行切分。"""
+    train_path = os.path.abspath(args.train)
+    test_path  = os.path.abspath(args.test)
+    for p, label in [(train_path, "TRAIN"), (test_path, "TEST")]:
+        if not os.path.exists(p):
+            print(f"[錯誤] 找不到{label}檔案：{p}")
+            sys.exit(1)
+
+    train_df = pd.read_csv(train_path)
+    test_df  = pd.read_csv(test_path)
+    target_col = args.target if args.target else find_target_col(train_df)
+    if target_col not in train_df.columns:
+        print(f"[錯誤] 找不到欄位 '{target_col}'，可用：{train_df.columns.tolist()}")
+        sys.exit(1)
+
+    train_df = train_df.dropna(subset=[target_col]).reset_index(drop=True)
+    test_df  = test_df.dropna(subset=[target_col]).reset_index(drop=True)
+
+    y_tr = train_df[target_col]
+    y_te = test_df[target_col]
+    train_X = train_df.drop(columns=[target_col]).dropna(axis=1, how="all")
+    test_X  = test_df.drop(columns=[target_col]).dropna(axis=1, how="all")
+    common_cols = [c for c in train_X.columns if c in test_X.columns]
+    train_X = train_X[common_cols]
+    test_X  = test_X[common_cols]
+
+    # 任務判斷：--task 優先；其次看 TRAIN 檔名前綴；再自動偵測
+    base = os.path.splitext(os.path.basename(train_path))[0]
+    dataset_name = base[:-6] if base.endswith("_TRAIN") else base
+    if args.task:
+        task = args.task
+    elif dataset_name.startswith("REG_"):
+        task = "regression"
+    else:
+        task = auto_detect_task(y_tr)
+
+    ag_task = (("multiclass" if y_tr.nunique() > 2 else "binary")
+               if task == "classification" else "regression")
+
+    print(f"\n{'='*60}")
+    print(f"  AutoGluon 對照組基準（預切分模式）")
+    print(f"{'='*60}")
+    print(f"  訓練集  : {os.path.basename(train_path)}  ({len(train_df)} × {train_df.shape[1]})")
+    print(f"  測試集  : {os.path.basename(test_path)}  ({len(test_df)} × {test_df.shape[1]})")
+    print(f"  目標欄  : {target_col}  |  任務 : {task}  |  共同特徵 : {len(common_cols)}")
+    print(f"  Presets : {args.presets}  |  時間上限 : {args.time_budget}s\n")
+
+    train_ag = train_X.copy()
+    train_ag[target_col] = y_tr.values
+
+    ag_dir = os.path.join(HERE, "autogluon_models", dataset_name)
+    if os.path.exists(ag_dir):
+        shutil.rmtree(ag_dir, ignore_errors=True)
+
+    print("[AutoGluon] 開始訓練...")
+    t0 = time.time()
+    predictor = TabularPredictor(
+        label=target_col,
+        problem_type=ag_task,
+        path=ag_dir,
+        verbosity=2,
+    ).fit(
+        train_ag,
+        time_limit=args.time_budget,
+        presets=args.presets,
+        dynamic_stacking=False,
+        excluded_model_types=["FASTAI", "NeuralNetTorch"],
+        ag_args_ensemble={"fold_fitting_strategy": "sequential_local"},
+    )
+    ag_elapsed = time.time() - t0
+
+    y_pred = predictor.predict(test_X).values
+
+    print(f"\n{'='*60}")
+    print(f"  AutoGluon 測試集結果  （耗時 {ag_elapsed:.1f}s）")
+    print(f"{'='*60}")
+    print_metrics(task, y_te.values, y_pred, "AutoGluon")
+
+    print(f"\n  --- AutoGluon 模型排行榜 ---")
+    leaderboard = predictor.leaderboard(
+        test_X.assign(**{target_col: y_te.values}), silent=True)
+    print(leaderboard[["model", "score_test", "score_val", "fit_time"]].to_string(index=False))
+    print(f"\n{'='*60}\n")
+
+
 # ── 主程式 ───────────────────────────────────────────────────────────────────
 
 def main():
     parser = argparse.ArgumentParser(
         description="對照組：AutoGluon TabularPredictor"
     )
-    parser.add_argument("--csv",         default=None,   help="CSV 檔案路徑（單一模式）")
+    parser.add_argument("--csv",         default=None,   help="CSV 檔案路徑（單一 CSV 模式）")
+    parser.add_argument("--train",       default=None,   help="訓練集 CSV 路徑（搭配 --test 使用預切分模式）")
+    parser.add_argument("--test",        default=None,   help="測試集 CSV 路徑（搭配 --train 使用預切分模式）")
     parser.add_argument("--target",      default=None,   help="目標欄位名稱（預設自動偵測）")
     parser.add_argument("--task",        default=None,   choices=["classification", "regression"])
+    parser.add_argument("--ts",          action="store_true",
+                        help="標記為時序資料（單一 CSV 模式下，回歸改用 chronological split）")
     parser.add_argument("--time-budget", type=int, default=1000, help="訓練時間上限（秒，預設 120）")
     parser.add_argument("--presets",     default="medium_quality",
                         choices=["medium_quality", "good_quality", "best_quality"],
@@ -245,23 +495,35 @@ def main():
                         help="批次模式：自動跑前 top-n 個 OpenML + UCR 資料集")
     parser.add_argument("--openml-dir", default="openml_cc18_data",
                         help="OpenML CSV 目錄（預設 openml_cc18_data）")
-    parser.add_argument("--ts-dir",     default="ucr_ts_80(時序資料)",
-                        help="UCR 時序 CSV 目錄")
+    parser.add_argument("--ts-dir",     default="ucr_ts_80_new(時序資料)",
+                        help="UCR 時序 CSV 目錄（預切分格式：含 _TRAIN.csv / _TEST.csv）")
     parser.add_argument("--top-n",      type=int, default=1,
                         help="每個目錄取前幾個資料集（預設 5）")
     parser.add_argument("--last",       action="store_true",
                         help="取每目錄最後 top-n 個資料集")
-    
+    parser.add_argument("--new-ts-batch", action="store_true",
+                        help="新TS批次：讀 ucr_ts_80_new，各取3個CLS+REG，寫 time_results.csv")
+
     args = parser.parse_args()
+
+    # ── 新TS批次模式 ───────────────────────────────────────────────────────────
+    if args.new_ts_batch:
+        run_new_ts_batch(args)
+        return
 
     # ── 批次模式 ──────────────────────────────────────────────────────────────
     if args.batch:
         run_batch(args)
         return
 
-    # ── 單一 CSV 模式 ─────────────────────────────────────────────────────────
+    # ── 預切分模式（--train + --test）─────────────────────────────────────────
+    if args.train and args.test:
+        run_presplit(args)
+        return
+
+    # ── 單一 CSV 模式（--csv）─────────────────────────────────────────────────
     if not args.csv:
-        parser.error("單一模式需指定 --csv，或使用 --batch 執行批次模式")
+        parser.error("請指定 --csv、--train/--test 或 --batch")
 
     csv_path = os.path.abspath(args.csv)
     if not os.path.exists(csv_path):
@@ -287,20 +549,26 @@ def main():
     print(f"  AutoGluon 對照組基準")
     print(f"{'='*60}")
     print(f"  資料集  : {os.path.basename(csv_path)}  ({df.shape[0]} × {df.shape[1]})")
-    print(f"  目標欄  : {target_col}  |  任務 : {task}")
+    print(f"  目標欄  : {target_col}  |  任務 : {task}  |  TS : {args.ts}")
     print(f"  Presets : {args.presets}  |  時間上限 : {args.time_budget}s")
 
-    stratify = y if task == "classification" else None
-    try:
-        X_train, X_test, y_train, y_test = train_test_split(
-            X, y, test_size=args.test_size, random_state=args.seed, stratify=stratify
-        )
-    except ValueError:
-        X_train, X_test, y_train, y_test = train_test_split(
-            X, y, test_size=args.test_size, random_state=args.seed
-        )
-
-    print(f"  訓練集  : {len(X_train)}  |  測試集 : {len(X_test)}\n")
+    # 時序回歸：依序切分（避免未來資訊洩漏）；其餘：隨機切分
+    if args.ts and task == "regression":
+        split_idx = int(len(X) * (1 - args.test_size))
+        X_train, X_test = X.iloc[:split_idx], X.iloc[split_idx:]
+        y_train, y_test = y.iloc[:split_idx], y.iloc[split_idx:]
+        print(f"  [Split] Chronological  n_train={len(y_train)}  n_test={len(y_test)}")
+    else:
+        stratify = y if task == "classification" else None
+        try:
+            X_train, X_test, y_train, y_test = train_test_split(
+                X, y, test_size=args.test_size, random_state=args.seed, stratify=stratify
+            )
+        except ValueError:
+            X_train, X_test, y_train, y_test = train_test_split(
+                X, y, test_size=args.test_size, random_state=args.seed
+            )
+        print(f"  訓練集  : {len(X_train)}  |  測試集 : {len(X_test)}")
 
     train_df = X_train.copy()
     train_df[target_col] = y_train.values
