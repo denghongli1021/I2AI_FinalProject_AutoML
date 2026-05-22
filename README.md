@@ -7,7 +7,6 @@
 ## 安裝
 
 ```cmd
-conda activate ml_platform
 pip install -r requirements.txt
 ```
 
@@ -18,8 +17,11 @@ pip install -r requirements.txt
 ### Pipeline（自製系統）
 
 ```cmd
-# 批次評估：前 5 個 OpenML + 前 5 個 UCR 資料集（80/20 split）
+# 批次評估：前 5 個 OpenML-CC18 分類資料集
 python run_pipeline.py --batch --top-n 5
+
+# 批次評估：分類 + 回歸同時跑（--reg-top-n 控制 openml_regression_data 筆數）
+python run_pipeline.py --batch --top-n 10 --reg-top-n 10
 
 # 批次評估：後 10 個（--last 旗標）
 python run_pipeline.py --batch --top-n 10 --last
@@ -33,7 +35,7 @@ python run_pipeline.py --batch --time-limit 3600
 # 跳過深度學習模型（僅跑傳統 ML）
 python run_pipeline.py --batch --skip-dl --top-n 3
 
-# 跳過 NAS（表格模式用預設 MLP，時序模式用預設 TSNet）
+# 跳過 NAS（表格模式用預設 MLP）
 python run_pipeline.py --batch --no-nas
 
 # 指定評估指標（預設 f1）
@@ -45,30 +47,33 @@ python test/run_submission.py
 # 單一 CSV 評估（表格資料）
 python run_pipeline.py --csv openml_cc18_data/37_diabetes.csv
 
-# 單一 CSV 評估（時序資料，啟用 TS 模式）
-python run_pipeline.py --csv "ucr_ts_80(時序資料)/dataset.csv" --ts
-
 # 單一 CSV 評估（指定目標欄）
-python run_pipeline.py --csv data.csv --target label --ts
+python run_pipeline.py --csv data.csv --target label
 ```
 
 ### 時序專用 Pipeline（分類 + 回歸）
 
 ```cmd
-# 批次評估：UCR 資料夾前 10 個（自動偵測 CLS/REG）
+# 新TS批次：CLS 與 REG 分開控制各取 N 個（推薦用法）
+python run_pipeline_time.py --new-ts-batch --cls-top-n 10 --reg-top-n 10
+
+# 新TS批次：快速模式
+python run_pipeline_time.py --new-ts-batch --cls-top-n 5 --reg-top-n 5 --fast
+
+# 新TS批次：結果附加至指定 CSV
+python run_pipeline_time.py --new-ts-batch --cls-top-n 10 --reg-top-n 10 --result-file result.csv
+
+# 舊批次模式（前 N 個，不分 CLS/REG）
 python run_pipeline_time.py --batch --top-n 10
 
-# 批次評估：後 10 個（斷點續跑，已完成的 dataset 自動跳過）
+# 批次評估：後 10 個（斷點續跑）
 python run_pipeline_time.py --batch --top-n 10 --last
-
-# 快速模式
-python run_pipeline_time.py --batch --fast --top-n 5
 
 # 指定分類 / 回歸指標
 python run_pipeline_time.py --batch --cls-metric accuracy --reg-metric r2
 
-# 單一 CSV（自動偵測：REG_* 前綴 → 回歸，其他 → 分類）
-python run_pipeline_time.py --csv "ucr_ts_80(時序資料)/REG_VentilatorPressure.csv"
+# 單一 CSV（_TRAIN.csv 格式，自動尋找對應 _TEST.csv）
+python run_pipeline_time.py --csv "ucr_ts_80_new(時序資料)/REG_VentilatorPressure_TRAIN.csv"
 ```
 
 ### 合併批次結果
@@ -81,11 +86,17 @@ python merge_final_results.py
 ### 對照組 AutoGluon Baseline
 
 ```cmd
-# 批次模式
+# 批次模式（OpenML-CC18分類 + UCR-TS + OpenML回歸）
 python run_baseline.py --batch --top-n 5
+
+# 批次：同時指定分類與回歸各取幾個
+python run_baseline.py --batch --top-n 10 --reg-top-n 10
 
 # 批次評估：後 10 個
 python run_baseline.py --batch --top-n 10 --last
+
+# 新TS批次（ucr_ts_80_new，各取 3 個 CLS + 3 個 REG）
+python run_baseline.py --new-ts-batch
 
 # 單一資料集
 python run_baseline.py --csv openml_cc18_data/22_mfeat-zernike.csv
@@ -100,7 +111,10 @@ python run_baseline.py --batch --top-n 5 --time-budget 120 --presets medium_qual
 # 下載 OpenML-CC18 表格資料集 → openml_cc18_data/
 python data_collect.py
 
-# 下載 UCR 時序資料集 → ucr_ts_80(時序資料)/
+# 下載 OpenML 回歸資料集 → openml_regression_data/
+python data_collect_reg.py
+
+# 下載 UCR 時序資料集 → ucr_ts_80_new(時序資料)/
 python data_collect_time.py
 ```
 
@@ -112,7 +126,7 @@ python data_collect_time.py
 
 | 入口腳本 | 引擎 | 任務 |
 |---------|------|------|
-| `run_pipeline.py` | `pipeline.py` | 表格分類（+ UCR TS 分類視為樣本獨立） |
+| `run_pipeline.py` | `pipeline.py` | 表格分類（openml_cc18_data）+ 表格回歸（openml_regression_data） |
 | `run_pipeline_time.py` | `pipeline_time.py` | TS 分類（委派 pipeline.py）+ TS 回歸 |
 | `run_baseline.py` | AutoGluon | 表格分類與回歸（對照組） |
 | `merge_final_results.py` | — | 合併三份批次結果 CSV |
@@ -184,11 +198,12 @@ python data_collect_time.py
 人工智慧project/
 ├── pipeline.py             # 通用 Pipeline 引擎（分類；HPO/NAS/CV/Ensemble）
 ├── pipeline_time.py        # 時序專用 Pipeline 引擎（分類 + 回歸）
-├── run_pipeline.py         # 批次 + 單 CSV 執行入口（分類）
-├── run_pipeline_time.py    # 時序專用執行入口（CLS + REG，支援斷點續跑）
+├── run_pipeline.py         # 批次 + 單 CSV 執行入口（表格分類 + 表格回歸）
+├── run_pipeline_time.py    # 時序專用執行入口（CLS + REG，支援 --new-ts-batch）
 ├── run_baseline.py         # AutoGluon 對照組（分類 + 回歸）
 ├── merge_final_results.py  # 合併三份批次結果 CSV → pipeline_batch_results.csv
 ├── data_collect.py         # 下載 OpenML-CC18 資料集
+├── data_collect_reg.py     # 下載 OpenML 回歸資料集
 ├── data_collect_time.py    # 下載 UCR 時序資料集
 ├── src/
 │   ├── config.py           # 全域設定（SEED=42, DEVICE, ARTIFACTS_DIR）
@@ -206,13 +221,10 @@ python data_collect_time.py
 │       ├── cnn1d.py        # CNN1D, ResNet1D_18, TCN
 │       ├── transformer.py  # SignalTransformer, PatchTST
 │       └── tabular.py      # build_tabular_model() 工廠函式
-├── test/
-│   ├── run_submission.py         # 競賽提交（v3 完整 pipeline）
-│   ├── run_baseline_submission.py # AutoGluon 競賽提交
-│   └── compare_submissions.py    # 比較三份提交 CSV
-├── pipeline_batch_results.csv    # 合併後的完整批次結果（pipeline + baseline + pipeline_time）
-├── openml_cc18_data/       # OpenML-CC18 表格資料集（CSV）
-├── ucr_ts_80(時序資料)/    # UCR 時序資料集（每列為一條序列）
+├── result.csv    # 合併後的完整批次結果（pipeline + baseline + pipeline_time）
+├── openml_cc18_data/       # OpenML-CC18 表格分類資料集（CSV）
+├── openml_regression_data/ # OpenML 表格回歸資料集（CSV）
+├── ucr_ts_80_new(時序資料)/ # UCR 時序資料集（預切分格式：*_TRAIN.csv + *_TEST.csv）
 ├── artifacts/              # OOF/test 預測快取（.npy，run_cv 自動建立）
 ├── submissions/            # 最終提交 CSV
 └── autogluon_models/       # AutoGluon 模型快取
@@ -228,7 +240,7 @@ python data_collect_time.py
 ### 任務自動判斷邏輯（`run_pipeline.py:_auto_detect_task`）
 - `dtype == object / bool` → 分類
 - 整數且 `nunique ≤ 50` 且比例 < 30% → 分類
-- 否則 → 回歸（`run_pipeline.py` 批次模式跳過；`run_pipeline_time.py` 支援）
+- 否則 → 回歸（`run_pipeline.py` 批次模式由 `--reg-top-n` 控制；`run_pipeline_time.py` 支援 REG_* 前綴）
 
 ### 時序任務判斷（`run_pipeline_time.py:_auto_detect_task`）
 - 檔名以 `REG_` 開頭 → 回歸（走 `pipeline_time.run_regression()`）
