@@ -313,7 +313,8 @@ class FeatureBuilder:
 
         Returns
         -------
-        np.ndarray, shape [N, F * 6]  （diff + lag1 + lag2 + rmean3 + rmean5 + rstd3 + rstd5 = 7 × F）
+        np.ndarray, shape [N, F * 13]
+            diff + lag1 + lag2 + (mean/std/max/min) × 2 windows + EMA × 2 = 13 × F
         """
         X = np.asarray(X, dtype=np.float32)
         n, f = X.shape
@@ -334,12 +335,18 @@ class FeatureBuilder:
         lag2[2:] = X[:-2]
         parts.append(lag2)
 
-        # Rolling Mean & Std（window=3, 5），使用 pandas 高效計算
+        # Rolling Mean / Std / Max / Min（window=3, 5）
         df_tmp = pd.DataFrame(X)
         for w in (3, 5):
             roll = df_tmp.rolling(window=w, min_periods=1)
             parts.append(roll.mean().values.astype(np.float32))
             parts.append(roll.std(ddof=0).fillna(0.0).values.astype(np.float32))
+            parts.append(roll.max().values.astype(np.float32))
+            parts.append(roll.min().values.astype(np.float32))
+
+        # EMA（span=3, 5）
+        for span in (3, 5):
+            parts.append(df_tmp.ewm(span=span, adjust=False).mean().values.astype(np.float32))
 
         return np.hstack(parts)
 

@@ -144,14 +144,17 @@ class MetaLearnerStacker:
     def __init__(
         self, n_meta_trials: int = 30, n_folds: int = 5,
         metric: str = "f1", n_samples: int = 10_000,
+        k_best: int = 50,
     ):
         self.n_meta_trials = n_meta_trials
         self.n_folds = n_folds
         self.metric = metric
         self.n_samples = n_samples
+        self.k_best = k_best
         self.meta_model_ = None
         self.meta_name_: str = None
-        self._x_scaler = None  # 用於縮放拼入的原始特徵
+        self._x_scaler = None
+        self._selector = None
 
     def _build_meta_features(self, oof_list: list, X_orig: np.ndarray = None) -> np.ndarray:
         """把所有模型的 OOF 機率拼接；若有 X_orig 則一併拼入（Concatenated Stacking）。"""
@@ -261,6 +264,10 @@ class MetaLearnerStacker:
         if X_orig is not None:
             self._x_scaler = StandardScaler()
             X_orig_scaled = self._x_scaler.fit_transform(X_orig)
+            from sklearn.feature_selection import SelectKBest, f_classif
+            actual_k = min(self.k_best, X_orig_scaled.shape[1])
+            self._selector = SelectKBest(f_classif, k=actual_k)
+            X_orig_scaled = self._selector.fit_transform(X_orig_scaled, y)
 
         X_meta = self._build_meta_features(oof_list, X_orig_scaled)
 
@@ -312,6 +319,8 @@ class MetaLearnerStacker:
         X_orig_scaled = None
         if X_orig is not None and self._x_scaler is not None:
             X_orig_scaled = self._x_scaler.transform(X_orig)
+            if self._selector is not None:
+                X_orig_scaled = self._selector.transform(X_orig_scaled)
         X_meta = self._build_meta_features(test_list, X_orig_scaled)
         return self.meta_model_.predict_proba(X_meta)
 
@@ -319,6 +328,8 @@ class MetaLearnerStacker:
         X_orig_scaled = None
         if X_orig is not None and self._x_scaler is not None:
             X_orig_scaled = self._x_scaler.transform(X_orig)
+            if self._selector is not None:
+                X_orig_scaled = self._selector.transform(X_orig_scaled)
         X_meta = self._build_meta_features(test_list, X_orig_scaled)
         proba = self.meta_model_.predict_proba(X_meta)
         t = getattr(self, "_threshold", 0.5)

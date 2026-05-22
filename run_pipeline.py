@@ -34,6 +34,15 @@ from src.config import DEVICE, SEED, ARTIFACTS_DIR
 import pipeline as _pl
 import pipeline_time as _pt
 
+_RESULT_COLS = [
+    "source", "dataset", "type", "task", "n_train", "n_test",
+    "accuracy", "f1_macro", "rmse", "r2", "score", "elapsed_s",
+]
+
+def _append_result(out_path: str, row: dict):
+    df = pd.DataFrame([{c: row.get(c) for c in _RESULT_COLS}])
+    df.to_csv(out_path, mode="a", header=not os.path.exists(out_path), index=False)
+
 
 # ── 資料輔助函式 ──────────────────────────────────────────────────────────────
 
@@ -66,11 +75,11 @@ def _prepare_X(df: pd.DataFrame, target_col: str) -> np.ndarray:
     return X_num.fillna(0).values.astype(np.float32)
 
 
-def _find_datasets(openml_dir: str, top_n: int, last: bool = False):
-    """回傳 (dataset_name, csv_path) 列表（僅非時序 OpenML 資料集）。"""
+def _find_datasets(openml_dir: str, top_n: int, last: bool = False, force_task: str = None):
+    """回傳 (dataset_name, csv_path, force_task) 列表。"""
     all_csv = sorted(f for f in os.listdir(openml_dir) if f.endswith(".csv"))
     chosen = all_csv[-top_n:] if last else all_csv[:top_n]
-    return [(os.path.splitext(f)[0], os.path.join(openml_dir, f)) for f in chosen]
+    return [(os.path.splitext(f)[0], os.path.join(openml_dir, f), force_task) for f in chosen]
 
 
 def _eval_regression(y_te, result, reg_metric: str):
@@ -94,10 +103,18 @@ def _eval_regression(y_te, result, reg_metric: str):
 
 def run_batch(args):
     openml_dir = os.path.join(HERE, args.openml_dir)
-    if not os.path.isdir(openml_dir):
-        print(f"[錯誤] 找不到目錄：{openml_dir}"); sys.exit(1)
+    reg_dir    = os.path.join(HERE, args.reg_dir)
 
-    datasets = _find_datasets(openml_dir, args.top_n, last=args.last)
+    datasets = []
+    if os.path.isdir(openml_dir):
+        datasets += _find_datasets(openml_dir, args.top_n, last=args.last)
+    else:
+        print(f"[警告] 找不到 OpenML 目錄：{openml_dir}")
+    if os.path.isdir(reg_dir):
+        datasets += _find_datasets(reg_dir, args.reg_top_n, last=args.last, force_task="regression")
+    if not datasets:
+        print("[錯誤] 無可用資料集"); sys.exit(1)
+
     print(f"\n{'='*65}")
     print(f"  Pipeline 批次評估（非時序）  ─  {len(datasets)} 個資料集  fast={args.fast}")
     print(f"{'='*65}")
@@ -108,7 +125,11 @@ def run_batch(args):
         if results:
             pd.DataFrame(results).to_csv(out_path, index=False)
 
-    for dataset_name, csv_path in datasets:
+    def _flush_result():
+        if getattr(args, "result_file", None) and results:
+            _append_result(args.result_file, {**results[-1], "source": "pipeline"})
+
+    for dataset_name, csv_path, force_task in datasets:
         print(f"\n{'─'*65}")
         print(f"  [Tab] {dataset_name}  |  device={DEVICE}")
         print(f"{'─'*65}")
@@ -118,7 +139,7 @@ def run_batch(args):
             df = pd.read_csv(csv_path)
             target_col = _find_target_col(df)
             y_raw = df[target_col]
-            task = _auto_detect_task(y_raw)
+            task = force_task if force_task else _auto_detect_task(y_raw)
             X_all = _prepare_X(df, target_col)
 
             if task == "classification":
@@ -194,6 +215,7 @@ def run_batch(args):
                 })
 
             _flush()
+            _flush_result()
 
         except Exception:
             traceback.print_exc()
@@ -205,6 +227,7 @@ def run_batch(args):
                 "score": None, "elapsed_s": round(time.time() - t_ds, 1),
             })
             _flush()
+            _flush_result()
 
     print(f"\n{'='*65}")
     print("  BATCH SUMMARY — Pipeline（非時序）")
@@ -414,6 +437,10 @@ def main():
                         help="取前 N 個資料集（批次模式用）")
     parser.add_argument("--last",         action="store_true",
                         help="取最後 top-n 個（批次模式用）")
+    parser.add_argument("--reg-dir",      default="openml_regression_data",
+                        help="非時序回歸 CSV 目錄（批次模式用，預設 openml_regression_data）")
+    parser.add_argument("--reg-top-n",    type=int, default=5,
+                        help="回歸目錄取前 N 個資料集（批次模式用）")
 
     # 單一 CSV / 預切分模式旗標
     parser.add_argument("--csv",          type=str, default=None,
@@ -424,6 +451,8 @@ def main():
                         help="測試集 CSV 路徑（搭配 --train 使用預切分模式）")
     parser.add_argument("--target",       type=str, default=None,
                         help="目標欄位名稱（未指定時自動偵測）")
+    parser.add_argument("--result-file",  default=None,
+                        help="附加結果 CSV（含 source 欄，附加模式）")
 
     args = parser.parse_args()
 

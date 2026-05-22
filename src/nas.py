@@ -18,6 +18,7 @@ TSNet 搜尋空間：
   - channels   : 特徵通道數
   - dropout    : Dropout 比率
 """
+import gc
 import numpy as np
 import torch
 import torch.nn as nn
@@ -387,22 +388,30 @@ class TSNetSupernet(nn.Module):
         self.head = nn.Linear(channels, n_classes)
         self.max_blocks = max_blocks
 
-    def forward(self, x: torch.Tensor, arch: dict, dropout_rate: float = 0.0) -> torch.Tensor:
+    def forward(self, x, arch: dict, dropout_rate: float = 0.0, is_small: bool = False) -> torch.Tensor:
         n_blocks = arch["n_blocks"]
         operations = arch["operations"]  # list[int], len == n_blocks
+
+        if isinstance(x, np.ndarray):
+            device = next(self.parameters()).device
+            x = torch.tensor(x, dtype=torch.float32, device=device)
 
         if x.ndim == 2:
             x = x.unsqueeze(1)
         h = self.in_proj(x)
 
+        # 小資料集強制 dropout 防過擬合，eval mode 下同樣保持開啟
+        eff_dropout = 0.3 if (is_small and dropout_rate == 0.0) else dropout_rate
+        eff_training = True if is_small else self.training
+
         for i in range(n_blocks):
             h = self.blocks[i](h, op_idx=operations[i])
-            if dropout_rate > 0:
-                h = F.dropout(h, p=dropout_rate, training=self.training)
+            if eff_dropout > 0:
+                h = F.dropout(h, p=eff_dropout, training=eff_training)
 
         h = self.pool(h).squeeze(-1)
-        if dropout_rate > 0:
-            h = F.dropout(h, p=dropout_rate, training=self.training)
+        if eff_dropout > 0:
+            h = F.dropout(h, p=eff_dropout, training=eff_training)
         return self.head(h)
 
 
@@ -499,10 +508,16 @@ class TSNASSearcher:
         scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
             optimizer, T_max=self.n_supernet_epochs
         )
-        criterion = nn.CrossEntropyLoss()
-
-        X_t = torch.tensor(X, dtype=torch.float32, device=self.device)
-        y_t = torch.tensor(y, dtype=torch.long, device=self.device)
+        # 動態判斷回歸 / 分類
+        is_regression = (n_classes == 1)
+        if is_regression:
+            criterion = nn.MSELoss()
+            X_t = torch.tensor(X, dtype=torch.float32, device=self.device)
+            y_t = torch.tensor(y, dtype=torch.float32, device=self.device).view(-1, 1)
+        else:
+            criterion = nn.CrossEntropyLoss()
+            X_t = torch.tensor(X, dtype=torch.float32, device=self.device)
+            y_t = torch.tensor(y, dtype=torch.long, device=self.device)
         ds = torch.utils.data.TensorDataset(X_t, y_t)
         loader = torch.utils.data.DataLoader(ds, batch_size=256, shuffle=True, drop_last=False)
 
@@ -527,17 +542,38 @@ class TSNASSearcher:
 
     # ------------------------------------------------------------------
     def _eval_arch(
-        self, supernet: TSNetSupernet, X: np.ndarray, y: np.ndarray, arch: dict
+        self, supernet: TSNetSupernet, X_tensor, y_tensor, arch: dict, raw_y=None
     ) -> float:
-        """用共享權重直接推論，計算 Macro F1（免重新訓練）。"""
-        from sklearn.metrics import f1_score as skf1
+        """分批推論評分（分類 Macro F1；回歸負 MSE）。"""
+        is_small = len(X_tensor) < 2000
+
+        # 小資料集限制架構深度防過擬合
+        if is_small and arch.get("n_blocks", 1) > 2:
+            arch = dict(arch)
+            arch["n_blocks"] = min(arch["n_blocks"], 2)
+            arch["operations"] = arch["operations"][: arch["n_blocks"]]
 
         supernet.eval()
-        X_t = torch.tensor(X, dtype=torch.float32, device=self.device)
+        eval_bs = 512
+        n = len(X_tensor)
+        all_logits = []
         with torch.no_grad():
-            logits = supernet(X_t, arch, dropout_rate=0.0)
-        preds = logits.argmax(dim=1).cpu().numpy()
-        return skf1(y, preds, average="macro", zero_division=0)
+            for i in range(0, n, eval_bs):
+                xb = X_tensor[i: i + eval_bs]
+                all_logits.append(supernet(xb, arch, dropout_rate=0.0, is_small=is_small).cpu())
+        logits = torch.cat(all_logits, dim=0)
+
+        if self.n_classes == 1:
+            y_cpu = y_tensor.cpu().view(-1, 1)
+            score = -float(nn.MSELoss()(logits, y_cpu).item())
+            if is_small:
+                score -= 0.05 * arch["n_blocks"]
+            return score
+        else:
+            from sklearn.metrics import f1_score as skf1
+            preds = logits.argmax(dim=1).numpy()
+            y_np = raw_y if raw_y is not None else y_tensor.cpu().numpy()
+            return skf1(y_np, preds, average="macro", zero_division=0)
 
     # ------------------------------------------------------------------
     def _evolutionary_search(
@@ -545,31 +581,48 @@ class TSNASSearcher:
     ) -> tuple:
         """演化搜尋：隨機初始族群 → 截斷選擇 → 突變 → 迭代。"""
         np.random.seed(SEED)
-        population = [_random_ts_arch(self.max_blocks) for _ in range(self.n_candidates)]
-        scores = [self._eval_arch(supernet, X, y, a) for a in population]
 
-        for rnd in tqdm(
-            range(self.n_evolution_rounds),
-            desc="  TS-NAS evolution",
-            leave=False,
-            ncols=80,
-        ):
-            top_n = max(2, len(population) // 3)
-            top_idx = np.argsort(scores)[::-1][:top_n]
-            parents = [population[i] for i in top_idx]
+        # 進迴圈前一次性轉換 tensor，避免重複轉換拖慢速度
+        is_regression = (self.n_classes == 1)
+        X_tensor = torch.tensor(X, dtype=torch.float32, device=self.device)
+        if is_regression:
+            y_tensor = torch.tensor(y, dtype=torch.float32, device=self.device).view(-1, 1)
+            raw_y = None
+        else:
+            y_tensor = torch.tensor(y, dtype=torch.long, device=self.device)
+            raw_y = y
 
-            offspring = [_mutate_ts_arch(p, self.max_blocks) for p in parents]
-            offspring_scores = [self._eval_arch(supernet, X, y, a) for a in offspring]
+        try:
+            population = [_random_ts_arch(self.max_blocks) for _ in range(self.n_candidates)]
+            scores = [self._eval_arch(supernet, X_tensor, y_tensor, a, raw_y=raw_y) for a in population]
 
-            population += offspring
-            scores += offspring_scores
+            for rnd in tqdm(
+                range(self.n_evolution_rounds),
+                desc="  TS-NAS evolution",
+                leave=False,
+                ncols=80,
+            ):
+                top_n = max(2, len(population) // 3)
+                top_idx = np.argsort(scores)[::-1][:top_n]
+                parents = [population[i] for i in top_idx]
 
-            combined = sorted(zip(scores, population), key=lambda x: x[0], reverse=True)
-            population = [c[1] for c in combined[:self.n_candidates]]
-            scores = [c[0] for c in combined[:self.n_candidates]]
+                offspring = [_mutate_ts_arch(p, self.max_blocks) for p in parents]
+                offspring_scores = [self._eval_arch(supernet, X_tensor, y_tensor, a, raw_y=raw_y) for a in offspring]
 
-        best_idx = int(np.argmax(scores))
-        return population[best_idx], scores[best_idx]
+                population += offspring
+                scores += offspring_scores
+
+                combined = sorted(zip(scores, population), key=lambda x: x[0], reverse=True)
+                population = [c[1] for c in combined[:self.n_candidates]]
+                scores = [c[0] for c in combined[:self.n_candidates]]
+
+            best_idx = int(np.argmax(scores))
+            return population[best_idx], scores[best_idx]
+        finally:
+            del X_tensor, y_tensor
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
 
     # ------------------------------------------------------------------
     def search(self, X: np.ndarray, y: np.ndarray, n_classes: int) -> dict:
@@ -577,8 +630,13 @@ class TSNASSearcher:
         執行完整 TSNet NAS 流程，回傳最佳 arch_params dict。
         dict 含 n_blocks / operations / channels / dropout。
         """
+        self.n_classes = n_classes
         torch.manual_seed(SEED)
         np.random.seed(SEED)
+
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
         print("  [TS-NAS] Training TSNet supernet ...")
         supernet = self._train_supernet(X, y, n_classes)
@@ -591,7 +649,7 @@ class TSNASSearcher:
             f"ops={[TS_OPS[i] for i in best_arch['operations']]}, "
             f"channels={best_arch['channels']}, "
             f"dropout={best_arch['dropout']:.2f}, "
-            f"Macro F1={best_score:.4f}"
+            f"score={best_score:.4f}"
         )
         self.best_arch_ = best_arch
         return best_arch

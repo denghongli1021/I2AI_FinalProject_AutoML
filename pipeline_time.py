@@ -59,6 +59,9 @@ from pipeline import TimeBudget
 optuna.logging.set_verbosity(optuna.logging.WARNING)
 warnings.filterwarnings("ignore")
 
+torch.backends.cudnn.benchmark = False
+torch.backends.cudnn.deterministic = True
+
 
 # ── 常數 ─────────────────────────────────────────────────────────────────────
 
@@ -1103,6 +1106,11 @@ def run_regression(
         print(f"  [Scout] 排名: " + "  ".join(f"{n}={s:.4f}" for n, s in ranked))
         print(f"  [Scout] 保留 {len(selected)}/{len(ranked)}: {selected}  (淘汰: {dropped})")
 
+        # Ridge 保底：確保線性基準模型始終參與 Ensemble
+        if "ridge" not in selected and any(n == "ridge" for n, _ in ranked):
+            selected.append("ridge")
+            print("  [Scout] Ridge 強制加入（保底基準模型）")
+
         if not selected:
             print("  [Scout] 無模型通過篩選，退化使用全部模型")
             selected = [n for n, _ in ranked if not math.isnan(_)]
@@ -1135,13 +1143,32 @@ def run_regression(
 
     # ── [3-6] DL ─────────────────────────────────────────────────────────────
     if not skip_dl:
-        # [4] TSNet 訓練 HPO（架構固定為 _DEFAULT_TSNET_ARCH）
+        # [3.5] TSNet NAS（回歸架構搜尋）
+        if budget.should_skip(0.25):
+            print("\n[3.5] 時間預算緊迫，TSNet NAS 跳過，使用預設架構")
+            best_tsnet_arch = _DEFAULT_TSNET_ARCH
+        else:
+            print("\n[3.5] TSNet NAS（時序回歸架構搜尋）...")
+            from src.nas import TSNASSearcher
+            _folds_nas = get_ts_folds(len(X_train), n_splits=5)
+            _tr_nas, _ = _folds_nas[0]
+            _fb_nas = FeatureBuilder(feature_set="raw", global_cfg=cfg)
+            _X_nas = _fb_nas.fit_transform(X_train[_tr_nas])
+            _ts_nas = TSNASSearcher(
+                max_blocks=4, channels=64,
+                n_supernet_epochs=max(5, cfg.get("tsnet_trials", 6) // 2),
+                n_candidates=10, n_evolution_rounds=2,
+            )
+            best_tsnet_arch = _ts_nas.search(_X_nas, y_scaled[_tr_nas], n_classes=1)
+            del _X_nas, _fb_nas, _ts_nas
+
+        # [4] TSNet 訓練 HPO（arch 改用 NAS 搜尋結果）
         if budget.should_skip(0.20):
             print("\n[4] 時間預算緊迫，跳過 TSNet HPO")
             tsnet_configs = []
         else:
-            print(f"\n[4] TSNet 訓練 HPO ({cfg['tsnet_trials']} trials, arch 固定) ...")
-            tsnet_hpo = DLRegHPO(model_name="tsnet", arch_fixed=_DEFAULT_TSNET_ARCH,
+            print(f"\n[4] TSNet 訓練 HPO ({cfg['tsnet_trials']} trials, arch 來自 NAS) ...")
+            tsnet_hpo = DLRegHPO(model_name="tsnet", arch_fixed=best_tsnet_arch,
                                  n_trials=cfg["tsnet_trials"], top_k=cfg["tsnet_top_k"],
                                  metric=metric)
             tsnet_configs = tsnet_hpo.run(X_train, y_scaled, global_cfg=cfg)

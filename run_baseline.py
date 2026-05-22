@@ -214,23 +214,35 @@ def run_new_ts_batch(args):
     print(f"{'='*65}\n")
 
 
-def _find_datasets(openml_dir: str, ts_dir: str, top_n: int, last: bool = False):
-    """回傳 (dataset_name, is_ts, path_a, path_b) 列表。
-    OpenML: path_b=None → run_batch 做 80/20 split。
+def _find_datasets(openml_dir: str, ts_dir: str, top_n: int, last: bool = False,
+                   reg_dir: str = None, reg_top_n: int = None) -> list:
+    """回傳 (dataset_name, is_ts, path_a, path_b, force_task) 列表。
+    OpenML: path_b=None, force_task=None → run_batch 做 80/20 split 並自動偵測任務。
     TS (ucr_ts_80_new): path_a=TRAIN CSV, path_b=TEST CSV → 直接使用預切資料。
+    Reg (openml_regression_data): path_b=None, force_task="regression"。
     """
     openml_all = sorted(f for f in os.listdir(openml_dir) if f.endswith(".csv"))
     ts_trains = sorted(f for f in os.listdir(ts_dir) if f.endswith("_TRAIN.csv"))
     openml_files = openml_all[-top_n:] if last else openml_all[:top_n]
-    ts_selected = ts_trains[-top_n:] if last else ts_trains[:top_n]
+    # 分開取 CLS 和 REG，確保各取 top_n 個（不因混排而漏掉 REG）
+    cls_trains = [f for f in ts_trains if f.startswith("CLS_")]
+    reg_trains = [f for f in ts_trains if f.startswith("REG_")]
+    ts_selected = (cls_trains[-top_n:] if last else cls_trains[:top_n]) + \
+                  (reg_trains[-top_n:] if last else reg_trains[:top_n])
     result = []
     for f in openml_files:
-        result.append((os.path.splitext(f)[0], False, os.path.join(openml_dir, f), None))
+        result.append((os.path.splitext(f)[0], False, os.path.join(openml_dir, f), None, None))
     for f in ts_selected:
         base = f[:-10]  # strip "_TRAIN.csv"
         result.append((base, True,
                        os.path.join(ts_dir, f),
-                       os.path.join(ts_dir, base + "_TEST.csv")))
+                       os.path.join(ts_dir, base + "_TEST.csv"), None))
+    if reg_dir and os.path.isdir(reg_dir):
+        n = reg_top_n if reg_top_n else top_n
+        reg_all = sorted(f for f in os.listdir(reg_dir) if f.endswith(".csv"))
+        reg_files = reg_all[-n:] if last else reg_all[:n]
+        for f in reg_files:
+            result.append((os.path.splitext(f)[0], False, os.path.join(reg_dir, f), None, "regression"))
     return result
 
 
@@ -247,15 +259,17 @@ def run_batch(args):
         print(f"[錯誤] 找不到 UCR 目錄：{ts_dir}")
         sys.exit(1)
 
-    datasets = _find_datasets(openml_dir, ts_dir, args.top_n, last=args.last)
+    reg_dir  = os.path.join(HERE, args.reg_dir)
+    datasets = _find_datasets(openml_dir, ts_dir, args.top_n, last=args.last,
+                               reg_dir=reg_dir, reg_top_n=args.reg_top_n)
     print(f"\n{'='*65}")
     print(f"  AutoGluon 批次基準  ─  {len(datasets)} 個資料集  "
-          f"（OpenML×{args.top_n} + UCR×{args.top_n}）")
+          f"（OpenML×{args.top_n} + UCR×{args.top_n} + Reg×{args.reg_top_n}）")
     print(f"{'='*65}")
 
     results = []
 
-    for dataset_name, is_ts, path_a, path_b in datasets:
+    for dataset_name, is_ts, path_a, path_b, force_task in datasets:
         dtype_label = "TS" if is_ts else "Tab"
         print(f"\n[{dtype_label}] {dataset_name}")
 
@@ -292,7 +306,7 @@ def run_batch(args):
                     print(f"  [info] dropped {n_before - len(df)} rows with NaN target")
                 y = df[target_col]
                 X = df.drop(columns=[target_col]).dropna(axis=1, how="all")
-                task = auto_detect_task(y)
+                task = force_task if force_task else auto_detect_task(y)
                 ag_task = (("multiclass" if y.nunique() > 2 else "binary")
                            if task == "classification" else task)
                 stratify = y if task == "classification" else None
@@ -331,6 +345,7 @@ def run_batch(args):
             elapsed = round(time.time() - t0, 1)
 
             row = {
+                "source":   "baseline",
                 "dataset":  dataset_name,
                 "type":     dtype_label,
                 "task":     task,
@@ -375,7 +390,7 @@ def run_batch(args):
     summary = pd.DataFrame(results)
     print(summary.to_string(index=False))
 
-    out_path = os.path.join(HERE, "baseline_batch_results.csv")
+    out_path = args.result_file if args.result_file else os.path.join(HERE, "baseline_batch_results.csv")
     summary.to_csv(out_path, index=False)
     print(f"\n  結果已儲存 → {out_path}")
     print(f"{'='*65}\n")
@@ -468,6 +483,26 @@ def run_presplit(args):
     print(leaderboard[["model", "score_test", "score_val", "fit_time"]].to_string(index=False))
     print(f"\n{'='*60}\n")
 
+    if args.result_file:
+        metrics = get_metrics(task, y_te.values, y_pred)
+        is_ts = base.endswith("_TRAIN")
+        row = {
+            "source":   "baseline",
+            "dataset":  dataset_name,
+            "type":     "TS" if is_ts else "Tab",
+            "task":     task,
+            "n_train":  len(y_tr),
+            "n_test":   len(y_te),
+            "accuracy": metrics.get("accuracy"),
+            "f1_macro": metrics.get("f1_macro"),
+            "rmse":     metrics.get("rmse"),
+            "r2":       metrics.get("r2"),
+            "score":    metrics.get("f1_macro", metrics.get("r2")),
+            "elapsed_s": round(ag_elapsed, 1),
+        }
+        _append_time_result(args.result_file, row)
+        print(f"  結果已附加 → {args.result_file}")
+
 
 # ── 主程式 ───────────────────────────────────────────────────────────────────
 
@@ -489,6 +524,8 @@ def main():
     parser.add_argument("--test-size",   type=float, default=0.2)
     parser.add_argument("--seed",        type=int,   default=42)
     parser.add_argument("--output-dir",  default="autogluon_models", help="AutoGluon 模型儲存目錄（單一模式）")
+    parser.add_argument("--result-file", default=None,
+                        help="結果輸出 CSV（附加模式；格式同 pipeline_batch_results.csv）")
 
     # ── 批次模式 ──────────────────────────────────────────────────────────────
     parser.add_argument("--batch",      action="store_true",
@@ -503,6 +540,10 @@ def main():
                         help="取每目錄最後 top-n 個資料集")
     parser.add_argument("--new-ts-batch", action="store_true",
                         help="新TS批次：讀 ucr_ts_80_new，各取3個CLS+REG，寫 time_results.csv")
+    parser.add_argument("--reg-dir",     default="openml_regression_data",
+                        help="非時序回歸 CSV 目錄（批次模式用，預設 openml_regression_data）")
+    parser.add_argument("--reg-top-n",   type=int, default=5,
+                        help="回歸目錄取前 N 個資料集（批次模式用）")
 
     args = parser.parse_args()
 
@@ -608,6 +649,26 @@ def main():
     print(leaderboard[["model", "score_test", "score_val", "fit_time"]].to_string(index=False))
 
     print(f"\n{'='*60}\n")
+
+    if args.result_file:
+        metrics = get_metrics(task, y_test.values, y_pred_ag)
+        ds_name = os.path.splitext(os.path.basename(csv_path))[0]
+        row = {
+            "source":   "baseline",
+            "dataset":  ds_name,
+            "type":     "Tab",
+            "task":     task,
+            "n_train":  len(X_train),
+            "n_test":   len(X_test),
+            "accuracy": metrics.get("accuracy"),
+            "f1_macro": metrics.get("f1_macro"),
+            "rmse":     metrics.get("rmse"),
+            "r2":       metrics.get("r2"),
+            "score":    metrics.get("f1_macro", metrics.get("r2")),
+            "elapsed_s": round(ag_elapsed, 1),
+        }
+        _append_time_result(args.result_file, row)
+        print(f"  結果已附加 → {args.result_file}")
 
 
 if __name__ == "__main__":

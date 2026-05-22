@@ -351,11 +351,14 @@ def run_new_ts_batch_pipeline(args):
         print(f"[錯誤] 找不到目錄：{new_ts_dir}"); sys.exit(1)
 
     train_files = sorted(f for f in os.listdir(new_ts_dir) if f.endswith("_TRAIN.csv"))
-    cls_bases = [f[:-10] for f in train_files if f.startswith("CLS_")][:3]
-    reg_bases = [f[:-10] for f in train_files if f.startswith("REG_")][:3]
+    cls_top = getattr(args, "cls_top_n", 3)
+    reg_top = getattr(args, "reg_top_n", 3)
+    cls_bases = [f[:-10] for f in train_files if f.startswith("CLS_")][:cls_top]
+    reg_bases = [f[:-10] for f in train_files if f.startswith("REG_")][:reg_top]
     selected = cls_bases + reg_bases
 
-    out_path = os.path.join(HERE, "time_results.csv")
+    result_file = getattr(args, "result_file", None)
+    out_path = os.path.join(HERE, result_file) if result_file else os.path.join(HERE, "time_results.csv")
 
     print(f"\n{'='*65}")
     print(f"  Pipeline-Time 新TS批次  ─  {len(selected)} 個資料集  (source=pipeline)")
@@ -383,6 +386,15 @@ def run_new_ts_batch_pipeline(args):
                 "rmse": None, "r2": None, "score": None,
                 "elapsed_s": round(time.time() - t_ds, 1),
             }
+        finally:
+            import gc as _gc
+            _gc.collect()
+            try:
+                import torch as _torch
+                if _torch.cuda.is_available():
+                    _torch.cuda.empty_cache()
+            except Exception:
+                pass
         _append_time_result(out_path, row)
 
     print(f"\n  結果已儲存 → {out_path}")
@@ -447,6 +459,15 @@ def run_batch(args):
                 "rmse": None, "r2": None, "score": None,
                 "elapsed_s": round(time.time() - t_ds, 1),
             })
+        finally:
+            import gc as _gc
+            _gc.collect()
+            try:
+                import torch as _torch
+                if _torch.cuda.is_available():
+                    _torch.cuda.empty_cache()
+            except Exception:
+                pass
         _flush()
 
     print(f"\n{'='*65}")
@@ -552,7 +573,13 @@ def main():
     parser.add_argument("--out", default="pipeline_time_batch_results.csv",
                         help="批次模式輸出 CSV")
     parser.add_argument("--new-ts-batch", action="store_true",
-                        help="新TS批次：讀 ucr_ts_80_new，各取3個CLS+REG，寫 time_results.csv")
+                        help="新TS批次：讀 ucr_ts_80_new，各取N個CLS+REG，寫 time_results.csv")
+    parser.add_argument("--cls-top-n",   type=int, default=3,
+                        help="--new-ts-batch 模式：取前 N 個 CLS 資料集（預設 3）")
+    parser.add_argument("--reg-top-n",   type=int, default=3,
+                        help="--new-ts-batch 模式：取前 N 個 REG 資料集（預設 3）")
+    parser.add_argument("--result-file", default=None,
+                        help="附加結果 CSV（含 source 欄，附加模式）")
 
     parser.add_argument("--csv",    default=None, help="單一 CSV 路徑（或 _TRAIN.csv 自動找 _TEST.csv）")
     parser.add_argument("--train",  default=None, help="訓練集 CSV 路徑（搭配 --test 使用預切分模式）")
