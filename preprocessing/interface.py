@@ -342,7 +342,8 @@ def preprocess_for_inference(
     X_clean_array = fitted_preprocessor.transform(X_aligned)
     
     feature_names = fitted_preprocessor.get_feature_names_out()
-    X_test_clean = _array_to_dataframe(X_clean_array, feature_names)
+    clean_feature_names = [name.split('__')[-1] for name in feature_names]
+    X_test_clean = _array_to_dataframe(X_clean_array, clean_feature_names)
     
     print("[推論模組] 測試資料轉換完成，準備預測！")
     return X_test_clean
