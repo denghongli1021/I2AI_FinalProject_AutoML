@@ -1,0 +1,9 @@
+source,dataset,type,task,n_train,n_test,accuracy,f1_macro,rmse,r2,score,elapsed_s
+baseline,1049_pc4,Tab,classification,1166,292,0.9041,0.6696,,,0.6696,20.9
+baseline,CLS_ACSF1,TS,classification,100,100,0.77,0.7667,,,0.7667,42.6
+baseline,REG_AcousticContaminationMadrid_nmv,TS,regression,166,72,,,5.329,0.3022,0.3022,14.7
+baseline,1067_kc1,Tab,regression,1687,422,,,0.3249,0.1998,0.1998,6.4
+pipeline,1049_pc4,Tab,classification,1166,292,0.9041,0.7928,,,0.7928,254.1
+pipeline,1067_kc1,Tab,regression,1687,422,,,0.3366,0.1411,0.3366,409.3
+pipeline,CLS_ACSF1,TS,classification,100,100,0.78,0.7759,,,0.7759,1481.8
+pipeline,REG_AcousticContaminationMadrid_nmv,TS,regression,166,72,,,3.7258,0.6589,3.7258,1764.6
