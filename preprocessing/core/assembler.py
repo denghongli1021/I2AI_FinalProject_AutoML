@@ -181,9 +181,11 @@ class PipelineAssembler:
         self.add_missing_indicators = add_missing_indicators  # 新增：缺失指示器開關（功能 1）
         self._transformers: list = []
 
-    def build(self) -> ColumnTransformer:
+    def build(self, track = 'tree') -> ColumnTransformer:
         """
         組裝並回傳 ColumnTransformer。
+
+        param track: "tree" (生肉：不補值、不縮放) 或 "dl" (熟肉：中位數補值、標準化)
 
         Returns
         -------
@@ -197,17 +199,37 @@ class PipelineAssembler:
         """
         transformers = []
 
-        # ── 1. 數值特徵 ───────────────────────────────────────────
+        # ── 1. 數值特徵 (雙軌制分流核心) ──────────────────────────────────
         numeric_cols = self.feature_groups.get("numeric", [])
         if numeric_cols:
-            if self.add_missing_indicators:
-                # 新增（功能 1）：含缺失指示器的管線（MICE 或 median 填補 + was_missing 欄）
-                num_pipe = _build_numeric_pipeline_with_indicators(use_mice=self.use_mice)
+            if track == "tree":
+                # 🌳 軌道 A：樹狀模型 (XGBoost/LightGBM)
+                # 強制關閉補值與縮放，保留 NaN 與數值大小
+                num_pipe = build_numeric_pipeline(
+                    impute_strategy="none", 
+                    scaler_type="none", 
+                    handle_outliers=False
+                )
+                print(f"  [Assembler] 數值管線 (Tree生肉) ← {len(numeric_cols):2d} 欄: {numeric_cols[:5]}...")
+                
+            elif track == "dl":
+                # 🧠 軌道 B：深度學習/線性模型 (NAS/MLP/SVM)
+                if self.add_missing_indicators:
+                    # 缺失指示器
+                    num_pipe = _build_numeric_pipeline_with_indicators(use_mice=self.use_mice)
+                else:
+                    # 使用標準的補值與縮放
+                    num_pipe = build_numeric_pipeline(
+                        impute_strategy="median", 
+                        scaler_type="standard", 
+                        handle_outliers=True
+                    )
+                print(f"  [Assembler] 數值管線 (DL 熟肉)  ← {len(numeric_cols):2d} 欄: {numeric_cols[:5]}...")
             else:
-                # 維持原本行為（不改動現有邏輯）
-                num_pipe = build_numeric_pipeline()
+                raise ValueError(f"未知的軌道類型: {track}")
+
             transformers.append(("num_pipeline", num_pipe, numeric_cols))
-            print(f"  [Assembler] 數值管線       ← {len(numeric_cols):2d} 欄: {numeric_cols[:5]}...")
+
 
         # ── 2. 低基數類別特徵（OHE）─────────────────────────────────
         categorical_cols = self.feature_groups.get("categorical", [])

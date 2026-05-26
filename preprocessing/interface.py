@@ -245,38 +245,57 @@ def preprocess_for_training(
     import gc; gc.collect()
 
     # 4. 啟動組裝廠 (Assembler)
-    print("[預處理模組] 正在組裝處理管線...")
+    print("[預處理模組] 啟動雙軌制管線 (Dual-Track Pipeline) 組裝...")
     assembler = PipelineAssembler(feature_groups)
 
     # 判斷任務類型
     is_classification = (y_train.nunique() <= 50)
 
-    # 封裝終極大腦：加入 Phase 2 特徵選擇
-    fitted_preprocessor = Pipeline([
+    # ==========================================
+    # 🌳 第一軌：樹狀模型專用 (Tree Track - 生肉)
+    # 不補值、不縮放，保留 800 個特徵給 XGBoost 自己挖寶
+    # ==========================================
+    tree_preprocessor = Pipeline([
         ('phase0', RobustDataCleaner()),
-        ('phase1', assembler.build()),
-        # 🚀 啟動特徵選擇：強制將特徵壓縮到最多 300 個，防止後續 NAS OOM
+        ('phase1', assembler.build(track="tree")), 
         ('phase2_mi_selector', MIFeatureSelector(top_k=800, is_classification=is_classification))
     ])
 
-    # 5. 正式擬合 (Fit) 與轉換 (Transform) 訓練集
-    print("[預處理模組] 正在擬合訓練集資料 (Phase 0 -> Phase 1 一氣呵成)...")
-    X_train_clean_array = fitted_preprocessor.fit_transform(X_train_raw, y_train)
+    # ==========================================
+    # 🧠 第二軌：深度學習/線性模型專用 (DL Track - 熟肉)
+    # 精緻補值、標準化，嚴格壓在 300 個特徵防 NAS 當機
+    # ==========================================
+    dl_preprocessor = Pipeline([
+        ('phase0', RobustDataCleaner()),
+        ('phase1', assembler.build(track="dl")),
+        ('phase2_mi_selector', MIFeatureSelector(top_k=300, is_classification=is_classification))
+    ])
 
-    feature_names = fitted_preprocessor.get_feature_names_out()
-    # 🚀 在訓練階段也把前綴砍掉，保持特徵乾淨
-    clean_feature_names = [name.split('__')[-1] for name in feature_names]
-    
-    X_train_clean = _array_to_dataframe(X_train_clean_array, clean_feature_names)
+    # 5. 正式擬合 (Fit) 與轉換 (Transform) 訓練集
+    print("[預處理模組] 正在處理 Tree 軌道資料 (Phase 0 -> Phase 2)...")
+    X_train_tree_array = tree_preprocessor.fit_transform(X_train_raw, y_train)
+    # 清理 Tree 軌道的特徵名稱
+    tree_feat_names = [name.split('__')[-1] for name in tree_preprocessor.get_feature_names_out()]
+    X_train_tree = _array_to_dataframe(X_train_tree_array, tree_feat_names)
+
+    print("[預處理模組] 正在處理 DL 軌道資料 (Phase 0 -> Phase 2)...")
+    X_train_dl_array = dl_preprocessor.fit_transform(X_train_raw, y_train)
+    # 清理 DL 軌道的特徵名稱
+    dl_feat_names = [name.split('__')[-1] for name in dl_preprocessor.get_feature_names_out()]
+    X_train_dl = _array_to_dataframe(X_train_dl_array, dl_feat_names)
 
     # 6. 僅轉換 (Transform) 測試集
     print("[預處理模組] 正在轉換測試集資料...")
-    X_test_clean_array = fitted_preprocessor.transform(X_test_raw)
-    # 這裡也要用乾淨的名稱
-    X_test_clean = _array_to_dataframe(X_test_clean_array, clean_feature_names)
+    X_test_tree = _array_to_dataframe(tree_preprocessor.transform(X_test_raw), tree_feat_names)
+    X_test_dl = _array_to_dataframe(dl_preprocessor.transform(X_test_raw), dl_feat_names)
 
-    print("[預處理模組] 處理完成！")
-    return X_train_clean, X_test_clean, y_train, y_test, fitted_preprocessor
+    # 7. 打包雙軌資料
+    X_train_dict = {"tree": X_train_tree, "dl": X_train_dl}
+    X_test_dict = {"tree": X_test_tree, "dl": X_test_dl}
+    preprocessors = {"tree": tree_preprocessor, "dl": dl_preprocessor}
+
+    print("[預處理模組] 雙軌處理完成！🚀")
+    return X_train_dict, X_test_dict, y_train, y_test, preprocessors
 
 def preprocess_for_inference(
     data_source: Union[pd.DataFrame, str, List[str]],

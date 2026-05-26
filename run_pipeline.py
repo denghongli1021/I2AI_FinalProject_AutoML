@@ -137,8 +137,8 @@ def run_batch(args):
             target_col = _find_target_col(df)
             
             # 🚀 啟動 AutoML 2.0 預處理引擎接管資料
-            print("  [AutoML 2.0] 啟動預處理引擎...")
-            X_tr_df, X_te_df, y_tr_raw, y_te_raw, fitted_preprocessor = preprocess_for_training(
+            print("  [AutoML 2.0] 啟動雙軌預處理引擎...")
+            X_tr_dict, X_te_dict, y_tr_raw, y_te_raw, fitted_preprocessors = preprocess_for_training(
                 data_source=df,
                 target_col=target_col,
                 test_size=0.2
@@ -146,14 +146,25 @@ def run_batch(args):
             
             task = force_task if force_task else _auto_detect_task(y_tr_raw)
             
-            # 轉換為 float32 以節省記憶體
-            X_tr = X_tr_df.values.astype(np.float32)
-            X_te = X_te_df.values.astype(np.float32)
+            # ==========================================
+            # 🚀 雙軌制資料轉換 (float32 節省記憶體)
+            # ==========================================
+            X_tr_tree = X_tr_dict["tree"].values.astype(np.float32)
+            X_te_tree = X_te_dict["tree"].values.astype(np.float32)
+            X_tr_dl = X_tr_dict["dl"].values.astype(np.float32)
+            X_te_dl = X_te_dict["dl"].values.astype(np.float32)
 
-            # 💾 儲存大腦
+            # 應該把字典傳進去： 
+            #X_tr = {"tree": X_tr_tree, "dl": X_tr_dl}
+            X_tr = X_tr_tree
+            X_te = X_te_tree
+            # (等確認分數彈回來後，再跟模型組說把 _pl.run 改成接收雙軌字典)
+            # ==========================================
+
+            # 💾 儲存大腦 (注意變數名稱加了 s，因為現在是雙軌字典)
             art_dir = os.path.join(ARTIFACTS_DIR, "batch", dataset_name)
             os.makedirs(art_dir, exist_ok=True)
-            joblib.dump(fitted_preprocessor, os.path.join(art_dir, "fitted_preprocessor.pkl"))
+            joblib.dump(fitted_preprocessors, os.path.join(art_dir, "fitted_preprocessors.pkl"))
 
             if task == "classification":
                 le = LabelEncoder()
