@@ -256,7 +256,7 @@ def preprocess_for_training(
         ('phase0', RobustDataCleaner()),
         ('phase1', assembler.build()),
         # 🚀 啟動特徵選擇：強制將特徵壓縮到最多 300 個，防止後續 NAS OOM
-        ('phase2_mi_selector', MIFeatureSelector(top_k=300, is_classification=is_classification))
+        ('phase2_mi_selector', MIFeatureSelector(top_k=800, is_classification=is_classification))
     ])
 
     # 5. 正式擬合 (Fit) 與轉換 (Transform) 訓練集
