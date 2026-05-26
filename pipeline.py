@@ -157,9 +157,9 @@ class PipelineResult:
 # ── 主引擎 ────────────────────────────────────────────────────────────────────
 
 def run(
-    X_train: np.ndarray,
+    X_train,  # 🚀 這裡的型別現在可以是 np.ndarray 也可以是 dict
     y_train: np.ndarray,
-    X_test:  np.ndarray,
+    X_test,   # 🚀 同上
     n_classes: int,
     cfg: dict,
     budget: TimeBudget,
@@ -172,27 +172,7 @@ def run(
     presets_path:  str = _DEFAULT_PRESETS,
     metric:        str = "f1",
 ) -> PipelineResult:
-    """
-    完整 Pipeline 引擎：HPO → NAS → CV → Ensemble。
-
-    Parameters
-    ----------
-    X_train, y_train : 訓練特徵與標籤（numpy，y 為整數編碼）
-    X_test           : 測試特徵（無標籤）
-    n_classes        : 類別數
-    cfg              : 超參數設定（由 get_cfg() 產生）
-    budget           : TimeBudget 時間預算管理器
-    skip_tabular     : 跳過傳統模型 HPO
-    skip_dl          : 跳過所有深度學習模型
-    no_nas           : 跳過 NAS，MLP 使用預設架構
-    is_ts            : 時序模式（TCN/PatchTST 取代 CNN/Transformer）
-    artifacts_dir    : OOF/Test 預測快取目錄
-    presets_path     : 黃金預設值 JSON 路徑
-
-    Returns
-    -------
-    PipelineResult
-    """
+    
     os.makedirs(artifacts_dir, exist_ok=True)
     all_oof:        list = []
     all_test:       list = []
@@ -200,9 +180,24 @@ def run(
     tabular_configs:list = []
     dl_configs:     list = []
 
+    # =========================================================================
+    # 🚀 核心升級：雙軌制資料解包 (Dual-Track Unpacking)
+    # =========================================================================
+    if isinstance(X_train, dict):
+        print("\n[大腦中樞] 偵測到雙軌制字典，啟動自動分流模式 (Tree / DL)...")
+        X_train_tree = X_train["tree"]
+        X_train_dl   = X_train["dl"]
+        X_test_tree  = X_test["tree"]
+        X_test_dl    = X_test["dl"]
+    else:
+        # 向後相容：如果傳入的是單一 Numpy Array，就讓兩軌共用同一份資料
+        X_train_tree = X_train_dl = X_train
+        X_test_tree  = X_test_dl  = X_test
+    # =========================================================================
+
     # ── [2] Tabular HPO ───────────────────────────────────────────────────────
     if not skip_tabular:
-        # Phase 1: Scout — 單次 holdout，快速淘汰弱模型
+        # Phase 1: Scout
         print(f"\n[2a] Tabular Scout ({cfg['scout_trials']} trials/model, 3-Fold CV) ...")
         print(f"  [Budget] {budget.status_str()}")
         scout_hpo = TabularHPO(
@@ -211,8 +206,10 @@ def run(
             top_k=1,
             metric=metric,
         )
+        
+        # 💡 提示：在 HPO 階段，我們統一給 Tree 軌道的資料讓 XGBoost/LGBM 競爭
         scout_scores, scout_best_params = scout_hpo.scout(
-            X_train, y_train,
+            X_train_tree, y_train,
             scout_trials=cfg["scout_trials"],
             val_size=cfg["scout_val_size"],
             global_cfg=cfg,
@@ -221,14 +218,12 @@ def run(
         n_keep     = math.ceil(len(ranked) * cfg["scout_ratio"])
         best_score = ranked[0][1] if ranked else 0.0
         threshold  = best_score * (1.0 - cfg.get("scout_drop_tol", 0.07))
-        # 保留條件：同時滿足「前 2/3」與「不低於最佳 7%」
         selected = [n for n, s in ranked[:n_keep] if s >= threshold]
         dropped  = [n for n, _ in ranked if n not in selected]
         print("  [Scout] 排名: " + "  ".join(f"{n}={s:.4f}" for n, s in ranked))
         print(f"  [Scout] 閾值: {threshold:.4f} (best={best_score:.4f} × 93%)")
         print(f"  [Scout] 保留 {len(selected)}/{len(ranked)}: {selected}  （淘汰: {dropped}）")
 
-        # 黃金預設值保底：Scout 結束後立即注入，確保時間不足時仍有可用模型
         _presets: dict = {}
         if presets_path and os.path.exists(presets_path):
             with open(presets_path, "r") as f:
@@ -239,9 +234,6 @@ def run(
                 p  = dict(_presets[name])
                 fs = p.pop("feature_set", "raw")
                 preset_configs.append({"model_name": name, "feature_set": fs, "params": p, "score": 0.0})
-        if preset_configs:
-            print(f"  [Preset] 注入 {len(preset_configs)} 組黃金預設值："
-                  f"{[c['model_name'] for c in preset_configs]}")
 
         # Phase 2: Full HPO
         hpo_trials = budget.scale_trials(cfg["tabular_trials"])
@@ -249,7 +241,6 @@ def run(
             print("\n[2b] 時間預算緊迫，跳過 Tabular Full HPO → 僅使用黃金預設值")
             tabular_configs = []
         else:
-            # 依 scout 分數按比例分配 trials：分數高的模型獲得更多搜尋次數，總量不變
             selected_scores = [scout_scores[n] for n in selected]
             score_sum = sum(selected_scores) or 1.0
             total_budget = hpo_trials * n_keep
@@ -259,36 +250,27 @@ def run(
             }
             actual_total = sum(per_model_trials.values())
             print(f"\n[2b] Tabular Full HPO ({actual_total} trials ÷ {n_keep} models, 5-Fold CV) ...")
-            print("  [Alloc] " + "  ".join(f"{n}={t}" for n, t in per_model_trials.items()))
-
-            # 從 Scout 結果鎖定每個模型的最佳 feature_set，讓 HPO 專注在超參數空間
+            
             locked_fs = {
                 name: params["feature_set"]
                 for name, params in scout_best_params.items()
                 if name in selected and "feature_set" in params
             }
-            if locked_fs:
-                print("  [FS Lock] " + "  ".join(f"{n}={fs}" for n, fs in locked_fs.items()))
 
-            # 高維資料對 CatBoost 設定 per-model timeout，防止單模型卡住整個 pipeline
-            n_features = X_train.shape[1]
+            # 🚀 這裡要改成 X_train_tree.shape[1]
+            n_features = X_train_tree.shape[1]
             per_model_timeout = {}
             if "catboost" in selected and n_features > 300:
-                # 估算單 trial 可承受的最長時間：budget 的 25% 給 catboost，再除以 trial 數
                 cat_trials = per_model_trials.get("catboost", 15)
                 cat_timeout = max(60, min(300, int(actual_total * 3 / cat_trials)))
                 per_model_timeout["catboost"] = cat_timeout
-                print(f"  [Timeout] catboost={cat_timeout}s (n_features={n_features})")
 
             tabular_hpo = TabularHPO(
-                model_names=selected,
-                n_trials=hpo_trials,
-                top_k=cfg["tabular_top_k"],
-                per_model_trials=per_model_trials,
-                per_model_timeout=per_model_timeout,
-                metric=metric,
+                model_names=selected, n_trials=hpo_trials, top_k=cfg["tabular_top_k"],
+                per_model_trials=per_model_trials, per_model_timeout=per_model_timeout, metric=metric,
             )
-            tabular_configs = tabular_hpo.run(X_train, y_train, cfg,
+            # 🚀 HPO 使用 Tree 軌道資料
+            tabular_configs = tabular_hpo.run(X_train_tree, y_train, cfg,
                                               warm_start=scout_best_params,
                                               locked_feature_sets=locked_fs)
 
@@ -299,99 +281,54 @@ def run(
 
     # ── [3-6] DL 模型 ─────────────────────────────────────────────────────────
     if not skip_dl:
-        # [3] NAS
-        # 小型表格資料（< 2000 筆）做 NAS 容易過擬合且耗時，自動跳過
-        skip_nas = no_nas or budget.should_skip(cost_fraction=0.30) or (
-            not is_ts and len(X_train) < 2000
-        )
+        skip_nas = no_nas or budget.should_skip(cost_fraction=0.30) or (not is_ts and len(X_train_dl) < 2000)
         if not skip_nas:
-            if is_ts:
-                print(f"\n[3] TSNet NAS (epochs={cfg['nas_epochs']}, candidates={cfg['nas_candidates']}) ...")
-                print(f"  [Budget] {budget.status_str()}")
-                nas = TSNASSearcher(
-                    n_supernet_epochs=cfg["nas_epochs"],
-                    n_candidates=cfg["nas_candidates"],
-                    n_evolution_rounds=cfg["nas_rounds"],
-                    device=DEVICE,
-                )
-                mlp_arch = nas.search(X_train, y_train, n_classes)
-            else:
-                print(f"\n[3] MLP NAS (epochs={cfg['nas_epochs']}, candidates={cfg['nas_candidates']}) ...")
-                print(f"  [Budget] {budget.status_str()}")
-                nas = MLPNASSearcher(
-                    n_supernet_epochs=cfg["nas_epochs"],
-                    n_candidates=cfg["nas_candidates"],
-                    n_evolution_rounds=cfg["nas_rounds"],
-                    device=DEVICE,
-                )
-                mlp_arch = nas.search(X_train, y_train, n_classes)
+            nas_model_type = "TSNet" if is_ts else "MLP"
+            print(f"\n[3] {nas_model_type} NAS (epochs={cfg['nas_epochs']}, candidates={cfg['nas_candidates']}) ...")
+            nas = TSNASSearcher(...) if is_ts else MLPNASSearcher(
+                n_supernet_epochs=cfg["nas_epochs"], n_candidates=cfg["nas_candidates"],
+                n_evolution_rounds=cfg["nas_rounds"], device=DEVICE,
+            )
+            # 🧠 深度學習餵熟肉
+            mlp_arch = nas.search(X_train_dl, y_train, n_classes)
         else:
-            reason = "時間預算不足" if not no_nas else "no_nas=True"
-            print(f"\n[3] 跳過 NAS（{reason}），使用預設架構")
             mlp_arch = _DEFAULT_TSNET_ARCH if is_ts else _DEFAULT_MLP_ARCH
 
-        # [4] MLP / TSNet 訓練 HPO
         mlp_trials = budget.scale_trials(cfg["mlp_train_trials"])
-        if budget.should_skip(cost_fraction=0.20):
-            hpo_model_name = "TSNet" if is_ts else "MLP"
-            print(f"\n[4] 時間預算緊迫，跳過 {hpo_model_name} 訓練 HPO")
+        if not budget.should_skip(cost_fraction=0.20):
+            print(f"\n[4] MLP/TSNet 訓練 HPO ({mlp_trials} trials) ...")
+            mlp_hpo = TSNetTrainHPO(...) if is_ts else MLPTrainHPO(
+                arch_params=mlp_arch, n_trials=mlp_trials, top_k=cfg["mlp_top_k"], device=DEVICE, metric=metric,
+            )
+            # 🧠 深度學習餵熟肉
+            mlp_configs = mlp_hpo.run(X_train_dl, y_train, n_classes, cfg)
+        else:
             mlp_configs = []
-        else:
-            if is_ts:
-                print(f"\n[4] TSNet 訓練 HPO ({mlp_trials} trials) ...")
-                mlp_hpo = TSNetTrainHPO(
-                    arch_params=mlp_arch, n_trials=mlp_trials,
-                    top_k=cfg["mlp_top_k"], device=DEVICE,
-                    metric=metric,
-                )
-            else:
-                print(f"\n[4] MLP 訓練 HPO ({mlp_trials} trials) ...")
-                mlp_hpo = MLPTrainHPO(
-                    arch_params=mlp_arch, n_trials=mlp_trials,
-                    top_k=cfg["mlp_top_k"], device=DEVICE,
-                    metric=metric,
-                )
-            mlp_configs = mlp_hpo.run(X_train, y_train, n_classes, cfg)
 
-        # [5] CNN1D / TCN HPO
-        # 小型表格資料（< 2000 筆）DL 模型無法收斂且拖低 ensemble，自動跳過
-        skip_dl_small = not is_ts and len(X_train) < 2000
-        cnn_name  = "tcn" if is_ts else ("resnet1d" if cfg.get("use_resnet18") else "cnn1d")
+        skip_dl_small = not is_ts and len(X_train_dl) < 2000
         dl_trials = budget.scale_trials(cfg["dl_trials"])
-        if budget.should_skip(cost_fraction=0.20) or skip_dl_small:
-            reason = "時間預算緊迫" if budget.should_skip(0.20) else f"n_train={len(X_train)}<2000"
-            print(f"\n[5] 跳過 {cnn_name.upper()} HPO（{reason}）")
+        
+        cnn_name  = "tcn" if is_ts else ("resnet1d" if cfg.get("use_resnet18") else "cnn1d")
+        if not (budget.should_skip(cost_fraction=0.20) or skip_dl_small):
+            cnn_hpo = DLHPO(model_name=cnn_name, n_trials=dl_trials, top_k=cfg["dl_top_k"], n_classes=n_classes, device=DEVICE, metric=metric)
+            # 🧠 深度學習餵熟肉
+            cnn_configs = cnn_hpo.run(X_train_dl, y_train, cfg)
+        else:
             cnn_configs = []
-        else:
-            print(f"\n[5] {cnn_name.upper()} HPO ({dl_trials} trials) ...")
-            cnn_hpo = DLHPO(
-                model_name=cnn_name, n_trials=dl_trials,
-                top_k=cfg["dl_top_k"], n_classes=n_classes, device=DEVICE,
-                metric=metric,
-            )
-            cnn_configs = cnn_hpo.run(X_train, y_train, cfg)
 
-        # [6] Transformer / PatchTST HPO
         tf_name   = "patchtst" if is_ts else "transformer"
-        tf_trials = budget.scale_trials(cfg["dl_trials"])
-        if budget.should_skip(cost_fraction=0.20) or skip_dl_small:
-            reason = "時間預算緊迫" if budget.should_skip(0.20) else f"n_train={len(X_train)}<2000"
-            print(f"\n[6] 跳過 {tf_name.upper()} HPO（{reason}）")
-            tf_configs = []
+        if not (budget.should_skip(cost_fraction=0.20) or skip_dl_small):
+            tf_hpo = DLHPO(model_name=tf_name, n_trials=tf_trials, top_k=cfg["dl_top_k"], n_classes=n_classes, device=DEVICE, metric=metric)
+            # 🧠 深度學習餵熟肉
+            tf_configs = tf_hpo.run(X_train_dl, y_train, cfg)
         else:
-            print(f"\n[6] {tf_name.upper()} HPO ({tf_trials} trials) ...")
-            tf_hpo = DLHPO(
-                model_name=tf_name, n_trials=tf_trials,
-                top_k=cfg["dl_top_k"], n_classes=n_classes, device=DEVICE,
-                metric=metric,
-            )
-            tf_configs = tf_hpo.run(X_train, y_train, cfg)
+            tf_configs = []
 
         dl_configs = mlp_configs + cnn_configs + tf_configs
     else:
         print("\n[3-6] 跳過深度學習模型（skip_dl=True）")
 
-    # ── [7] 5-Fold CV ─────────────────────────────────────────────────────────
+    # ── [7] 5-Fold CV (核心分流器) ────────────────────────────────────────────────
     all_configs = tabular_configs + dl_configs
     if not all_configs:
         raise RuntimeError("沒有任何 model config！請確認 HPO 成功完成。")
@@ -401,13 +338,34 @@ def run(
         tag      = f"{config['model_name']}_{config['feature_set']}_c{i}".replace("/", "_")
         oof_path = os.path.join(artifacts_dir, f"{tag}_oof.npy")
         tst_path = os.path.join(artifacts_dir, f"{tag}_test.npy")
+        
+        # ==========================================
+        # 🚀 軌道分流器 (Data Router)
+        # 根據模型名稱，決定要發配「生肉」還是「熟肉」
+        # ==========================================
+        tree_models = ["lgbm", "xgb", "catboost", "rf", "extra_trees"]
+        
+        if config['model_name'] in tree_models:
+            current_X_tr = X_train_tree
+            current_X_te = X_test_tree
+            track_name = "Tree生肉"
+        else:
+            # logreg, knn, mlp, resnet1d, transformer 等全部吃熟肉
+            current_X_tr = X_train_dl
+            current_X_te = X_test_dl
+            track_name = "DL熟肉"
+            
+        print(f"  [Router] 模型 {config['model_name']} 被分配至 ─> {track_name} 軌道")
+        # ==========================================
+
         if os.path.exists(oof_path) and os.path.exists(tst_path):
             print(f"  [CV] 載入快取 {tag}")
-            oof      = np.load(oof_path)
+            oof       = np.load(oof_path)
             test_pred = np.load(tst_path)
         else:
+            # 🚀 這裡傳入路由分配好的 current_X_tr 和 current_X_te
             oof, test_pred = run_cv(
-                config, X_train, y_train, X_test, n_classes,
+                config, current_X_tr, y_train, current_X_te, n_classes,
                 device=DEVICE, tag=tag, global_cfg=cfg, metric=metric,
             )
         all_oof.append(oof)
@@ -423,8 +381,9 @@ def run(
     # ── [9] Ensemble B: Meta-Learner Stacking ─────────────────────────────────
     print("\n[9] Ensemble B — Meta-Learner Stacking (Concatenated) ...")
     stacker = MetaLearnerStacker(n_meta_trials=cfg["meta_trials"], metric=metric, n_samples=len(y_train))
-    stacker.fit(all_oof, y_train, X_orig=X_train, is_timeseries=is_ts)
-    test_stack = stacker.predict(all_test, X_orig=X_test)
+    # 🚀 Stacker 是 LightGBM 元學習器，它需要吃原始特徵做參考，所以我們餵 Tree 軌道
+    stacker.fit(all_oof, y_train, X_orig=X_train_tree, is_timeseries=is_ts)
+    test_stack = stacker.predict(all_test, X_orig=X_test_tree)
 
     return PipelineResult(
         test_blend=test_blend,

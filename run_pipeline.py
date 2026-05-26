@@ -146,19 +146,16 @@ def run_batch(args):
             
             task = force_task if force_task else _auto_detect_task(y_tr_raw)
             
-            # ==========================================
-            # 🚀 雙軌制資料轉換 (float32 節省記憶體)
-            # ==========================================
-            X_tr_tree = X_tr_dict["tree"].values.astype(np.float32)
-            X_te_tree = X_te_dict["tree"].values.astype(np.float32)
-            X_tr_dl = X_tr_dict["dl"].values.astype(np.float32)
-            X_te_dl = X_te_dict["dl"].values.astype(np.float32)
-
-            # 應該把字典傳進去： 
-            #X_tr = {"tree": X_tr_tree, "dl": X_tr_dl}
-            X_tr = X_tr_tree
-            X_te = X_te_tree
-            # (等確認分數彈回來後，再跟模型組說把 _pl.run 改成接收雙軌字典)
+            # 直接將字典裡的 DataFrame 轉換為 Numpy Array，並保持字典格式
+            X_tr = {
+                "tree": X_tr_dict["tree"].values.astype(np.float32),
+                "dl": X_tr_dict["dl"].values.astype(np.float32)
+            }
+            
+            X_te = {
+                "tree": X_te_dict["tree"].values.astype(np.float32),
+                "dl": X_te_dict["dl"].values.astype(np.float32)
+            }
             # ==========================================
 
             # 💾 儲存大腦 (注意變數名稱加了 s，因為現在是雙軌字典)
@@ -275,10 +272,10 @@ def run_single(args):
     t_ds = time.time()
 
     # 🚀 啟動 AutoML 2.0 預處理引擎 (包含 Data_loader 的多檔合併與壓縮)
-    print("  [AutoML 2.0] 呼叫 Data_loader 與預處理引擎...")
+    print("  [AutoML 2.0] 呼叫 Data_loader 與雙軌預處理引擎...")
     
-    # 這裡直接傳入 csv_paths (List[str])，你們的 interface 會自動呼叫 data_loader 處理 join
-    X_tr_df, X_te_df, y_tr_raw, y_te_raw, fitted_preprocessor = preprocess_for_training(
+    # 這裡的變數名稱改成 dict 和 fitted_preprocessors(加s) 以符合雙軌制
+    X_tr_dict, X_te_dict, y_tr_raw, y_te_raw, fitted_preprocessors = preprocess_for_training(
         data_source=csv_paths, 
         target_col=args.target,
         test_size=0.2
@@ -286,14 +283,22 @@ def run_single(args):
 
     task = _auto_detect_task(y_tr_raw)
     
-    # 轉換為 float32
-    X_tr = X_tr_df.values.astype(np.float32)
-    X_te = X_te_df.values.astype(np.float32)
+    # ==========================================
+    # 🚀 雙軌制資料轉換 (將字典中的 DataFrame 分別轉為 float32)
+    # ==========================================
+    X_tr_tree = X_tr_dict["tree"].values.astype(np.float32)
+    X_te_tree = X_te_dict["tree"].values.astype(np.float32)
+    X_tr_dl = X_tr_dict["dl"].values.astype(np.float32)
+    X_te_dl = X_te_dict["dl"].values.astype(np.float32)
+    
+    X_tr = {"tree": X_tr_tree, "dl": X_tr_dl}
+    X_te = {"tree": X_te_tree, "dl": X_te_dl}
+    # ==========================================
 
-    # 💾 儲存預處理大腦
+    # 💾 儲存預處理大腦 (注意變數名稱改為 fitted_preprocessors)
     art_dir = os.path.join(ARTIFACTS_DIR, "single", dataset_name)
     os.makedirs(art_dir, exist_ok=True)
-    joblib.dump(fitted_preprocessor, os.path.join(art_dir, "fitted_preprocessor.pkl"))
+    joblib.dump(fitted_preprocessors, os.path.join(art_dir, "fitted_preprocessors.pkl"))
 
     if task == "classification":
         le = LabelEncoder()
