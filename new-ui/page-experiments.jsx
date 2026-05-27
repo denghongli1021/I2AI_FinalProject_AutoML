@@ -3,11 +3,29 @@
 // =============================================================================
 
 // 把後端 training run 映射成 UI 用的 experiment 形狀,讓既有 component 不用大改
-function _runToExp(run, allModels) {
+function _runToExp(run, allModels, expectedDurationSec = 180) {
   const summary = run.resultsSummary || {};
   const top = summary.topModels?.[0] || summary.perSource?.[0] || null;
-  const elapsed = run.elapsedSec ?? (run.finishedAt && run.startedAt ? run.finishedAt - run.startedAt : 0);
+  const finishedElapsed = run.elapsedSec ?? (run.finishedAt && run.startedAt ? run.finishedAt - run.startedAt : 0);
   const myModels = (allModels || []).filter(m => m.trainingRunId === run.id);
+
+  // running 狀態:用 elapsed-time 算「假進度」— 雙曲線收斂到 0.95,永遠不會到 100%
+  // (這樣使用者知道還在跑而不是卡住,但也不會誤以為快好了)
+  let progress = 1;
+  let duration = _fmtElapsed(finishedElapsed);
+  if (run.status === 'running' && run.startedAt) {
+    const liveElapsed = Math.max(0, Math.floor(Date.now() / 1000 - run.startedAt));
+    // 後端 progressPct 優先,否則用 elapsed 估算
+    if (typeof run.progressPct === 'number') {
+      progress = Math.min(Math.max(run.progressPct / 100, 0.05), 0.99);
+    } else {
+      // 1 - e^(-elapsed/T):前半段陡升,接近預期時長時逐漸放緩
+      progress = Math.min(0.95, 1 - Math.exp(-liveElapsed / expectedDurationSec));
+      progress = Math.max(progress, 0.05);   // 至少 5% 讓 UI 不是空的
+    }
+    duration = _fmtElapsed(liveElapsed);
+  }
+
   return {
     id: run.id,
     name: `${run.datasetName || run.datasetId || '?'} · ${run.target}`,
@@ -17,7 +35,8 @@ function _runToExp(run, allModels) {
     status: run.status,
     startedAt: _expRelTime(run.startedAt),
     startedAtSec: run.startedAt,
-    duration: _fmtElapsed(elapsed),
+    duration,
+    currentStep: run.currentStep,           // 後端寫入的當前階段
     error: run.errorMsg,
     models: myModels.length || (run.modelIds || []).length,
     modelIds: run.modelIds || [],
@@ -31,7 +50,7 @@ function _runToExp(run, allModels) {
       value: typeof top.score === 'number' ? top.score.toFixed(3)
            : typeof top.bestScore === 'number' ? top.bestScore.toFixed(3) : '—',
     } : null,
-    progress: run.status === 'running' ? 0.5 : 1,
+    progress,
   };
 }
 
@@ -76,7 +95,32 @@ function PageExperiments({ onNavigate }) {
 
   React.useEffect(() => { loadRuns(false); }, []);
 
-  const experiments = React.useMemo(() => runs.map(r => _runToExp(r, models)), [runs, models]);
+  // 已完成 run 的平均時長 — 拿來當 elapsed-time 假進度的「預期時長」分母
+  const expectedDuration = React.useMemo(() => {
+    const completed = runs.filter(r => r.status === 'completed' && r.startedAt && r.finishedAt);
+    if (completed.length === 0) return 180;   // 預設 3 分鐘
+    const avg = completed.reduce((s, r) => s + (r.finishedAt - r.startedAt), 0) / completed.length;
+    return Math.max(30, Math.min(avg, 3600));   // 夾在 30s ~ 1h
+  }, [runs]);
+
+  // Polling:有任何 running 的 run 時,每 5 秒 force refresh + tick 一次讓進度條動
+  const [pollTick, setPollTick] = React.useState(0);
+  React.useEffect(() => {
+    const hasRunning = runs.some(r => r.status === 'running');
+    if (!hasRunning) return;
+    const id = setInterval(() => {
+      setPollTick(t => t + 1);          // 觸發 _runToExp 重算 liveElapsed
+      loadRuns(true);                    // 5 秒 force refresh 一次
+    }, 5000);
+    return () => clearInterval(id);
+  }, [runs, loadRuns]);
+
+  const experiments = React.useMemo(
+    () => runs.map(r => _runToExp(r, models, expectedDuration)),
+    // 故意把 pollTick 列入依賴 — 每 5 秒重算一次 elapsed 進度
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [runs, models, expectedDuration, pollTick],
+  );
   const counts = React.useMemo(() => ({
     all: experiments.length,
     running: experiments.filter(e => e.status === 'running').length,

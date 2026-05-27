@@ -34,8 +34,16 @@ import pandas as pd
 # ============================================================
 # Public entry
 # ============================================================
+MAX_BYTES = 50 * 1024 * 1024  # 50 MB 上限,避免大檔案直接 OOM
+
+
 def run(file_bytes: bytes, filename: str) -> tuple[pd.DataFrame, dict[str, Any]]:
-    df = pd.read_csv(io.BytesIO(file_bytes))
+    # 檔案大小檢查 (#25)
+    if len(file_bytes) > MAX_BYTES:
+        raise ValueError(f"檔案過大 ({len(file_bytes) / 1024 / 1024:.1f} MB),上限 50 MB")
+
+    # sep=None + engine='python' 讓 pandas 自動偵測分隔符 (CSV/TSV/管道符皆可) (#22)
+    df = pd.read_csv(io.BytesIO(file_bytes), sep=None, engine='python')
     analysis = _analyze_columns(df)
     response = {
         "fileName": filename,

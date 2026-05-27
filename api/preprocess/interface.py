@@ -24,6 +24,8 @@ from sklearn.model_selection import train_test_split
 # 保留原版 import 方式，依賴 core/__init__.py 的 export 設定
 from .core import AutoRouter, PipelineAssembler
 from .utils.data_health import generate_health_report
+from .processors.feature_generator import MISelector, RobustDataCleaner
+from sklearn.pipeline import Pipeline as SkPipeline
 
 
 # ──────────────────────────────────────────────────────────────────
@@ -132,6 +134,9 @@ def preprocess_for_training(
     target_col: str,
     test_size: float = 0.2,
     schema_override: Optional[Dict[str, str]] = None,
+    use_mice: bool = False,
+    use_mi_selection: bool = False,
+    mi_threshold: float = 0.01,
 ) -> Tuple[pd.DataFrame, pd.DataFrame, pd.Series, pd.Series, Any]:
     """
     [提供給 模型組] 執行端對端的預處理管線。
@@ -188,19 +193,61 @@ def preprocess_for_training(
 
     print(f"[預處理模組] 正在針對 {len(X_train_raw)} 筆訓練資料進行分析...")
 
-    # 3. 啟動分類大腦 (Router) 掃描訓練集
-    # 使用我們設定好的參數：超過 50 種算文字，平均字串長度大於 20 算 NLP 文字
+    # 3a. Phase 0 探路 (合自 feat/preprocessingv2):
+    # 對抽樣的 5,000 筆先過 RobustDataCleaner — 把字串型 datetime / 數值
+    # 從噪音中救回來,再餵給 Router,讓欄位類型判斷更準。
+    print("[預處理模組] 啟動 Phase 0 探路 (抽樣 5,000 筆,防 OOM)...")
+    sample_size = min(5000, len(X_train_raw))
+    X_train_sample = X_train_raw.sample(n=sample_size, random_state=42)
+    temp_cleaner = RobustDataCleaner()
+    X_sample_phase0 = temp_cleaner.fit_transform(X_train_sample)
+    if not isinstance(X_sample_phase0, pd.DataFrame):
+        X_sample_phase0 = pd.DataFrame(
+            X_sample_phase0,
+            columns=temp_cleaner.get_feature_names_out(),
+            index=X_train_sample.index,
+        )
+
+    # 3b. 啟動分類大腦 (Router) 掃描【清洗後的抽樣集】
+    # 使用我們設定好的參數:超過 50 種算文字,平均字串長度大於 20 算 NLP 文字
     router = AutoRouter(
         categorical_threshold=50,
         text_length_threshold=20,
         schema_override=schema_override or {},
     )
-    feature_groups = router.fit_predict(X_train_raw)
+    feature_groups = router.fit_predict(X_sample_phase0)
+
+    # 探路結束,釋放抽樣資料
+    del X_train_sample, X_sample_phase0
+    import gc; gc.collect()
 
     # 4. 啟動組裝廠 (Assembler)
     print("[預處理模組] 正在組裝處理管線...")
-    assembler = PipelineAssembler(feature_groups)
-    fitted_preprocessor = assembler.build()
+    # MICE 開關只在搭配 missing-indicator 管線時才會生效 (見 assembler.py),
+    # 所以 use_mice=True 時一併打開 add_missing_indicators
+    assembler = PipelineAssembler(
+        feature_groups,
+        use_mice=use_mice,
+        add_missing_indicators=use_mice,
+    )
+    column_transformer = assembler.build()
+
+    # 4b. 包成 Phase0 + Phase1 一體化 Pipeline (合自 feat/preprocessingv2)
+    # RobustDataCleaner 在 fit/transform 時對完整資料再清洗一次,
+    # 確保 feature_groups (來自抽樣) 對應的欄位實際存在於下游。
+    inner_pipeline = SkPipeline([
+        ("phase0_robust_cleaner", RobustDataCleaner()),
+        ("phase1_feature_engineering", column_transformer),
+    ])
+
+    # 4c. 視需要在管線尾巴加上 MI 特徵選擇
+    if use_mi_selection:
+        fitted_preprocessor = SkPipeline([
+            ("pre", inner_pipeline),
+            ("mi", MISelector(threshold=mi_threshold)),
+        ])
+    else:
+        fitted_preprocessor = inner_pipeline
 
     # 5. 正式擬合 (Fit) 與轉換 (Transform) 訓練集
     print("[預處理模組] 正在擬合訓練集資料...")

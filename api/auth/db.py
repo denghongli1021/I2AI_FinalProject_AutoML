@@ -20,6 +20,14 @@ from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker, relationship
 
 
 def _get_database_url() -> str:
+    # DB_LOCAL=1 強制走本機 SQLite,忽略 .env / 環境變數裡的 DATABASE_URL。
+    # 平常開發想離線時可以 $env:DB_LOCAL='1' 切過去,不用改檔案。
+    if os.environ.get("DB_LOCAL", "").strip().lower() in ("1", "true", "yes", "on"):
+        path = os.path.join(os.path.dirname(__file__), "..", "auth.db")
+        path = os.path.abspath(path)
+        print(f"[db] DB_LOCAL=1 → 強制使用本機 SQLite: {path}")
+        return f"sqlite:///{path}"
+
     url = os.environ.get("DATABASE_URL", "").strip()
     if not url:
         # 本機 fallback — 檔案放在 api/auth.db
@@ -111,6 +119,9 @@ class Preprocessor(Base):
     feature_names_json = Column(Text)
     preprocessor_pkl   = Column(LargeBinary)           # pickled sklearn ColumnTransformer
     train_test_pkl     = Column(LargeBinary)           # pickled tuple (X_tr_df, X_te_df, y_tr, y_te)
+    use_mice         = Column(Boolean, default=False, nullable=False)
+    use_mi_selection = Column(Boolean, default=False, nullable=False)
+    mi_threshold     = Column(Float,   default=0.01,  nullable=False)
     created_at      = Column(DateTime, default=datetime.utcnow, index=True, nullable=False)
 
 
@@ -192,6 +203,19 @@ def init_db() -> None:
                     ADD COLUMN IF NOT EXISTS current_step VARCHAR(120),
                     ADD COLUMN IF NOT EXISTS latest_log_json TEXT,
                     ADD COLUMN IF NOT EXISTS last_seen_at TIMESTAMP
+            """))
+            # preprocessor 的進階設定 (MICE / MI 特徵選擇)
+            # 注意:這裡刻意不加 NOT NULL — Postgres 對含 NOT NULL 的 ALTER 會
+            # 全表掃描檢查既有 row,在大 table (preprocessors 每筆有龐大的
+            # preprocessor_pkl / train_test_pkl blob) 容易撞到 Supabase 的
+            # statement_timeout (~8s)。改用 nullable + DEFAULT,新 row 仍會
+            # 自動填預設值 (由 SQLAlchemy 端 `default=False` 保證);舊 row
+            # 讀出來是 NULL,storage.py 用 `bool(... or False)` 處理掉了。
+            conn.execute(text("""
+                ALTER TABLE preprocessors
+                    ADD COLUMN IF NOT EXISTS use_mice BOOLEAN DEFAULT FALSE,
+                    ADD COLUMN IF NOT EXISTS use_mi_selection BOOLEAN DEFAULT FALSE,
+                    ADD COLUMN IF NOT EXISTS mi_threshold DOUBLE PRECISION DEFAULT 0.01
             """))
 
 

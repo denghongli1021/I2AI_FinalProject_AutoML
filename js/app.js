@@ -1,7 +1,9 @@
 // ===== MAIN APPLICATION LOGIC =====
 
 // ---- Global State ----
-let appMode = 'real'; // 'demo' | 'real' — 預設實作模式
+// 'demo' | 'real' — 預設實作模式。mode badge 暫時隱藏 (見 index.html),
+// 沒有 UI 入口可切到 demo,但 mode 邏輯仍保留以便日後啟用。
+let appMode = 'real';
 
 document.addEventListener('DOMContentLoaded', () => {
   initToast();
@@ -1187,23 +1189,22 @@ function setAppMode(next, opts = {}) {
   console.log(`[mode] ${prev} → ${next}`);
   updateModeUI();
 
-  // 自動導頁:進測試模式跳到 pipeline,退出時若在 pipeline 跳回 dashboard
+  // 切換模式時,若是同頁就重新渲染圖表 (demo/real 內容會切換);不強制跳頁
   const cur = document.querySelector('.page-section:not(.hidden)');
-  const curId = cur ? cur.id : null;
-  if (next === 'demo' && curId !== 'page-pipeline' && curId !== 'page-settings') {
-    navigateTo('pipeline');
-  } else if (next === 'real' && curId === 'page-pipeline') {
-    navigateTo('dashboard');
-  } else if (cur) {
-    // 同頁但模式變了 → 重新 render (demo/real 內容會切換)
+  if (cur) {
     renderPageCharts(cur.id.replace('page-', ''));
   }
 
   if (opts.showToast && typeof window.showToast === 'function') {
-    window.showToast(next === 'demo' ? '已切換到 測試模式' : '已切換到 實作模式', {
-      type: 'info',
-      msg: next === 'demo' ? '可上傳 CSV 跑完整 AutoML pipeline' : '需要先上傳資料 / 訓練模型才會有內容',
-    });
+    window.showToast(
+      next === 'demo' ? '已切換至測試模式' : '已切換至實作模式',
+      {
+        type: 'info',
+        msg: next === 'demo'
+          ? '以下數據為示範用途,可探索完整 UI 與圖表'
+          : '需要先上傳資料 / 訓練模型,所有結果都是真實的',
+      },
+    );
   }
 }
 
@@ -1225,11 +1226,10 @@ const PAGE_NAMES = {
   dashboard: '總覽儀表板',
   datasets: '數據集管理',
   preprocessing: '預處理',
-  pipeline: 'AutoML Pipeline (測試模式)',
+  pipeline: 'AutoML Pipeline',
   experiments: '實驗室',
   leaderboard: '模型排行榜',
   insights: '洞察與決策',
-  // deployments: '部署與 API',
   settings: '系統設定',
 };
 
@@ -1305,10 +1305,17 @@ function renderPageCharts(page) {
         renderWhatIfGauge(0.42);
       } else if (MLEngine.trainedModels.length > 0) {
         renderRealInsights();
+      } else if (_shapRequestedModelId) {
+        // Pipeline best model path — 沒有 sklearn 模型但有 pipeline bestModelId
+        _renderPipelineShapOnly(_shapRequestedModelId);
+      } else {
+        // 完全沒有模型 — 顯示引導空白狀態
+        _renderInsightsEmptyState();
       }
       break;
     case 'deployments':
       if (appMode === 'demo') renderApiUsage();
+      else renderRealDeployments();
       break;
     case 'pipeline':
       renderPipelinePage();
@@ -1337,11 +1344,17 @@ function updatePageModeVisibility(page) {
     } else {
       demoEl.classList.add('hidden');
       const realContent = document.getElementById(`${p}-real-content`);
+      const hasModels = MLEngine.trainedModels.length > 0 || _trainingHistory.length > 0;
       if ((p === 'leaderboard' || p === 'dashboard') && MLEngine.trainedModels.length > 0) {
         realEmptyEl.classList.add('hidden');
         demoEl.classList.remove('hidden');
       } else if (p === 'insights' && MLEngine.trainedModels.length > 0) {
         realEmptyEl.classList.add('hidden');
+        if (realContent) realContent.classList.remove('hidden');
+      } else if (p === 'deployments' && hasModels) {
+        // deployments: use the real-content div (injected by renderRealDeployments)
+        realEmptyEl.classList.add('hidden');
+        demoEl.classList.add('hidden');
         if (realContent) realContent.classList.remove('hidden');
       } else {
         realEmptyEl.classList.remove('hidden');
@@ -2038,12 +2051,15 @@ let currentProcessLogs = [];
 
 // Category definitions: order, icon, color, label
 const PROC_CATEGORIES = [
-  { action: 'fill_missing',   icon: 'M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10', label: '缺失值處理',  color: 'warning' },
-  { action: 'handle_outlier', icon: 'M13 10V3L4 14h7v7l9-11h-7z',                                                                                                                                     label: '異常值處理',  color: 'danger' },
+  { action: 'dataset_info',   icon: 'M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z',                                                                                                       label: '資料集概覽',  color: 'primary' },
+  { action: 'sentinel',       icon: 'M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z',                            label: '哨兵值偵測',  color: 'warning' },
+  { action: 'fill_missing',   icon: 'M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10',       label: '缺失值處理',  color: 'warning' },
+  { action: 'handle_outlier', icon: 'M13 10V3L4 14h7v7l9-11h-7z',                                                                                                                                       label: '異常值處理',  color: 'danger' },
   { action: 'drop_column',    icon: 'M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16',                                   label: '高缺失欄位',  color: 'danger' },
-  { action: 'encode',         icon: 'M7 20l4-16m2 16l4-16M6 9h14M4 15h14',                                                                                                                             label: '類別編碼',    color: 'primary' },
-  { action: 'decompose_date', icon: 'M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z',                                                                         label: '日期特徵工程', color: 'accent' },
-  { action: 'interaction',    icon: 'M4 6h16M4 12h16M4 18h7',                                                                                                                                           label: '交互特徵',    color: 'accent' },
+  { action: 'encode',         icon: 'M7 20l4-16m2 16l4-16M6 9h14M4 15h14',                                                                                                                               label: '類別編碼',    color: 'primary' },
+  { action: 'decompose_date', icon: 'M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z',                                                                           label: '日期特徵工程', color: 'accent' },
+  { action: 'interaction',    icon: 'M4 6h16M4 12h16M4 18h7',                                                                                                                                             label: '交互特徵',    color: 'accent' },
+  { action: 'api_warning',    icon: 'M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z',                            label: '後端警告',    color: 'warning' },
 ];
 
 function renderProcessLogItems(container, logs) {
@@ -2589,7 +2605,7 @@ function sortRealLeaderboard(key, ascending) {
     switch (key) {
       case 'name':    return m.name;
       case 'metric1': return isReg ? m.metrics.testR2   : m.metrics.f1;
-      case 'metric2': return isReg ? m.metrics.testRMSE : 0;          // 分類的 AUC 暫無
+      case 'metric2': return isReg ? m.metrics.testRMSE : (m.metrics.auc || 0);
       case 'metric3': return isReg ? m.metrics.testMAE  : m.metrics.testAccuracy;
       case 'time':    return m.trainTime;
       case 'latency': return m.inferLatency || 0;
@@ -2826,6 +2842,7 @@ function renderPreprocessingPage() {
     document.getElementById('btn-pp-audit').addEventListener('click', runPreprocessAudit);
     document.getElementById('btn-pp-run').addEventListener('click', runPreprocessTransform);
     document.getElementById('btn-pp-inference').addEventListener('click', runPreprocessInference);
+    document.getElementById('btn-export-audit-html')?.addEventListener('click', exportAuditReportHtml);
     ppListenersBound = true;
   }
 }
@@ -2877,12 +2894,15 @@ async function runPreprocessTransform() {
   if (!ds) return;
   const target = document.getElementById('pp-target-select').value;
   const testSize = parseFloat(document.getElementById('pp-test-size').value);
+  const useMice = document.getElementById('pp-opt-mice')?.checked || false;
+  const useMiSelection = document.getElementById('pp-opt-mi')?.checked || false;
   ppSetStatus(true, '執行完整預處理管線...');
   try {
-    const res = await ApiClient.preprocessTransform({ datasetId: ds.id, target, testSize });
+    const res = await ApiClient.preprocessTransform({ datasetId: ds.id, target, testSize, useMice, useMiSelection });
     renderAuditReport(res.auditReport);
     renderFeatureGroups(res.featureGroups);
     renderTransformResult(res);
+    renderAppliedSteps(res, { useMice, useMiSelection });
     renderInferenceForm(ds, target);
     ppLastPreprocessorId = res.preprocessorId;
     ppLastFeatureColumns = (ds.headers || []).filter(h => h !== target);
@@ -2911,6 +2931,14 @@ async function runPreprocessTransform() {
 }
 
 function renderAuditReport(audit) {
+  // Save for Process Log to consume
+  DataEngine.lastAuditReport = audit || null;
+  // Refresh the Process Log if it's currently visible (re-run generateProcessingLog)
+  const logContainer = document.getElementById('auto-process-log');
+  if (logContainer) {
+    const freshLogs = DataEngine.generateProcessingLog();
+    renderProcessLogItems(logContainer, freshLogs);
+  }
   if (!audit || audit.error) {
     document.getElementById('pp-stat-rows').textContent = '—';
     return;
@@ -2963,6 +2991,9 @@ function renderAuditReport(audit) {
   renderAuditOutliers(audit.outlier_summary || []);
   renderAuditTargetInfo(audit.target_info || {});
   renderAuditLeakage(audit.leakage_candidates || []);
+  // v3 新增診斷 — 標籤雜訊 / 集成離群
+  renderAuditLabelNoise(audit.label_noise_candidates || []);
+  renderAuditEnsembleOutliers(audit.ensemble_outlier_summary || []);
 
   // 切 extras-section 顯示狀態:任一張子卡可見就秀
   const extras = document.getElementById('pp-extras-section');
@@ -3075,6 +3106,115 @@ function renderAuditLeakage(candidates) {
     `;
     tbody.appendChild(tr);
   });
+}
+
+// v3:顯示「這次實際套用了哪些前處理」(進階特徵生成 + MICE + MI 選擇)
+function renderAppliedSteps(res, opts) {
+  const card = document.getElementById('pp-applied-card');
+  const body = document.getElementById('pp-applied-body');
+  if (!card || !body) return;
+  opts = opts || {};
+  const steps = res.appliedFeatureSteps || [];
+  const mi = res.miSelection || null;
+  const rows = [];
+
+  // 1. 進階特徵生成 (Grouped/Poly/NonLinear) — 自動觸發才有
+  if (steps.length > 0) {
+    steps.forEach(s => {
+      rows.push(`<div class="flex items-start gap-2 text-xs px-3 py-2 bg-accent-500/10 border-l-2 border-accent-500 rounded-r">
+        <span class="text-accent-300 font-medium whitespace-nowrap">⚙ ${escapeHtml(s.label || s.type || '')}</span>
+        <span class="text-dark-300">${escapeHtml(s.detail || '')}</span>
+      </div>`);
+    });
+  } else {
+    rows.push(`<div class="text-xs px-3 py-2 bg-dark-800/40 border-l-2 border-dark-600 rounded-r text-dark-400">
+      未觸發進階特徵生成(分組聚合 / 多項式交互 / 非線性矯正 需偵測到特定欄位名稱才會自動套用)
+    </div>`);
+  }
+
+  // 2. MICE 補值狀態
+  rows.push(opts.useMice
+    ? `<div class="text-xs px-3 py-2 rounded-r border-l-2 bg-primary-500/10 border-primary-500 text-primary-300">✓ 已啟用 MICE 補值(IterativeImputer:用其他欄位預測缺值)</div>`
+    : `<div class="text-xs px-3 py-2 rounded-r border-l-2 bg-dark-800/40 border-dark-600 text-dark-400">○ MICE 未啟用(用中位數補值)</div>`);
+
+  // 3. MI 特徵選擇結果
+  if (mi) {
+    const dropped = mi.droppedFeatures || [];
+    const droppedStr = dropped.length
+      ? dropped.slice(0, 15).map(escapeHtml).join('、') + (dropped.length > 15 ? ` …+${dropped.length - 15}` : '')
+      : '無';
+    rows.push(`<div class="text-xs px-3 py-2 rounded-r border-l-2 bg-primary-500/10 border-primary-500 text-primary-300">
+      ✓ MI 特徵選擇:保留 <b>${mi.nKept}/${mi.nIn}</b> 個特徵 (threshold=${mi.threshold})${mi.nDropped > 0 ? `,丟棄:<span class="text-dark-300 font-mono">${droppedStr}</span>` : ''}
+    </div>`);
+  } else if (opts.useMiSelection) {
+    rows.push(`<div class="text-xs px-3 py-2 rounded-r border-l-2 bg-warning-500/10 border-warning-500 text-warning-300">MI 特徵選擇已開,但沒有篩選結果</div>`);
+  } else {
+    rows.push(`<div class="text-xs px-3 py-2 rounded-r border-l-2 bg-dark-800/40 border-dark-600 text-dark-400">○ MI 特徵選擇未啟用</div>`);
+  }
+
+  body.innerHTML = rows.join('');
+  card.classList.remove('hidden');
+}
+
+// v3:標籤雜訊偵測 (CV 預測信心度過低 → 疑似標錯)
+function renderAuditLabelNoise(candidates) {
+  const card = document.getElementById('pp-labelnoise-card');
+  const tbody = document.getElementById('pp-labelnoise-table');
+  const countEl = document.getElementById('pp-labelnoise-count');
+  if (!card || !tbody) return;
+  if (!candidates || candidates.length === 0) { card.classList.add('hidden'); return; }
+  card.classList.remove('hidden');
+  if (countEl) { countEl.textContent = `${candidates.length} 筆`; countEl.classList.remove('hidden'); }
+  // 信心度最低的排前面;最多顯示 50 筆避免爆量
+  const sorted = [...candidates].sort((a, b) => (a.predicted_proba ?? 0) - (b.predicted_proba ?? 0)).slice(0, 50);
+  tbody.innerHTML = '';
+  sorted.forEach(c => {
+    const tr = document.createElement('tr');
+    tr.className = 'border-b border-dark-800/50';
+    const prob = ((c.predicted_proba ?? 0) * 100).toFixed(1);
+    tr.innerHTML = `
+      <td class="py-1.5 px-3 font-mono text-dark-300">#${c.row_index}</td>
+      <td class="py-1.5 px-3 font-mono">${escapeHtml(String(c.true_label))}</td>
+      <td class="py-1.5 px-3 text-right font-mono text-warning-400">${prob}%</td>
+    `;
+    tbody.appendChild(tr);
+  });
+  if (candidates.length > 50) {
+    const tr = document.createElement('tr');
+    tr.innerHTML = `<td colspan="3" class="py-1.5 px-3 text-center text-[11px] text-dark-500">… 還有 ${candidates.length - 50} 筆 (僅顯示信心度最低的 50 筆)</td>`;
+    tbody.appendChild(tr);
+  }
+}
+
+// v3:集成離群偵測 (IQR + IsolationForest + LOF 投票,≥2 票)
+function renderAuditEnsembleOutliers(rows) {
+  const card = document.getElementById('pp-ensemble-outliers-card');
+  const tbody = document.getElementById('pp-ensemble-outliers-table');
+  const countEl = document.getElementById('pp-ensemble-outliers-count');
+  if (!card || !tbody) return;
+  if (!rows || rows.length === 0) { card.classList.add('hidden'); return; }
+  card.classList.remove('hidden');
+  if (countEl) { countEl.textContent = `${rows.length} 筆`; countEl.classList.remove('hidden'); }
+  // 票數最高的排前面;最多 50 筆
+  const sorted = [...rows].sort((a, b) => (b.votes ?? 0) - (a.votes ?? 0)).slice(0, 50);
+  tbody.innerHTML = '';
+  sorted.forEach(r => {
+    const tr = document.createElement('tr');
+    tr.className = 'border-b border-dark-800/50';
+    const methods = (r.methods || []).map(m =>
+      `<span class="text-[10px] px-1.5 py-0.5 rounded bg-dark-700 text-dark-300 mr-1 font-mono">${escapeHtml(m)}</span>`).join('');
+    tr.innerHTML = `
+      <td class="py-1.5 px-3 font-mono text-dark-300">#${r.row_index}</td>
+      <td class="py-1.5 px-3 text-center"><span class="font-mono ${(r.votes >= 3) ? 'text-danger-400' : 'text-warning-400'}">${r.votes}</span></td>
+      <td class="py-1.5 px-3">${methods}</td>
+    `;
+    tbody.appendChild(tr);
+  });
+  if (rows.length > 50) {
+    const tr = document.createElement('tr');
+    tr.innerHTML = `<td colspan="3" class="py-1.5 px-3 text-center text-[11px] text-dark-500">… 還有 ${rows.length - 50} 筆 (僅顯示票數最高的 50 筆)</td>`;
+    tbody.appendChild(tr);
+  }
 }
 
 function renderAuditTargetInfo(target) {
@@ -3610,13 +3750,42 @@ function renderRealExperimentsPage() {
     const colName = targetSel.value;
     const col = ds.analysis.find(c => c.name === colName);
     if (!col) return;
-    const uniqueVals = new Set(ds.data.map(r => r[ds.headers.indexOf(colName)])).size;
+    const colIdx = ds.headers.indexOf(colName);
+    const vals = ds.data.map(r => r[colIdx]);
+    const uniqueVals = new Set(vals).size;
     const detectedType = uniqueVals <= 10 ? 'classification' : 'regression';
     const label = detectedType === 'classification' ? `分類 (${uniqueVals} 類)` : '回歸 (連續值)';
     document.getElementById('exp-task-label').textContent = label;
     document.getElementById('exp-target-info').textContent = col.stats
       ? `範圍: ${col.stats.min} ~ ${col.stats.max}, 平均: ${col.stats.mean}`
       : '';
+
+    // 不平衡偵測：分類任務才檢查
+    const cwRow = document.getElementById('exp-class-weight-row');
+    const imbalanceHint = document.getElementById('exp-imbalance-hint');
+    if (detectedType === 'classification' && uniqueVals >= 2 && uniqueVals <= 10) {
+      // 計算各類別頻率
+      const counts = {};
+      vals.forEach(v => { counts[v] = (counts[v] || 0) + 1; });
+      const freqs = Object.values(counts);
+      const maxF = Math.max(...freqs), minF = Math.min(...freqs);
+      const ratio = maxF / Math.max(minF, 1);
+      if (cwRow) cwRow.classList.remove('hidden');
+      if (ratio >= 5) {
+        // 嚴重不平衡：自動建議
+        if (imbalanceHint) {
+          imbalanceHint.textContent = `⚠ 偵測到類別不平衡（比例約 ${ratio.toFixed(0)}:1），建議啟用「類別平衡」選項`;
+          imbalanceHint.classList.remove('hidden');
+        }
+      } else {
+        if (imbalanceHint) imbalanceHint.classList.add('hidden');
+      }
+    } else {
+      // 回歸任務：隱藏 class_weight 選項
+      if (cwRow) cwRow.classList.add('hidden');
+      if (imbalanceHint) imbalanceHint.classList.add('hidden');
+    }
+
     // Rebuild feature checkboxes when target changes
     buildFeatureCheckboxes();
   };
@@ -3694,6 +3863,29 @@ function renderRealExperimentsPage() {
     }
   };
 
+  const ppInfoBtn = document.getElementById('exp-pp-info-btn');
+  const ppInfoPop = document.getElementById('exp-pp-info-popover');
+
+  const renderPpInfoPopover = () => {
+    if (!ppInfoPop) return;
+    const sel = ppMatches.find(p => p.id === ppSelect.value);
+    if (!sel) { ppInfoPop.innerHTML = ''; return; }
+    const stamp = sel.createdAt ? _formatPreprocessTime(sel.createdAt * 1000) : sel.id;
+    const yes = '<span class="text-emerald-400">✓ 啟用</span>';
+    const no  = '<span class="text-dark-400">✗ 未啟用</span>';
+    ppInfoPop.innerHTML = `
+      <div class="font-medium text-dark-100 mb-1.5">${escapeHtml(stamp)}</div>
+      <div class="flex justify-between gap-2"><span class="text-dark-400">ID</span><span class="font-mono text-[10px] text-dark-300 truncate">${escapeHtml(sel.id)}</span></div>
+      <div class="flex justify-between gap-2"><span class="text-dark-400">目標</span><span class="text-dark-200">${escapeHtml(sel.target || '-')}</span></div>
+      <div class="flex justify-between gap-2"><span class="text-dark-400">特徵數</span><span class="text-dark-200">${sel.featureCount}</span></div>
+      <div class="flex justify-between gap-2"><span class="text-dark-400">Train / Test</span><span class="text-dark-200">${sel.trainSize} / ${sel.testSize}</span></div>
+      <div class="border-t border-dark-600 my-1.5"></div>
+      <div class="flex justify-between gap-2"><span class="text-dark-400">MICE 補值</span>${sel.useMice ? yes : no}</div>
+      <div class="flex justify-between gap-2"><span class="text-dark-400">MI 特徵選擇</span>${sel.useMiSelection ? yes : no}</div>
+      ${sel.useMiSelection ? `<div class="flex justify-between gap-2"><span class="text-dark-400">MI 門檻</span><span class="text-dark-200">${sel.miThreshold}</span></div>` : ''}
+    `;
+  };
+
   const refreshPpSelect = async () => {
     // 直接問後端有哪些 preprocessor (不依賴前端記憶體,重整也不會掉)
     let all = [];
@@ -3718,6 +3910,8 @@ function renderRealExperimentsPage() {
       srcPp.disabled = true;
       ppSelect.disabled = true;
       if (ppHint) ppHint.textContent = '';
+      if (ppInfoBtn) ppInfoBtn.disabled = true;
+      if (ppInfoPop) ppInfoPop.classList.add('hidden');
     } else {
       srcPp.disabled = false;
       ppMatches.forEach(p => {
@@ -3730,7 +3924,9 @@ function renderRealExperimentsPage() {
         ppSelect.appendChild(opt);
       });
       ppSelect.disabled = !srcPp.checked;
+      if (ppInfoBtn) ppInfoBtn.disabled = false;
       syncTargetToPreprocessor();
+      renderPpInfoPopover();
     }
   };
   refreshPpSelect();
@@ -3738,7 +3934,28 @@ function renderRealExperimentsPage() {
     ppSelect.disabled = !srcPp.checked;
     syncTargetToPreprocessor();
   });
-  ppSelect.addEventListener('change', syncTargetToPreprocessor);
+  ppSelect.addEventListener('change', () => {
+    syncTargetToPreprocessor();
+    renderPpInfoPopover();
+    if (ppInfoPop) ppInfoPop.classList.add('hidden');
+  });
+
+  // i icon toggle popover + 點外面關閉
+  if (ppInfoBtn && ppInfoPop) {
+    ppInfoBtn.addEventListener('click', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      if (ppInfoBtn.disabled) return;
+      renderPpInfoPopover();
+      ppInfoPop.classList.toggle('hidden');
+    });
+    document.addEventListener('click', (e) => {
+      if (ppInfoPop.classList.contains('hidden')) return;
+      if (!ppInfoPop.contains(e.target) && e.target !== ppInfoBtn) {
+        ppInfoPop.classList.add('hidden');
+      }
+    });
+  }
 
   // --- 套用系統設定的預設值 (任務類型 / 資料來源勾選) ---
   const _settings = getSettings();
@@ -3870,6 +4087,7 @@ function renderRealExperimentsPage() {
       preprocessorId: preprocessorId,
       testSize: s.testSize,
       randomState: s.seed,
+      classWeightBalanced: document.getElementById('exp-class-weight-balanced')?.checked ?? false,
     };
     startRealTraining(ds, targetSel.value, options);
   });
@@ -3976,6 +4194,7 @@ async function startRealTraining(ds, targetCol, options = {}) {
   try {
     addLog('開始準備訓練資料...', 'info');
     if (options.timeSeries) addLog('時間序列模式：依時間順序切分訓練/測試集', 'info');
+    if (options.classWeightBalanced) addLog('類別平衡模式已啟用：class_weight="balanced"', 'info');
 
     let models, data;
     if (typeof ApiClient !== 'undefined' && ApiClient.enabled) {
@@ -3991,6 +4210,7 @@ async function startRealTraining(ds, targetCol, options = {}) {
           timeSeries: options.timeSeries,
           testSize: options.testSize,
           randomState: options.randomState,
+          classWeightBalanced: options.classWeightBalanced ?? false,
         },
         sources: options.sources || ['raw'],
         preprocessorId: options.preprocessorId || null,
@@ -4530,7 +4750,7 @@ function renderExperimentResults(models, data) {
   } else {
     document.getElementById('exp-metric-col1').textContent = 'Accuracy';
     document.getElementById('exp-metric-col2').textContent = 'F1-Score';
-    document.getElementById('exp-metric-col3').textContent = 'Precision';
+    document.getElementById('exp-metric-col3').textContent = 'AUC-ROC';
   }
 
   // Table body
@@ -4552,7 +4772,7 @@ function renderExperimentResults(models, data) {
     } else {
       col1 = typeof m.metrics.testAccuracy === 'number' ? (m.metrics.testAccuracy * 100).toFixed(2) + '%' : '—';
       col2 = _f(m.metrics.f1);
-      col3 = _f(m.metrics.precision);
+      col3 = _f(m.metrics.auc);
     }
 
     const score = m.metrics.testScore;
@@ -4828,10 +5048,31 @@ function _hyperparamChipsHtml(hp, maxItems = 16) {
 
 // ===== REAL LEADERBOARD =====
 function renderRealLeaderboard() {
-  const models = MLEngine.trainedModels;
+  let models = MLEngine.trainedModels;
   if (models.length === 0) return;
 
-  const isReg = models[0].taskType === 'regression';
+  // Apply filters
+  const filterSource = document.getElementById('lb-filter-source')?.value || '';
+  const filterType = document.getElementById('lb-filter-type')?.value || '';
+  if (filterSource) models = models.filter(m => m.dataSource === filterSource);
+  if (filterType) models = models.filter(m => m.taskType === filterType);
+
+  // Wire filter listeners once
+  const srcSel = document.getElementById('lb-filter-source');
+  const typeSel = document.getElementById('lb-filter-type');
+  const resetBtn = document.getElementById('lb-filter-reset');
+  if (srcSel && !srcSel.__wired) {
+    srcSel.__wired = true;
+    srcSel.addEventListener('change', renderRealLeaderboard);
+    typeSel?.addEventListener('change', renderRealLeaderboard);
+    resetBtn?.addEventListener('click', () => {
+      if (srcSel) srcSel.value = '';
+      if (typeSel) typeSel.value = '';
+      renderRealLeaderboard();
+    });
+  }
+
+  const isReg = models[0]?.taskType === 'regression' || (filterType === 'regression');
 
   // 歷史訓練 — 三層級聯 (資料集 → target → 訓練紀錄)
   const lbCascade = document.getElementById('lb-history-cascade');
@@ -4860,6 +5101,12 @@ function renderRealLeaderboard() {
   if (!tbody) return;
   tbody.innerHTML = '';
 
+  if (models.length === 0) {
+    const colspan = 11;
+    tbody.innerHTML = `<tr><td colspan="${colspan}" class="py-8 text-center text-sm text-dark-500">篩選條件下沒有符合的模型</td></tr>`;
+    return;
+  }
+
   // 找出訓練最快的模型 (給「最快」標籤用) — 只看有成功訓練的
   const trained = models.filter(m => m.trainTime > 0);
   const fastestTrainTime = trained.length ? Math.min(...trained.map(m => m.trainTime)) : null;
@@ -4883,7 +5130,7 @@ function renderRealLeaderboard() {
     } else {
       extraCols = `
         <td class="py-3 px-4 font-mono text-xs">${m.metrics.f1.toFixed(4)}</td>
-        <td class="py-3 px-4 font-mono text-xs">—</td>
+        <td class="py-3 px-4 font-mono text-xs ${m.metrics.auc > 0 ? '' : 'text-dark-500'}">${m.metrics.auc > 0 ? m.metrics.auc.toFixed(4) : '—'}</td>
         <td class="py-3 px-4 font-mono text-xs">${(m.metrics.testAccuracy * 100).toFixed(2)}%</td>`;
     }
 
@@ -4900,9 +5147,12 @@ function renderRealLeaderboard() {
       ? (m.inferLatency < 0.01 ? '<0.01ms' : m.inferLatency.toFixed(3) + 'ms')
       : '<span class="text-dark-600">—</span>';
 
-    // 操作:分析按鈕 → 跳到洞察頁,並讓 SHAP 區塊自動選這個模型
+    // 操作:分析按鈕 → 跳到洞察頁; 刪除按鈕 → 呼叫 API 刪除
     const actions = m.id
-      ? `<button class="text-xs text-primary-400 hover:text-primary-300 transition-colors" onclick="analyzeModel('${m.id}')">分析</button>`
+      ? `<span class="flex items-center gap-2">` +
+        `<button class="text-xs text-primary-400 hover:text-primary-300 transition-colors" onclick="analyzeModel('${m.id}')">分析</button>` +
+        `<button class="text-xs text-danger-400 hover:text-danger-300 transition-colors" onclick="deleteModelById('${m.id}', this)" title="刪除模型">✕</button>` +
+        `</span>`
       : '<span class="text-dark-600 text-xs">—</span>';
 
     // 資料來源 badge + 去掉名稱的 [原始]/[預處理] 文字前綴
@@ -5059,6 +5309,11 @@ function renderRealInsights() {
   const models = MLEngine.trainedModels;
   if (models.length === 0) return;
 
+  // 確保 Pipeline 模式隱藏的 ECharts 面板重新顯示
+  ['real-feature-importance-section', 'real-model-compare-section',
+   'real-pred-scatter-section', 'real-whatif-section',
+  ].forEach(id => { const el = document.getElementById(id); if (el) el.classList.remove('hidden'); });
+
   // 歷史訓練 — 三層級聯
   renderHistoryCascade(document.getElementById('insights-history-cascade'));
 
@@ -5090,6 +5345,98 @@ function renderRealInsights() {
   });
 }
 
+// ===== INSIGHTS 空白狀態 (完全沒有模型時) =====
+function _renderInsightsEmptyState() {
+  const safeSet = (id, val) => { const el = document.getElementById(id); if (el) el.textContent = val; };
+  safeSet('insight-best-model', '—');
+  safeSet('insight-best-score', '—');
+  safeSet('insight-feature-count', '—');
+  safeSet('insight-model-count', '0');
+
+  // 在 SHAP section 顯示引導提示
+  const errEl = document.getElementById('shap-error');
+  if (errEl) {
+    errEl.classList.remove('hidden');
+    errEl.textContent = '尚未訓練任何模型。請先在「實驗室」訓練 sklearn 模型，或在「Pipeline」完成訓練後點選「SHAP 分析」按鈕。';
+  }
+}
+
+// ===== PIPELINE SHAP-ONLY INSIGHTS (當無 sklearn 模型但有 pipeline bestModelId) =====
+async function _renderPipelineShapOnly(modelId) {
+  const safeSet = (id, val) => { const el = document.getElementById(id); if (el) el.textContent = val; };
+
+  // 隱藏 ECharts 面板（特徵重要性 / 模型比較 / 預測散點圖）— pipeline 無這些資料
+  // ⚠️ 不隱藏 real-whatif-section — 等下面從後端拿到特徵統計後再決定是否顯示
+  ['real-feature-importance-section', 'real-model-compare-section',
+   'real-pred-scatter-section', 'insights-history-cascade',
+  ].forEach(id => { const el = document.getElementById(id); if (el) el.classList.add('hidden'); });
+
+  // 顯示 SHAP section（有時被 demo 模式 CSS 隱藏）
+  const shapSection = document.getElementById('real-shap-section');
+  if (shapSection) shapSection.classList.remove('hidden');
+
+  // Summary cards
+  safeSet('insight-best-model', 'Pipeline 最佳模型');
+  safeSet('insight-score-label', 'OOF 分數');
+  safeSet('insight-best-score', '—');      // 後端沒有回傳到這裡，顯示 '—'
+  safeSet('insight-feature-count', '—');   // loadShapFigures 後會更新
+  safeSet('insight-model-count', '1');
+
+  // 合成 model entry（testAccuracy=0 → dropdown 只顯示名稱，不顯示 Acc）
+  const syntheticModel = {
+    id: modelId,
+    name: 'Pipeline 最佳模型',
+    featureNames: [],
+    metrics: { testAccuracy: 0, testScore: 0, testR2: 0 },
+    taskType: 'classification',
+  };
+
+  _shapRequestedModelId = modelId;
+  initShapSection([syntheticModel], syntheticModel);
+
+  // 自動觸發一次載入（requestAnimationFrame 確保 DOM 已更新）
+  requestAnimationFrame(() => loadShapFigures());
+
+  // ── What-If：從後端拿特徵統計，合成可用的 model entry ──────────
+  try {
+    const info = await ApiClient.get(`/api/model/${modelId}/info`);
+    if (info && info.featureNames && info.featureNames.length > 0) {
+      const n = info.featureNames.length;
+      // 建立 featureStats（{name, mean, std, min, max}）
+      const featureStats = info.featureNames.map((name, i) => ({
+        name,
+        mean: info.featureMeans[i] ?? 0,
+        std:  info.featureStds[i]  ?? 1,
+        min:  info.featureMin[i]   ?? (info.featureMeans[i] - 3),
+        max:  info.featureMax[i]   ?? (info.featureMeans[i] + 3),
+      }));
+      const whatIfModel = {
+        id:           modelId,
+        name:         info.modelName || 'Pipeline 最佳模型',
+        featureNames: info.featureNames,
+        featureStats,
+        means:        info.featureMeans,
+        stds:         info.featureStds,
+        taskType:     info.taskType || 'regression',
+        targetName:   info.targetName || '目標變數',
+        metrics:      { testR2: 0, testAccuracy: 0 },
+      };
+      // 更新摘要卡的特徵數
+      safeSet('insight-feature-count', n);
+      // 渲染 What-If 模擬器
+      renderRealWhatIf([whatIfModel]);
+    } else {
+      // 後端沒有特徵資訊，隱藏 What-If 區塊
+      const ws = document.getElementById('real-whatif-section');
+      if (ws) ws.classList.add('hidden');
+    }
+  } catch (e) {
+    console.warn('[What-If] Pipeline model info 載入失敗:', e);
+    const ws = document.getElementById('real-whatif-section');
+    if (ws) ws.classList.add('hidden');
+  }
+}
+
 // ===== SHAP SECTION (Plotly figures from /api/visualize/shap) =====
 let _shapInitialized = false;
 let _shapRequestedModelId = null;   // 排行榜「分析」按鈕指定要看的模型
@@ -5098,6 +5445,28 @@ let _shapRequestedModelId = null;   // 排行榜「分析」按鈕指定要看�
 function analyzeModel(modelId) {
   _shapRequestedModelId = modelId || null;
   navigateTo('insights');
+}
+
+async function deleteModelById(modelId, btnEl) {
+  if (!modelId) return;
+  if (!confirm('確定刪除此模型？此操作無法復原。')) return;
+  try {
+    if (btnEl) { btnEl.disabled = true; btnEl.textContent = '…'; }
+    if (typeof ApiClient !== 'undefined' && ApiClient.enabled) {
+      await ApiClient.modelDelete(modelId);
+    }
+    // Remove from in-memory stores
+    MLEngine.trainedModels = MLEngine.trainedModels.filter(m => m.id !== modelId);
+    _trainingHistory.forEach(h => {
+      if (h.models) h.models = h.models.filter(m => m.id !== modelId);
+    });
+    showToast('模型已刪除', { type: 'success' });
+    renderRealLeaderboard();
+    updateDashboardRealMetrics();
+  } catch (e) {
+    showToast('刪除失敗', { type: 'error', msg: e.message });
+    if (btnEl) { btnEl.disabled = false; btnEl.textContent = '✕'; }
+  }
 }
 
 // 依選定模型重填「交互特徵」下拉 (raw / 預處理 的特徵名不同)
@@ -5123,10 +5492,12 @@ function initShapSection(models, best) {
     if (!m.id) return;  // 訓練失敗的模型沒 id
     const opt = document.createElement('option');
     opt.value = m.id;
-    const scoreStr = m.taskType === 'regression'
-      ? 'R²=' + m.metrics.testR2.toFixed(3)
-      : 'Acc=' + (m.metrics.testAccuracy * 100).toFixed(1) + '%';
-    opt.textContent = `${m.name} (${scoreStr})`;
+    // Pipeline 合成 model (testAccuracy=0) 只顯示名稱，不附分數
+    const hasScore = m.metrics && (m.metrics.testAccuracy > 0 || m.metrics.testR2 > 0);
+    const scoreStr = !hasScore ? '' : m.taskType === 'regression'
+      ? ' (R²=' + m.metrics.testR2.toFixed(3) + ')'
+      : ' (Acc=' + (m.metrics.testAccuracy * 100).toFixed(1) + '%)';
+    opt.textContent = m.name + scoreStr;
     modelSel.appendChild(opt);
   });
 
@@ -5197,9 +5568,22 @@ async function loadShapFigures() {
       modelId, sampleIndex, targetFeature, maxSamples: getSettings().shapSamples,
     });
     const cfg = { responsive: true, displaylogo: false };
-    Plotly.newPlot('shap-fig-global', res.global.data, res.global.layout, cfg);
-    Plotly.newPlot('shap-fig-waterfall', res.waterfall.data, res.waterfall.layout, cfg);
+    Plotly.newPlot('shap-fig-global',     res.global.data,     res.global.layout,     cfg);
+    Plotly.newPlot('shap-fig-waterfall',  res.waterfall.data,  res.waterfall.layout,  cfg);
     Plotly.newPlot('shap-fig-dependence', res.dependence.data, res.dependence.layout, cfg);
+
+    // ── Pipeline 模式補丁：後端回傳 featureNames 後，補填「交互特徵」下拉 ──
+    const featSel = document.getElementById('shap-target-feature');
+    if (featSel && featSel.options.length === 0 && res.featureNames && res.featureNames.length) {
+      res.featureNames.forEach(fn => {
+        const o = document.createElement('option');
+        o.value = fn; o.textContent = fn;
+        featSel.appendChild(o);
+      });
+      // 更新 insight-feature-count card（pipeline 模式下原本顯示 '—'）
+      const fcEl = document.getElementById('insight-feature-count');
+      if (fcEl && fcEl.textContent === '—') fcEl.textContent = res.featureNames.length;
+    }
   } catch (e) {
     errEl.classList.remove('hidden');
     // 訊息明顯一點 — 通常是後端 model 找不到 (重啟過 / 歷史紀錄但 model 沒持久化)
@@ -5224,7 +5608,8 @@ function renderRealWhatIf(models) {
   // - JS 模式: 需要 m.predict (callable function)
   // - API 模式: 需要 m.id (用來呼叫 /api/predict)
   const usable = models.filter(m =>
-    m.featureStats && m.means && m.stds && (typeof m.predict === 'function' || m.id)
+    m.featureStats?.length > 0 && m.means?.length > 0 && m.stds?.length > 0 &&
+    (typeof m.predict === 'function' || m.id)
   );
   if (usable.length === 0) {
     section.classList.add('hidden');
@@ -5356,23 +5741,47 @@ async function updateRealWhatIfPrediction() {
   const isApi = (typeof ApiClient !== 'undefined' && ApiClient.enabled && m.id);
   const isReg = m.taskType === 'regression';
 
+  // ── 顯示 loading 狀態 ──────────────────────────────────────────
+  const predEl     = document.getElementById('real-whatif-prediction');
+  const baseEl     = document.getElementById('real-whatif-baseline');
+  const deltaEl    = document.getElementById('real-whatif-delta');
+  const probaEl    = document.getElementById('real-whatif-proba');   // may not exist in old HTML
+  if (isApi) {
+    if (predEl) predEl.textContent = '…';
+    if (baseEl) baseEl.textContent = '…';
+  }
+
   let pred = NaN, baseline = NaN;
+  let predProba = null, baseProba = null;
 
   if (isApi) {
-    // API 模式: 把 raw 值 + baseline (means) 各打一次 /api/predict
+    // API 模式: raw scale 值直接傳給後端,後端內部做 scaler.transform
     const myToken = ++_whatIfReqToken;
     try {
       const [predResp, baseResp] = await Promise.all([
         ApiClient.predict({ modelId: m.id, features: RealWhatIfState.values }),
-        ApiClient.predict({ modelId: m.id, features: m.means }),  // means = 標準化後的 baseline (0 in xNorm)
+        // baseline = scaler.mean_ (raw-scale training means) → transform 後 = 零向量
+        ApiClient.predict({ modelId: m.id, features: m.means }),
       ]);
-      // 過時的 response 直接丟掉
+      // 過時的 response (slider 還在拖動) 直接丟掉
       if (myToken !== _whatIfReqToken) return;
-      pred = predResp.prediction;
+      pred     = predResp.prediction;
       baseline = baseResp.prediction;
+      // 分類機率：取 pred 對應的 class 的機率
+      if (!isReg && Array.isArray(predResp.proba) && Array.isArray(predResp.classes)) {
+        const idx = predResp.classes.indexOf(pred);
+        if (idx >= 0) predProba = predResp.proba[idx];
+      }
+      if (!isReg && Array.isArray(baseResp.proba) && Array.isArray(baseResp.classes)) {
+        const idx = baseResp.classes.indexOf(baseline);
+        if (idx >= 0) baseProba = baseResp.proba[idx];
+      }
     } catch (err) {
       if (myToken !== _whatIfReqToken) return;
       console.warn('What-If predict 失敗:', err);
+      if (predEl) predEl.textContent = '錯誤';
+      if (baseEl) baseEl.textContent = '—';
+      return;
     }
   } else {
     // 本地 JS 模式 (沿用原邏輯)
@@ -5382,19 +5791,35 @@ async function updateRealWhatIfPrediction() {
     try { baseline = m.predict(baselineNorm); } catch (e) { baseline = NaN; }
   }
 
-  document.getElementById('real-whatif-prediction').textContent = isReg ? formatRwifVal(pred) : `Class ${pred}`;
+  // ── 渲染結果 ──────────────────────────────────────────────────
+  const fmtCls = (v, proba) => {
+    const label = (v === null || v === undefined || (typeof v === 'number' && isNaN(v))) ? '—' : String(v);
+    const pct = proba != null ? ` (${(proba * 100).toFixed(1)}%)` : '';
+    return label + pct;
+  };
+
+  if (predEl) predEl.textContent = isReg ? formatRwifVal(pred) : fmtCls(pred, predProba);
   document.getElementById('real-whatif-target-label').textContent = m.targetName || '目標變數';
-  document.getElementById('real-whatif-baseline').textContent = isReg ? formatRwifVal(baseline) : `Class ${baseline}`;
+  if (baseEl) baseEl.textContent = isReg ? formatRwifVal(baseline) : fmtCls(baseline, baseProba);
   document.getElementById('real-whatif-model-name').textContent = m.name;
 
   if (isReg && !isNaN(pred) && !isNaN(baseline)) {
     const delta = pred - baseline;
-    const deltaEl = document.getElementById('real-whatif-delta');
     const sign = delta >= 0 ? '+' : '';
-    deltaEl.textContent = `${sign}${formatRwifVal(delta)}`;
-    deltaEl.className = `font-mono ${delta > 0 ? 'text-success-400' : delta < 0 ? 'text-danger-400' : 'text-dark-300'}`;
+    if (deltaEl) {
+      deltaEl.textContent = `${sign}${formatRwifVal(delta)}`;
+      deltaEl.className = `font-mono ${delta > 0 ? 'text-success-400' : delta < 0 ? 'text-danger-400' : 'text-dark-300'}`;
+    }
+  } else if (!isReg && predProba != null && baseProba != null) {
+    // 分類：顯示機率差值
+    const delta = predProba - baseProba;
+    const sign = delta >= 0 ? '+' : '';
+    if (deltaEl) {
+      deltaEl.textContent = `${sign}${(delta * 100).toFixed(1)}%`;
+      deltaEl.className = `font-mono ${delta > 0 ? 'text-success-400' : delta < 0 ? 'text-danger-400' : 'text-dark-300'}`;
+    }
   } else {
-    document.getElementById('real-whatif-delta').textContent = '—';
+    if (deltaEl) deltaEl.textContent = '—';
   }
 }
 
@@ -5561,7 +5986,11 @@ function updateDashboardRealMetrics() {
   // Card 0: 活躍數據集 — DataEngine.datasets 總數
   cards[0].querySelector('.text-3xl').textContent = DataEngine.datasets.length.toString();
   const sub0 = cards[0].querySelector('.text-success-400, .text-dark-400.text-xs, .text-xs');
-  if (sub0 && DataEngine.currentDataset) sub0.textContent = `當前: ${DataEngine.currentDataset.fileName || ''}`;
+  if (sub0 && DataEngine.currentDataset) {
+    const rows = DataEngine.currentDataset.data?.length || DataEngine.currentDataset.rowCount || 0;
+    const rowStr = rows > 0 ? ` · ${rows.toLocaleString()} 列` : '';
+    sub0.textContent = `當前: ${DataEngine.currentDataset.fileName || ''}${rowStr}`;
+  }
 
   // Card 1: 已完成實驗 — 歷史訓練「次數」(每次 run = 1 個實驗)
   const totalRuns = _trainingHistory.length;
@@ -5594,10 +6023,40 @@ function updateDashboardRealMetrics() {
       : (best.metrics.testAccuracy * 100).toFixed(1) + '<span class="text-lg text-dark-400">%</span>';
   }
 
+  // Card 2 sub-line: 與上一次相比的進步幅度
+  if (bestRun) {
+    const sub2 = cards[2].querySelectorAll('.text-success-400, .text-dark-400.text-xs, .text-xs');
+    const sub2El = sub2[sub2.length - 1];
+    if (sub2El && _trainingHistory.length >= 2) {
+      const prevRun = _trainingHistory[1];  // second most recent
+      const isReg = bestRun.taskType === 'regression';
+      const delta = (bestRun.bestModel.score ?? 0) - (prevRun.bestModel?.score ?? 0);
+      if (Math.abs(delta) > 0.0001) {
+        const sign = delta > 0 ? '+' : '';
+        const deltaStr = isReg ? `${sign}${delta.toFixed(3)} R²` : `${sign}${(delta * 100).toFixed(1)}% Acc`;
+        sub2El.className = `flex items-center gap-1 mt-1 text-xs ${delta > 0 ? 'text-success-400' : 'text-warning-400'}`;
+        sub2El.innerHTML = delta > 0
+          ? `<svg class="w-3 h-3"><use href="#i-arrow-up"/></svg>${deltaStr} 較上次`
+          : `<svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" transform="rotate(180 12 12)"/></svg>${deltaStr} 較上次`;
+      }
+    }
+    // Show AUC in sub-label if available and classification
+    const bestMetrics = bestRun.bestModel?.metrics || bestRun.bestModel || {};
+    if (!bestRun.taskType || bestRun.taskType === 'classification') {
+      const auc = bestMetrics.auc;
+      const lbl2 = cards[2].querySelector('.text-dark-400.text-sm');
+      if (lbl2 && auc > 0) lbl2.textContent = `歷史最佳 AUC: ${auc.toFixed(3)}`;
+    }
+  }
+
   // Card 3: 已部署模型 → 改成「目前載入模型數」(更實用)
-  cards[3].querySelector('.text-3xl').textContent = models.length.toString();
+  const allHistoryModels = _trainingHistory.reduce((s, h) => s + (h.models?.length || h.modelCount || 0), 0);
+  cards[3].querySelector('.text-3xl').textContent = (models.length || allHistoryModels).toString();
   const lbl3 = cards[3].querySelector('.text-dark-400.text-sm');
-  if (lbl3) lbl3.textContent = '當前訓練模型數';
+  if (lbl3) lbl3.textContent = models.length > 0 ? '當前訓練模型數' : `歷史合計 ${allHistoryModels} 個`;
+  const sub3 = cards[3].querySelectorAll('.text-success-400, .text-dark-400.text-xs, .text-xs');
+  const sub3El = sub3[sub3.length - 1];
+  if (sub3El && models.length > 0) sub3El.textContent = `API 端點已就緒`;
 
   // 最近實驗清單 — 用 _trainingHistory 取代 mock data
   renderRecentExperimentsCard();
@@ -5703,6 +6162,148 @@ function renderRealTaskDistribution() {
   }, true);
 }
 
+// ============================================================
+// ③ DEPLOYMENTS — REAL MODE
+// 把所有訓練過的模型列為「可查詢的 API 端點」，每張卡顯示：
+//   模型名稱、類型標籤、核心指標、訓練時間戳、curl 呼叫範例
+// ============================================================
+function renderRealDeployments() {
+  const wrap = document.getElementById('deployments-real-content');
+  if (!wrap) return;
+
+  // Collect all models from current session + history
+  const allModels = [];
+  // Current session models
+  (MLEngine.trainedModels || []).forEach(m => {
+    if (m.id) allModels.push({ m, ts: Date.now(), fromSession: true });
+  });
+  // History models (de-dupe by id)
+  const seenIds = new Set(allModels.map(e => e.m.id));
+  _trainingHistory.forEach(h => {
+    (h.models || []).forEach(m => {
+      if (m.id && !seenIds.has(m.id)) {
+        seenIds.add(m.id);
+        allModels.push({ m, ts: h.timestamp, fromSession: false });
+      }
+    });
+  });
+
+  if (allModels.length === 0) {
+    wrap.innerHTML = '';
+    // Fall back to empty state
+    const realEmptyEl = document.getElementById('deployments-real-empty');
+    if (realEmptyEl) realEmptyEl.classList.remove('hidden');
+    wrap.classList.add('hidden');
+    return;
+  }
+
+  wrap.classList.remove('hidden');
+  const isReg = m => m.taskType === 'regression';
+
+  // Summary stats
+  const total = allModels.length;
+  const bestScore = allModels.reduce((best, { m }) => {
+    const s = isReg(m) ? (m.metrics?.testR2 ?? 0) : (m.metrics?.testAccuracy ?? 0);
+    return s > best ? s : best;
+  }, 0);
+  const apiBase = (typeof ApiClient !== 'undefined' && ApiClient.baseUrl) ? ApiClient.baseUrl : 'http://localhost:8000';
+
+  const fmtScore = (m) => {
+    if (isReg(m)) {
+      const r2 = m.metrics?.testR2;
+      return r2 != null ? `R² ${r2.toFixed(3)}` : '—';
+    }
+    const acc = m.metrics?.testAccuracy;
+    const auc = m.metrics?.auc;
+    if (auc > 0) return `AUC ${auc.toFixed(3)}`;
+    return acc != null ? `Acc ${(acc * 100).toFixed(1)}%` : '—';
+  };
+
+  const fmtTs = (ts) => {
+    if (!ts) return '—';
+    const d = new Date(ts);
+    return d.toLocaleDateString('zh-TW') + ' ' + d.toLocaleTimeString('zh-TW', { hour: '2-digit', minute: '2-digit' });
+  };
+
+  const curlSnippet = (modelId) =>
+    `curl -X POST ${apiBase}/api/predict \\\n  -H "Content-Type: application/json" \\\n  -d '{"modelId":"${modelId}","features":[...]}'`;
+
+  wrap.innerHTML = `
+    <!-- Summary row -->
+    <div class="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
+      <div class="metric-card">
+        <div class="flex items-center justify-between mb-3">
+          <span class="text-dark-400 text-sm">已訓練模型</span>
+          <span class="badge badge-success">可查詢</span>
+        </div>
+        <div class="text-3xl font-bold">${total}</div>
+        <div class="text-xs text-dark-400 mt-1">${allModels.filter(e => e.fromSession).length} 本次工作階段</div>
+      </div>
+      <div class="metric-card">
+        <div class="flex items-center justify-between mb-3">
+          <span class="text-dark-400 text-sm">最佳分數</span>
+        </div>
+        <div class="text-3xl font-bold font-mono">${bestScore.toFixed(3)}</div>
+        <div class="text-xs text-dark-400 mt-1">所有模型中最高</div>
+      </div>
+      <div class="metric-card">
+        <div class="flex items-center justify-between mb-3">
+          <span class="text-dark-400 text-sm">API 端點</span>
+        </div>
+        <div class="text-sm font-mono text-primary-300 mt-1 truncate">${apiBase}/api/predict</div>
+        <div class="text-xs text-dark-400 mt-1">POST · JSON · 需 Authorization</div>
+      </div>
+    </div>
+
+    <!-- Model cards -->
+    <div class="space-y-3">
+      ${allModels.map(({ m, ts }) => {
+        const taskBadge = isReg(m)
+          ? `<span class="text-xs px-2 py-0.5 rounded-full bg-accent-500/15 text-accent-400">迴歸</span>`
+          : `<span class="text-xs px-2 py-0.5 rounded-full bg-primary-500/15 text-primary-400">分類</span>`;
+        const srcBadge = m.dataSource === 'preprocessed'
+          ? `<span class="text-xs px-2 py-0.5 rounded-full bg-success-500/15 text-success-400">預處理</span>`
+          : `<span class="text-xs px-2 py-0.5 rounded-full bg-dark-600 text-dark-300">原始</span>`;
+        const snippet = escapeHtml(curlSnippet(m.id));
+        return `
+        <div class="card">
+          <div class="flex items-start gap-4 p-4">
+            <div class="w-10 h-10 rounded-xl bg-primary-500/10 flex items-center justify-center flex-shrink-0 mt-0.5">
+              <div class="w-3 h-3 rounded-full bg-primary-400"></div>
+            </div>
+            <div class="flex-1 min-w-0">
+              <div class="flex items-center gap-2 flex-wrap">
+                <h4 class="font-semibold text-sm">${escapeHtml(m.name || m.type || '模型')}</h4>
+                ${taskBadge}${srcBadge}
+              </div>
+              <p class="text-xs text-dark-400 mt-0.5">ID: <code class="text-[11px] bg-dark-800 px-1.5 py-0.5 rounded text-dark-200">${m.id}</code></p>
+              <details class="mt-2">
+                <summary class="text-xs text-dark-500 cursor-pointer hover:text-dark-300 select-none">curl 範例</summary>
+                <pre class="mt-1.5 text-[10px] bg-dark-900 rounded p-2 overflow-x-auto text-dark-200 whitespace-pre-wrap">${snippet}</pre>
+              </details>
+            </div>
+            <div class="text-right flex-shrink-0 ml-2">
+              <p class="text-sm font-mono text-success-300">${fmtScore(m)}</p>
+              <p class="text-xs text-dark-500 mt-0.5">${fmtTs(ts)}</p>
+              <button onclick="analyzeModel('${m.id}')" class="mt-2 text-xs text-primary-400 hover:text-primary-300 transition-colors">洞察 →</button>
+            </div>
+          </div>
+        </div>`;
+      }).join('')}
+    </div>
+
+    <!-- Batch predict hint -->
+    <div class="card mt-6 p-4 bg-dark-800/50">
+      <p class="text-xs text-dark-400">
+        <span class="text-primary-400 font-medium">批次預測：</span>
+        上傳 CSV 檔案至
+        <code class="text-[11px] bg-dark-800 px-1.5 py-0.5 rounded">${apiBase}/api/predict/batch</code>
+        可一次取得整批預測結果。詳見實驗室 → 批次預測。
+      </p>
+    </div>
+  `;
+}
+
 // 系統通知卡片 — 把 dashboard 上的「系統通知」改用真實 _notifications
 function renderSystemNotificationsCard() {
   const cards = document.querySelectorAll('#page-dashboard .card');
@@ -5736,6 +6337,85 @@ function renderSystemNotificationsCard() {
 
 // 全域:當前的最近實驗 filter (空字串 = 不篩選)
 let _recentExpFilter = { datasetName: '', target: '' };
+
+function exportAuditReportHtml() {
+  const audit = DataEngine.lastAuditReport;
+  if (!audit || audit.error) {
+    showToast('請先執行健檢', { type: 'warning' });
+    return;
+  }
+  const ds = DataEngine.currentDataset;
+  const dsName = ds?.fileName || '資料集';
+  const now = new Date().toLocaleString('zh-TW');
+
+  // Build rows for missing summary
+  const missingRows = Object.entries(audit.missing_summary || {}).map(([col, info]) => {
+    const cnt = info.count || info.missing_count || '?';
+    const pct = info.pct != null ? info.pct.toFixed(1) : (info.missing_pct != null ? info.missing_pct.toFixed(1) : '?');
+    return `<tr><td>${escapeHtml(col)}</td><td style="text-align:right">${cnt}</td><td style="text-align:right">${pct}%</td></tr>`;
+  }).join('');
+
+  // Sentinel summary
+  const sentinelRows = (audit.sentinel_summary || []).map(s => {
+    const col = s.column || s.col || String(s);
+    const vals = (s.sentinel_values || []).join(', ');
+    const cnt = s.count != null ? s.count : '?';
+    return `<tr><td>${escapeHtml(col)}</td><td>${escapeHtml(vals)}</td><td style="text-align:right">${cnt}</td></tr>`;
+  }).join('');
+
+  // Warnings list
+  const warnItems = (audit.warnings || []).map(w => `<li>${escapeHtml(w)}</li>`).join('');
+
+  const html = `<!DOCTYPE html>
+<html lang="zh-TW"><head><meta charset="utf-8">
+<title>資料健檢報告 — ${escapeHtml(dsName)}</title>
+<style>
+  body{font-family:system-ui,sans-serif;max-width:900px;margin:2rem auto;padding:0 1rem;background:#fff;color:#1e293b}
+  h1{font-size:1.5rem;font-weight:700;margin-bottom:.25rem}
+  .meta{color:#64748b;font-size:.875rem;margin-bottom:2rem}
+  h2{font-size:1.1rem;font-weight:600;margin:1.5rem 0 .75rem;border-bottom:1px solid #e2e8f0;padding-bottom:.25rem}
+  .stats{display:grid;grid-template-columns:repeat(4,1fr);gap:1rem;margin-bottom:1.5rem}
+  .stat{border:1px solid #e2e8f0;border-radius:.5rem;padding:1rem}
+  .stat .num{font-size:1.75rem;font-weight:700}
+  .stat .lbl{color:#64748b;font-size:.8rem}
+  table{width:100%;border-collapse:collapse;font-size:.875rem}
+  th,td{text-align:left;padding:.5rem .75rem;border-bottom:1px solid #f1f5f9}
+  th{background:#f8fafc;font-weight:600;color:#475569}
+  .warn{background:#fffbeb;border-left:3px solid #f59e0b;padding:.5rem .75rem;margin:.25rem 0;border-radius:0 .25rem .25rem 0;font-size:.875rem}
+  .ok{color:#10b981;font-weight:600}
+  .footer{margin-top:3rem;padding-top:1rem;border-top:1px solid #e2e8f0;color:#94a3b8;font-size:.75rem}
+</style></head><body>
+<h1>資料健檢報告</h1>
+<div class="meta">資料集: ${escapeHtml(dsName)} &nbsp;·&nbsp; 產生時間: ${now}</div>
+
+<h2>統計摘要</h2>
+<div class="stats">
+  <div class="stat"><div class="num">${audit.total_rows ?? '—'}</div><div class="lbl">總列數</div></div>
+  <div class="stat"><div class="num">${audit.total_columns ?? '—'}</div><div class="lbl">總欄位數</div></div>
+  <div class="stat"><div class="num" style="color:#10b981">${audit.perfect_columns ?? '—'}</div><div class="lbl">完整欄位</div></div>
+  <div class="stat"><div class="num" style="color:#f59e0b">${Object.keys(audit.missing_summary || {}).length}</div><div class="lbl">含缺失欄位</div></div>
+</div>
+
+<h2>缺失值摘要</h2>
+${missingRows ? `<table><thead><tr><th>欄位</th><th style="text-align:right">缺失數</th><th style="text-align:right">缺失率</th></tr></thead><tbody>${missingRows}</tbody></table>` : '<p class="ok">✓ 無缺失值</p>'}
+
+${sentinelRows ? `<h2>哨兵值偵測 (-9/-8/-7 等)</h2><table><thead><tr><th>欄位</th><th>哨兵值</th><th style="text-align:right">筆數</th></tr></thead><tbody>${sentinelRows}</tbody></table>` : ''}
+
+<h2>警告事項</h2>
+${warnItems ? `<ul style="list-style:none;padding:0">${(audit.warnings || []).map(w => `<div class="warn">⚠ ${escapeHtml(w)}</div>`).join('')}</ul>` : '<p class="ok">✓ 無警告</p>'}
+
+<div class="footer">由 AutoML Studio 自動產生 · ${now}</div>
+</body></html>`;
+
+  const blob = new Blob([html], { type: 'text/html;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `audit_report_${(dsName).replace(/[^a-zA-Z0-9]/g, '_').slice(0,30)}_${Date.now()}.html`;
+  a.click();
+  URL.revokeObjectURL(url);
+  showToast('健檢報告已匯出', { type: 'success' });
+}
 
 function renderRecentExperimentsCard() {
   const cards = document.querySelectorAll('#page-dashboard .card');
@@ -5918,6 +6598,18 @@ function initSettings() {
       });
     };
 
+    // ---- 本地模式開關 (一鍵在「本機 localhost」與「雲端 HF」之間切) ----
+    const localModeToggle = document.getElementById('setting-local-mode');
+    const localHint = document.getElementById('setting-local-hint');
+    // 雲端預設 = 預設選單第一個 (HuggingFace);抓不到就 fallback 寫死
+    const HF_DEFAULT_URL = (apiUrlPreset.querySelector('option') || {}).value
+      || 'https://honglideng-i2ai-automl-backend.hf.space';
+    const isLocalUrl = (u) => /localhost|127\.0\.0\.1|\[::1\]/i.test(u || '');
+    const syncLocalUi = (url) => {
+      if (localModeToggle) localModeToggle.checked = isLocalUrl(url);
+      if (localHint) localHint.classList.toggle('hidden', !isLocalUrl(url));
+    };
+
     const setActiveUrl = (url) => {
       if (!url) return;
       apiUrlInput.value = url;
@@ -5925,7 +6617,22 @@ function initSettings() {
       // 同步 select:若 url 在 options 裡就選它,否則選自訂佔位
       const matched = Array.from(apiUrlPreset.options).find(o => o.value === url);
       apiUrlPreset.value = matched ? url : '__custom__';
+      syncLocalUi(url);  // 也同步「本地模式」開關 + 提示
     };
+
+    if (localModeToggle) {
+      localModeToggle.addEventListener('change', () => {
+        if (localModeToggle.checked) {
+          // 開本地模式:確保 API 有啟用,並指向本機後端
+          if (!ApiClient.enabled) { ApiClient.setEnabled(true); if (apiToggle) apiToggle.checked = true; }
+          // 用 127.0.0.1 而非 localhost — Windows 上 localhost 常解析到 IPv6 ::1,
+          // 但 uvicorn 預設只聽 IPv4 → 會 Failed to fetch。127.0.0.1 強制走 IPv4。
+          setActiveUrl('http://127.0.0.1:8000');
+        } else {
+          setActiveUrl(HF_DEFAULT_URL);   // 關掉 → 回雲端
+        }
+      });
+    }
 
     rebuildPresetOptions();
     setActiveUrl(ApiClient.baseUrl);
@@ -6309,7 +7016,6 @@ function handlePipelineEvent(ev) {
     updateStageProgress(ev.pct);
   } else if (ev.type === 'done') {
     appendPipelineLog('Pipeline 完成', 'success');
-    // endpoint 統一回傳 results: [],測試模式單一 upload 也是 list 長度 1
     const results = ev.results || (ev.result ? [ev.result] : []);
     const r = results[0] || {};
     renderPipelineResult(r);
@@ -6335,7 +7041,6 @@ function appendPipelineLog(msg, level = 'info') {
   p.textContent = msg;
   logEl.appendChild(p);
   logEl.scrollTop = logEl.scrollHeight;
-  // 防爆:超過 500 行就 trim 前面
   if (logEl.children.length > 500) {
     while (logEl.children.length > 400) logEl.removeChild(logEl.firstChild);
   }
@@ -6404,9 +7109,6 @@ function renderPipelineResult(r) {
 
 
 // ===== 新介面 handshake =====
-// 從 index-new.html 跳回來時帶有 ?need_login=1&next=...,負責:
-//   (a) 已登入 → 直接 redirect 回 next
-//   (b) 未登入 → 自動開啟登入 modal,登入成功後 redirect 回 next
 function initNewUiAuthHandshake() {
   const url = new URL(window.location.href);
   const need = url.searchParams.get('need_login');
@@ -6415,7 +7117,6 @@ function initNewUiAuthHandshake() {
 
   const bounce = () => {
     const nextUrl = next ? decodeURIComponent(next) : 'index-new.html';
-    // 清掉 query 避免下次 reload 重跳
     url.searchParams.delete('need_login');
     url.searchParams.delete('next');
     url.searchParams.delete('reason');
@@ -6423,17 +7124,14 @@ function initNewUiAuthHandshake() {
     window.location.href = nextUrl;
   };
 
-  // 已登入直接 bounce
   if (typeof AuthClient !== 'undefined' && AuthClient.isAuthenticated()) {
     bounce();
     return;
   }
 
-  // 未登入 → 顯示 toast + 打開登入 modal
   showToast('請先登入以進入新介面', { type: 'info' });
   setTimeout(() => document.getElementById('btn-auth-open')?.click(), 300);
 
-  // 登入成功 → bounce
   window.addEventListener('auth:changed', (ev) => {
     if (ev.detail && ev.detail.user) bounce();
   });

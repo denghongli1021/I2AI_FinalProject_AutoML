@@ -107,12 +107,13 @@
         <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M4 6h16M4 12h16M4 18h7"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M14 18l2 2 4-4"/></svg>
         <span>預處理</span>
       </a>
-      <!-- AutoML Pipeline (測試模式專屬) — JS 會在 demo 模式時 unhide -->
-      <a href="#" class="nav-item nav-mode-demo hidden" data-page="pipeline">
+      <!-- AutoML Pipeline — 暫時隱藏,以後要還原只要拿掉註解
+      <a href="#" class="nav-item" data-page="pipeline">
         <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M13 10V3L4 14h7v7l9-11h-7z"/></svg>
         <span>AutoML Pipeline</span>
         <span class="ml-auto text-[9px] bg-warning-500/20 text-warning-400 px-1.5 py-0.5 rounded-full font-semibold">Pipeline</span>
       </a>
+      -->
       <a href="#" class="nav-item" data-page="experiments">
         <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M19.428 15.428a2 2 0 00-1.022-.547l-2.387-.477a6 6 0 00-3.86.517l-.318.158a6 6 0 01-3.86.517L6.05 15.21a2 2 0 00-1.806.547M8 4h8l-1 1v5.172a2 2 0 00.586 1.414l5 5c1.26 1.26.367 3.414-1.415 3.414H4.828c-1.782 0-2.674-2.154-1.414-3.414l5-5A2 2 0 009 10.172V5L8 4z"/></svg>
         <span>實驗室</span>
@@ -124,12 +125,8 @@
       <a href="#" class="nav-item" data-page="insights">
         <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z"/></svg>
         <span>洞察與決策</span>
-        <!-- <span class="ml-auto text-[9px] bg-accent-500/20 text-accent-400 px-1.5 py-0.5 rounded-full font-semibold">核心</span> -->
+        <span class="ml-auto text-[9px] bg-accent-500/20 text-accent-400 px-1.5 py-0.5 rounded-full font-semibold">核心</span>
       </a>
-      <!-- <a href="#" class="nav-item" data-page="deployments">
-        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M5 12h14M12 5l7 7-7 7"/></svg>
-        <span>部署與 API</span>
-      </a> -->
 
       <div class="border-t border-dark-700/50 my-3"></div>
       <p class="text-[10px] text-dark-500 uppercase tracking-wider px-3 mb-2">系統</p>
@@ -138,15 +135,6 @@
         <span>系統設定</span>
       </a>
     </nav>
-
-    <!-- 切換到新介面 (Beta) — 位於 sidebar 最底 -->
-    <div class="p-3 border-t border-dark-700/50">
-      <a href="index-new.html" id="btn-switch-newui" class="nav-item" title="切換到新介面 (Beta)" onclick="try{localStorage.setItem('ui_pref','new')}catch(e){}">
-        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M13 2L3 14h8l-1 8 10-12h-8l1-8z"/></svg>
-        <span>新介面</span>
-        <span class="ml-auto text-[9px] bg-primary-500/20 text-primary-300 px-1.5 py-0.5 rounded-full font-semibold tracking-wider">BETA</span>
-      </a>
-    </div>
 
     <!-- Mode toggle 已搬到 top bar 的 #mode-badge,sidebar 不再重複放 -->
 
@@ -177,11 +165,12 @@
           <span id="breadcrumb-current" class="text-dark-100 font-medium truncate">總覽儀表板</span>
         </div>
         <div class="flex items-center gap-2 sm:gap-3">
-          <!-- Demo / Real 模式徽章 — 整個 app 最重要的全域開關,從 sidebar 底部移到這裡才不會被忽略 -->
-          <button id="mode-badge" class="mode-badge" data-mode="real" title="點擊切換 測試 / 實作模式">
+          <!-- Demo / Real 模式徽章 — 暫時隱藏,預設用實作模式
+          <button id="mode-badge" class="mode-badge" data-mode="real" title="測試模式:用內建示範資料展示完整 UI / 圖表&#10;實作模式:上傳自己的 CSV、跑真實訓練 — 結果全部是真的&#10;&#10;點擊可切換">
             <span class="mode-badge-dot"></span>
             <span id="mode-badge-label">實作模式</span>
           </button>
+          -->
           <!-- Global Pipeline Status -->
           <div id="global-status" class="flex items-center gap-2 bg-dark-800 rounded-lg px-3 py-1.5 text-xs whitespace-nowrap">
             <span id="global-status-dot" class="relative flex h-2 w-2 flex-shrink-0">
@@ -214,7 +203,7 @@
           <!-- 使用者區塊 — guest 顯示登入按鈕,登入後顯示頭像 + 名稱 + 登出 -->
           <div id="auth-guest-section" class="flex items-center gap-2">
             <button id="btn-auth-open" class="btn btn-sm btn-primary">登入 / 註冊</button>
-            <span class="text-[10px] text-dark-500">匯名訪客模式</span>
+            <span class="text-[10px] text-dark-500">匿名訪客模式</span>
           </div>
           <div id="auth-user-section" class="hidden relative">
             <button id="btn-auth-menu" class="flex items-center gap-2 px-2 py-1.5 hover:bg-dark-800 rounded-lg transition-colors">
@@ -669,6 +658,22 @@
                 </button>
               </div>
             </div>
+            <!-- 進階前處理選項 (preprocessingv3) -->
+            <div class="px-4 pb-4">
+              <div class="flex flex-wrap items-center gap-x-6 gap-y-2 pt-3 border-t border-dark-700/50">
+                <span class="text-xs font-medium text-dark-400">進階選項</span>
+                <label class="flex items-center gap-2 cursor-pointer">
+                  <input type="checkbox" id="pp-opt-mice" class="rounded bg-dark-700 border-dark-500">
+                  <span class="text-sm text-dark-200">MICE 補值</span>
+                  <span class="text-[11px] text-dark-500">用其他欄位預測缺值,比中位數準(較慢)</span>
+                </label>
+                <label class="flex items-center gap-2 cursor-pointer">
+                  <input type="checkbox" id="pp-opt-mi" class="rounded bg-dark-700 border-dark-500">
+                  <span class="text-sm text-dark-200">MI 特徵選擇</span>
+                  <span class="text-[11px] text-dark-500">砍掉與 target 幾乎無關的特徵</span>
+                </label>
+              </div>
+            </div>
           </div>
 
           <!-- Status / Loading -->
@@ -710,7 +715,13 @@
             <div class="card col-span-2">
               <div class="card-header">
                 <h3 class="card-title">警告與缺失值</h3>
-                <span id="pp-warning-count" class="badge badge-warning">0</span>
+                <div class="flex items-center gap-2">
+                  <span id="pp-warning-count" class="badge badge-warning">0</span>
+                  <button id="btn-export-audit-html" class="btn btn-xs btn-secondary" title="匯出健檢報告 HTML">
+                    <svg class="w-3 h-3 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/></svg>
+                    匯出報告
+                  </button>
+                </div>
               </div>
               <div class="px-4 pb-4 space-y-3">
                 <div id="pp-warnings-list" class="space-y-2 max-h-32 overflow-y-auto"></div>
@@ -823,6 +834,66 @@
             </div>
           </div>
 
+          <!-- 標籤雜訊偵測 (preprocessingv3) -->
+          <div id="pp-labelnoise-card" class="card mb-6 hidden">
+            <div class="card-header">
+              <h3 class="card-title flex items-center gap-2">
+                <svg class="w-4 h-4 text-warning-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.879 7.519c1.171-1.025 3.071-1.025 4.242 0 1.172 1.025 1.172 2.687 0 3.712-.203.179-.43.326-.67.442-.745.361-1.45.999-1.45 1.827v.75M12 17.25h.008v.008H12v-.008z"/>
+                </svg>
+                標籤雜訊偵測
+              </h3>
+              <span id="pp-labelnoise-count" class="text-[10px] px-2 py-0.5 rounded border border-warning-500/30 text-warning-400 bg-warning-500/10 hidden">0 筆</span>
+            </div>
+            <div class="px-4 pb-4 space-y-3">
+              <p class="text-[11px] text-dark-400 leading-relaxed">
+                用交叉驗證的預測信心度,抓出「特徵模式與標籤不符」的樣本 —— 模型對其<b>真實標籤的信心度過低 (&lt;25%)</b>,可能是標錯的資料。建議人工複查。
+              </p>
+              <div class="overflow-x-auto" style="max-height:240px">
+                <table class="w-full text-sm">
+                  <thead class="sticky top-0 bg-dark-900 z-10">
+                    <tr class="text-dark-400 text-xs border-b border-dark-700/50">
+                      <th class="text-left py-2 px-3 font-medium">列索引</th>
+                      <th class="text-left py-2 px-3 font-medium">標註的標籤</th>
+                      <th class="text-right py-2 px-3 font-medium">模型信心度</th>
+                    </tr>
+                  </thead>
+                  <tbody id="pp-labelnoise-table"></tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+
+          <!-- 集成離群偵測 (preprocessingv3) -->
+          <div id="pp-ensemble-outliers-card" class="card mb-6 hidden">
+            <div class="card-header">
+              <h3 class="card-title flex items-center gap-2">
+                <svg class="w-4 h-4 text-danger-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"/>
+                </svg>
+                集成離群偵測
+              </h3>
+              <span id="pp-ensemble-outliers-count" class="text-[10px] px-2 py-0.5 rounded border border-danger-500/30 text-danger-400 bg-danger-500/10 hidden">0 筆</span>
+            </div>
+            <div class="px-4 pb-4 space-y-3">
+              <p class="text-[11px] text-dark-400 leading-relaxed">
+                用三種方法 (IQR + IsolationForest + LOF) 投票,<b>≥2 種方法同時標記</b>才算高信心離群,比單一方法更可靠。
+              </p>
+              <div class="overflow-x-auto" style="max-height:240px">
+                <table class="w-full text-sm">
+                  <thead class="sticky top-0 bg-dark-900 z-10">
+                    <tr class="text-dark-400 text-xs border-b border-dark-700/50">
+                      <th class="text-left py-2 px-3 font-medium">列索引</th>
+                      <th class="text-center py-2 px-3 font-medium">票數</th>
+                      <th class="text-left py-2 px-3 font-medium">偵測方法</th>
+                    </tr>
+                  </thead>
+                  <tbody id="pp-ensemble-outliers-table"></tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+
           <!-- Feature Groups (Router output) -->
           <div id="pp-groups-section" class="card mb-6 hidden">
             <div class="card-header">
@@ -881,6 +952,19 @@
                 <div id="pp-dropped-chips" class="flex flex-wrap gap-1"></div>
               </div>
             </div>
+          </div>
+
+          <!-- 套用的前處理步驟 (preprocessingv3 透明度) -->
+          <div id="pp-applied-card" class="card mb-6 hidden">
+            <div class="card-header">
+              <h3 class="card-title flex items-center gap-2">
+                <svg class="w-4 h-4 text-accent-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 4a2 2 0 114 0v1a1 1 0 001 1h3a1 1 0 011 1v3a1 1 0 01-1 1h-1a2 2 0 100 4h1a1 1 0 011 1v3a1 1 0 01-1 1h-3a1 1 0 01-1-1v-1a2 2 0 10-4 0v1a1 1 0 01-1 1H7a1 1 0 01-1-1v-3a1 1 0 00-1-1H4a2 2 0 110-4h1a1 1 0 001-1V7a1 1 0 011-1h3a1 1 0 001-1V4z"/>
+                </svg>
+                這次套用了哪些前處理
+              </h3>
+            </div>
+            <div class="px-4 pb-4 space-y-2" id="pp-applied-body"></div>
           </div>
 
           <!-- Transform Result -->
@@ -1031,6 +1115,18 @@
                       <p class="text-xs text-dark-400">啟用後將依時間順序切分訓練/測試集</p>
                     </div>
                   </label>
+                  <!-- Class Imbalance Toggle -->
+                  <label id="exp-class-weight-row" class="hidden flex items-center gap-3 px-3 py-2.5 mt-2 rounded-lg bg-dark-800 border border-dark-600 cursor-pointer hover:border-warning-500 transition-colors">
+                    <label class="toggle-switch" style="flex-shrink:0">
+                      <input type="checkbox" id="exp-class-weight-balanced">
+                      <span class="toggle-slider"></span>
+                    </label>
+                    <div>
+                      <p class="text-sm font-medium">類別平衡 (class_weight='balanced')</p>
+                      <p class="text-xs text-dark-400">資料類別不平衡時啟用，讓少數類別獲得更高權重</p>
+                    </div>
+                  </label>
+                  <p id="exp-imbalance-hint" class="hidden mt-1.5 text-xs text-warning-400 px-1"></p>
                 </div>
                 <!-- Training Engine — sklearn vs pipeline -->
                 <div class="md:col-span-2">
@@ -1149,9 +1245,13 @@
                       <div class="flex-1 min-w-0">
                         <p class="text-sm font-medium">已預處理資料</p>
                         <p class="text-xs text-dark-400 mb-1.5">用「預處理」頁面切好的 train/test (含 OneHot / 文字 / 日期處理)</p>
-                        <select id="exp-pp-select" class="w-full bg-dark-900 border border-dark-600 rounded px-2 py-1 text-xs focus:border-primary-500 outline-none disabled:opacity-50" disabled>
-                          <option value="">尚無預處理結果 — 請先到「預處理」頁面執行</option>
-                        </select>
+                        <div class="relative flex items-center gap-1">
+                          <select id="exp-pp-select" class="flex-1 min-w-0 bg-dark-900 border border-dark-600 rounded px-2 py-1 text-xs focus:border-primary-500 outline-none disabled:opacity-50" disabled>
+                            <option value="">尚無預處理結果 — 請先到「預處理」頁面執行</option>
+                          </select>
+                          <button type="button" id="exp-pp-info-btn" class="shrink-0 w-6 h-6 inline-flex items-center justify-center rounded-full bg-dark-700 hover:bg-primary-500/20 hover:text-primary-400 text-dark-300 text-xs font-bold border border-dark-600 hover:border-primary-500 transition-colors disabled:opacity-40 disabled:cursor-not-allowed" title="顯示此預處理的設定" disabled>i</button>
+                          <div id="exp-pp-info-popover" class="hidden absolute right-0 top-full mt-1 z-30 w-72 bg-dark-800 border border-dark-600 rounded-lg shadow-xl p-3 text-xs space-y-1.5"></div>
+                        </div>
                         <p id="exp-pp-hint" class="text-[11px] text-accent-400 mt-1"></p>
                       </div>
                     </label>
@@ -1484,8 +1584,22 @@
         <div class="card mb-6">
           <div class="card-header">
             <h3 class="card-title">模型排行榜</h3>
-            <div class="flex items-center gap-3">
+            <div class="flex items-center gap-3 flex-wrap">
               <div id="lb-history-cascade" class="history-cascade flex items-center gap-2"></div>
+              <!-- Filter chips -->
+              <div class="flex items-center gap-1.5 text-xs">
+                <select id="lb-filter-source" class="bg-dark-800 border border-dark-600 rounded px-2 py-1 text-xs text-dark-300 focus:outline-none focus:border-primary-500">
+                  <option value="">全部來源</option>
+                  <option value="raw">原始</option>
+                  <option value="preprocessed">預處理</option>
+                </select>
+                <select id="lb-filter-type" class="bg-dark-800 border border-dark-600 rounded px-2 py-1 text-xs text-dark-300 focus:outline-none focus:border-primary-500">
+                  <option value="">全部任務</option>
+                  <option value="classification">分類</option>
+                  <option value="regression">回歸</option>
+                </select>
+                <button id="lb-filter-reset" class="text-dark-500 hover:text-dark-300 transition-colors px-1" title="重設篩選">✕</button>
+              </div>
               <button id="btn-compare" class="btn btn-sm btn-primary" disabled>比較選取的模型</button>
             </div>
           </div>
@@ -1868,14 +1982,16 @@
       <!-- ===== PAGE: DEPLOYMENTS ===== -->
       <section id="page-deployments" class="page-section hidden">
         <!-- Real mode empty state -->
+        <!-- Real mode: injected by renderRealDeployments() -->
+        <div id="deployments-real-content" class="hidden"></div>
         <div id="deployments-real-empty" class="hidden">
           <div class="card empty-state">
             <div class="empty-state-icon bg-accent-500/10 text-accent-400">
               <svg class="w-8 h-8"><use href="#i-arrow-right"/></svg>
             </div>
             <h3 class="empty-state-title">尚無部署</h3>
-            <p class="empty-state-desc">選擇最佳模型後，可在此部署為 API 服務</p>
-            <button onclick="navigateTo('leaderboard')" class="btn btn-primary">前往模型排行榜</button>
+            <p class="empty-state-desc">訓練完模型後，即可在此查看 API 端點與呼叫範例</p>
+            <button onclick="navigateTo('experiments')" class="btn btn-primary">前往訓練模型</button>
           </div>
         </div>
         <div id="deployments-demo-content">
@@ -2346,6 +2462,25 @@
               <div class="space-y-4">
                 <div class="setting-row">
                   <div>
+                    <p class="text-sm font-medium">🖥️ 本地模式 (Local)</p>
+                    <p class="text-xs text-dark-400">開啟 = 連本機後端 <span class="font-mono">127.0.0.1:8000</span>(後端 + DB 都跑在你電腦);關閉 = 連雲端 HuggingFace</p>
+                  </div>
+                  <label class="toggle-switch">
+                    <input type="checkbox" id="setting-local-mode">
+                    <span class="toggle-slider"></span>
+                  </label>
+                </div>
+                <div id="setting-local-hint" class="hidden text-xs text-dark-300 bg-dark-800/60 border border-dark-700 rounded-lg p-3 leading-relaxed">
+                  ⚠️ 本地模式需要你先在終端機(專案根目錄)啟動本地後端:
+                  <div class="font-mono text-[11px] text-primary-300 mt-1.5 mb-1.5 select-all">$env:DB_LOCAL='1'; python -m uvicorn api.main:app --reload --port 8000</div>
+                  後端 + 資料庫 (SQLite, <span class="font-mono">api/auth.db</span>) 都會跑在本機、不連雲端。本地 DB 是全新空的,第一次請註冊一個 email/密碼帳號。
+                  <div class="mt-2 pt-2 border-t border-dark-700 text-warning-300">
+                    ❗ 這個頁面也要用 <span class="font-mono">http</span> 開(本機 / Live Server),<b>不能在 https 的 GitHub Pages 上用本地模式</b> —— HTTPS 頁面無法呼叫 http 的本機後端,瀏覽器會擋(Failed to fetch)。<br>
+                    ※ 用 <span class="font-mono">127.0.0.1</span> 而非 <span class="font-mono">localhost</span>:Windows 上 localhost 常被解析成 IPv6,但後端只聽 IPv4 → 也會 Failed to fetch。
+                  </div>
+                </div>
+                <div class="setting-row">
+                  <div>
                     <p class="text-sm font-medium">使用 Python 後端 API</p>
                     <p class="text-xs text-dark-400">開啟後,預處理 / 訓練 / 可視化將呼叫隊友的 FastAPI 服務</p>
                   </div>
@@ -2518,6 +2653,6 @@
   <script src="js/charts.js?v=36"></script>
   <script src="js/auth.js?v=36"></script>
   <script src="js/api.js?v=36"></script>
-  <script src="js/app.js?v=51"></script>
+  <script src="js/app.js?v=55"></script>
 </body>
 </html>

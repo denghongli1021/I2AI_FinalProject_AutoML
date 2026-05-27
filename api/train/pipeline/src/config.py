@@ -1,9 +1,13 @@
-"""全域設定：亂數種子、裝置偵測、路徑管理。"""
+"""config: SEED, DEVICE, paths. torch is optional (skip-dl mode)."""
 import os
-import torch
 
 SEED = 42
-DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+try:
+    import torch
+    DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+except ImportError:
+    torch = None  # type: ignore
+    DEVICE = "cpu"
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)

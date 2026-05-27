@@ -45,6 +45,14 @@ const ApiClient = {
     return r.json();
   },
 
+  async modelDelete(modelId) {
+    const headers = {};
+    if (this.token) headers['Authorization'] = `Bearer ${this.token}`;
+    const r = await fetch(`${this.baseUrl}/api/models/${encodeURIComponent(modelId)}`, { method: 'DELETE', headers });
+    if (!r.ok) throw new Error(`modelDelete 失敗 (${r.status}): ${await r.text()}`);
+    return r.json();
+  },
+
   // ---- 1. PREPROCESS ----
   async preprocess(file) {
     const fd = new FormData();
@@ -137,6 +145,18 @@ const ApiClient = {
       body: JSON.stringify(payload),
     });
     if (!r.ok) throw new Error(`predict 失敗 (${r.status}): ${await r.text()}`);
+    return r.json();
+  },
+
+  // ---- 4c. MODEL INFO — 取得特徵名稱 + 統計值 (供 What-If 初始化) ----
+  async get(path) {
+    const headers = {};
+    if (typeof AuthClient !== 'undefined' && AuthClient.token)
+      headers['Authorization'] = `Bearer ${AuthClient.token}`;
+    else if (this.token)
+      headers['Authorization'] = `Bearer ${this.token}`;
+    const r = await fetch(`${this.baseUrl}${path}`, { method: 'GET', headers });
+    if (!r.ok) throw new Error(`GET ${path} 失敗 (${r.status}): ${await r.text()}`);
     return r.json();
   },
 

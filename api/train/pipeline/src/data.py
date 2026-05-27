@@ -1,7 +1,14 @@
 """資料切割與 PyTorch Dataset/DataLoader 工具。"""
 import numpy as np
-import torch
-from torch.utils.data import Dataset, DataLoader
+try:
+    import torch
+    from torch.utils.data import Dataset, DataLoader
+    _HAS_TORCH = True
+except ImportError:
+    torch = None  # type: ignore
+    Dataset = object  # type: ignore
+    DataLoader = None  # type: ignore
+    _HAS_TORCH = False
 from sklearn.model_selection import StratifiedKFold, RepeatedStratifiedKFold, TimeSeriesSplit
 
 from .config import SEED

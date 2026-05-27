@@ -1,3 +1,4 @@
+import gc  # 主動式垃圾回收 (合入自 feat/preprocessingv2)
 import pandas as pd
 from typing import List, Union
 
@@ -43,7 +44,11 @@ def load_and_merge_data(data_source: Union[pd.DataFrame, str, List[str]], main_f
                 main_df = main_df.merge(df, on=common_cols, how='left')
             else:
                 print(f"⚠️ 無法在檔案 {i} 找到與主表的共同 ID，已跳過合併。")
-                
+
+        # 主動式 GC:斬斷暫存清單與過期參照,防止大數據合併後 RAM 居高不下
+        del dfs
+        collected = gc.collect()
+        print(f"🧹 [記憶體清理] 回收 {collected} 個快取參考")
         return main_df
     
     raise ValueError("❌ data_source 格式錯誤！必須是 DataFrame, 字串路徑, 或路徑清單。")

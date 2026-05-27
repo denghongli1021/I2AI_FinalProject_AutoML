@@ -4,6 +4,17 @@ import pandas as pd
 from scipy.stats import chi2_contingency
 from typing import Any, Dict, List, Optional
 
+# 稽核報告輸出 (JSON + HTML) — from feat/preprocessingv2
+import json
+from pathlib import Path
+from datetime import datetime
+
+# 進階異常偵測 (Ensemble Outlier + 標籤雜訊) — from feat/preprocessingv2
+from sklearn.ensemble import IsolationForest, RandomForestClassifier
+from sklearn.neighbors import LocalOutlierFactor
+from sklearn.model_selection import cross_val_predict
+from sklearn.preprocessing import LabelEncoder
+
 
 # ──────────────────────────────────────────────────────────────────
 # Cramér's V：衡量兩個類別欄位的關聯強度
@@ -82,7 +93,9 @@ def generate_health_report(
         "constant_columns":     [],
         "suspected_id_columns": [],
         "inf_columns":          [],
-        "outlier_summary":      [],   # 新增
+        "outlier_summary":      [],   # IQR
+        "ensemble_outlier_summary": [],   # IQR+IsolationForest+LOF 投票
+        "label_noise_candidates":   [],   # 疑似標籤錯誤樣本
         "target_info":          {},
         "leakage_candidates":   [],
         "info":                 [],
@@ -98,7 +111,9 @@ def generate_health_report(
     _check_duplicates(df, n_rows, report)
     _check_constant_columns(df, target_col, report)
     _check_suspected_id_columns(df, n_rows, target_col, report)
-    _check_outliers(df, target_col, report)        # 新增
+    _check_outliers(df, target_col, report)        # IQR
+    _check_outliers_ensemble(df, target_col, report)  # IQR + IsolationForest + LOF 投票
+    _check_label_noise(df, target_col, report)        # 標籤雜訊
     _check_target_column(df, target_col, report)
     _check_target_leakage(df, target_col, report)  # 增強（加入 Cramér's V）
 
@@ -395,6 +410,150 @@ def _check_target_leakage(
 
 
 # ──────────────────────────────────────────────────────────────────
+# 進階異常偵測:IQR + IsolationForest + LOF 集成投票
+# ──────────────────────────────────────────────────────────────────
+
+def _check_outliers_ensemble(
+    df: pd.DataFrame, target_col: Optional[str], report: dict
+) -> None:
+    """
+    集成異常偵測：IQR + Isolation Forest + LOF 三種方法投票。
+    被 2 種以上方法標記才算「高信心異常」,降低誤報率。
+    結果存入 report["ensemble_outlier_summary"]:
+      [{"row_index": int, "votes": int, "methods": [str]}, ...]
+    """
+    numeric_df = df.select_dtypes(include=[np.number])
+    if target_col and target_col in numeric_df.columns:
+        numeric_df = numeric_df.drop(columns=[target_col])
+    if numeric_df.empty or len(numeric_df) < 10:
+        return
+
+    X = numeric_df.fillna(numeric_df.median())
+    n = len(X)
+    votes = np.zeros(n, dtype=int)
+    methods_per_row = [[] for _ in range(n)]
+
+    # 方法一:IQR
+    for col in X.columns:
+        q1, q3 = X[col].quantile(0.25), X[col].quantile(0.75)
+        iqr = q3 - q1
+        if iqr == 0:
+            continue
+        mask = (X[col] < q1 - 3 * iqr) | (X[col] > q3 + 3 * iqr)
+        for idx in X.index[mask]:
+            i = X.index.get_loc(idx)
+            votes[i] += 1
+            methods_per_row[i].append("IQR")
+
+    # 方法二:Isolation Forest
+    try:
+        iso = IsolationForest(contamination=0.05, random_state=42, n_jobs=-1)
+        iso_pred = iso.fit_predict(X)
+        for i, pred in enumerate(iso_pred):
+            if pred == -1:
+                votes[i] += 1
+                methods_per_row[i].append("IsolationForest")
+    except Exception:
+        pass
+
+    # 方法三:LOF
+    try:
+        lof = LocalOutlierFactor(n_neighbors=min(20, n - 1), contamination=0.05)
+        lof_pred = lof.fit_predict(X)
+        for i, pred in enumerate(lof_pred):
+            if pred == -1:
+                votes[i] += 1
+                methods_per_row[i].append("LOF")
+    except Exception:
+        pass
+
+    # 整合:2 票以上才記錄
+    ensemble_result = []
+    for i in range(n):
+        if votes[i] >= 2:
+            ensemble_result.append({
+                "row_index": int(X.index[i]),
+                "votes":     int(votes[i]),
+                "methods":   methods_per_row[i],
+            })
+
+    report["ensemble_outlier_summary"] = ensemble_result
+    if ensemble_result:
+        report["warnings"].append(
+            f"⚠️  集成異常偵測 (IQR+IsolationForest+LOF) 發現 "
+            f"{len(ensemble_result)} 筆高信心離群樣本 (≥2 種方法同時標記)。"
+        )
+
+
+# ──────────────────────────────────────────────────────────────────
+# 標籤雜訊偵測:用 CV 預測信心抓疑似標錯的樣本
+# ──────────────────────────────────────────────────────────────────
+
+def _check_label_noise(
+    df: pd.DataFrame, target_col: Optional[str], report: dict
+) -> None:
+    """
+    標籤雜訊偵測:用交叉驗證預測信心度抓出疑似被標錯的樣本。
+    只對分類任務 (target 唯一值 <=50) 執行。
+    結果存入 report["label_noise_candidates"]:
+      [{"row_index": int, "true_label": ..., "predicted_proba": float}, ...]
+    """
+    if not target_col or target_col not in df.columns:
+        return
+
+    y = df[target_col].dropna()
+    if y.nunique() > 50 or y.nunique() < 2:
+        return
+
+    numeric_df = df.select_dtypes(include=[np.number]).drop(
+        columns=[target_col], errors="ignore"
+    )
+    if numeric_df.empty:
+        return
+
+    common_idx = numeric_df.index.intersection(y.index)
+    if len(common_idx) < 20:
+        return
+
+    X_check = numeric_df.loc[common_idx].fillna(numeric_df.median())
+    y_check = y.loc[common_idx]
+
+    try:
+        le = LabelEncoder()
+        y_enc = le.fit_transform(y_check)
+        clf = RandomForestClassifier(
+            n_estimators=50, random_state=42, n_jobs=-1, max_depth=6
+        )
+        confidence_threshold = 0.25
+
+        proba = cross_val_predict(
+            clf, X_check, y_enc, cv=min(5, y_check.nunique()),
+            method="predict_proba", n_jobs=-1,
+        )
+        true_class_idx = [list(le.classes_).index(label) for label in y_check]
+        true_proba = proba[np.arange(len(proba)), true_class_idx]
+
+        noise_candidates = []
+        for i, (idx, prob) in enumerate(zip(common_idx, true_proba)):
+            if prob < confidence_threshold:
+                noise_candidates.append({
+                    "row_index":      int(idx),
+                    "true_label":     str(y_check.iloc[i]),
+                    "predicted_proba": round(float(prob), 4),
+                })
+
+        report["label_noise_candidates"] = noise_candidates
+        if noise_candidates:
+            report["warnings"].append(
+                f"⚠️  標籤雜訊偵測發現 {len(noise_candidates)} 筆疑似標錯的樣本"
+                f" (模型對其真實標籤預測信心度 < {confidence_threshold:.0%})。"
+                " 建議人工複查 report['label_noise_candidates']。"
+            )
+    except Exception as e:
+        report["info"].append(f"ℹ️  標籤雜訊偵測跳過 ({e})")
+
+
+# ──────────────────────────────────────────────────────────────────
 # 終端機易讀輸出
 # ──────────────────────────────────────────────────────────────────
 
@@ -459,3 +618,99 @@ def print_health_report(report: Dict[str, Any]) -> None:
         for m in report["warnings"]:
             print(f"  {m}")
     print(f"{SEP}\n")
+
+
+# ──────────────────────────────────────────────────────────────────
+# 稽核報告輸出 (JSON / HTML) — from feat/preprocessingv2
+# ──────────────────────────────────────────────────────────────────
+
+def export_report_json(report: dict, filepath: str) -> None:
+    """
+    將 generate_health_report() 的回傳結果輸出成 JSON 檔。
+    CI/CD pipeline 可讀取它判斷是否中止訓練;也方便版本控制 diff 兩次健康狀態。
+    """
+    output = {
+        "generated_at": datetime.now().isoformat(),
+        "report": report,
+    }
+    Path(filepath).parent.mkdir(parents=True, exist_ok=True)
+    with open(filepath, "w", encoding="utf-8") as f:
+        json.dump(output, f, ensure_ascii=False, indent=2, default=str)
+    print(f"[data_health] 稽核報告 (JSON) 已儲存至:{filepath}")
+
+
+def export_report_html(report: dict, filepath: str) -> None:
+    """
+    將 generate_health_report() 的回傳結果輸出成人類可讀的 HTML 報告。
+    含缺失 / 離群 / 目標洩漏候選的表格,以及 warnings/info 訊息。
+    """
+    now   = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    rows  = report.get("total_rows", "?")
+    cols  = report.get("total_columns", "?")
+    warns = report.get("warnings", [])
+    infos = report.get("info", [])
+
+    def _table_rows(items: list, keys: list) -> str:
+        if not items:
+            return "<tr><td colspan='99'>(無)</td></tr>"
+        header = "<tr>" + "".join(f"<th>{k}</th>" for k in keys) + "</tr>"
+        body = ""
+        for item in items:
+            body += "<tr>" + "".join(
+                f"<td>{item.get(k, '')}</td>" for k in keys
+            ) + "</tr>"
+        return header + body
+
+    warn_html = "".join(
+        f"<li style='color:#b45309;background:#fef9c3;padding:4px 8px;"
+        f"border-radius:4px;margin:3px 0'>{w}</li>"
+        for w in warns
+    ) or "<li style='color:green'>無警告</li>"
+
+    info_html = "".join(f"<li style='color:#166534'>{i}</li>" for i in infos)
+
+    missing_keys = ["column", "missing_count", "missing_ratio"]
+    miss_data = [
+        {"column": col, "missing_count": v.get("count", ""), "missing_ratio": f"{v.get('ratio',0):.1%}"}
+        for col, v in report.get("missing_summary", {}).items()
+    ]
+    outlier_keys = ["column", "outlier_count", "outlier_ratio"]
+    leakage_keys = ["column", "correlation", "method", "risk"]
+
+    html = f"""<!DOCTYPE html>
+<html lang="zh-Hant"><head>
+<meta charset="UTF-8">
+<title>資料健康稽核報告</title>
+<style>
+  body{{font-family:'Segoe UI',Arial,sans-serif;margin:32px;color:#1e293b}}
+  h1{{color:#0f172a}} h2{{color:#334155;margin-top:28px}}
+  table{{border-collapse:collapse;width:100%;margin-top:8px}}
+  th{{background:#e2e8f0;padding:8px 12px;text-align:left}}
+  td{{padding:7px 12px;border-bottom:1px solid #e2e8f0}}
+  tr:hover{{background:#f8fafc}}
+</style>
+</head><body>
+<h1>📋 資料健康稽核報告</h1>
+<p>生成時間:{now}  |  資料規模:{rows:,} 列 × {cols} 欄</p>
+
+<h2>⚠️ 警告 ({len(warns)} 項)</h2>
+<ul>{warn_html}</ul>
+
+<h2>ℹ️ 一般資訊</h2>
+<ul>{info_html}</ul>
+
+<h2>缺失值摘要</h2>
+<table>{_table_rows(miss_data, missing_keys)}</table>
+
+<h2>離群值摘要</h2>
+<table>{_table_rows(report.get("outlier_summary", []), outlier_keys)}</table>
+
+<h2>目標洩漏候選</h2>
+<table>{_table_rows(report.get("leakage_candidates", []), leakage_keys)}</table>
+
+</body></html>"""
+
+    Path(filepath).parent.mkdir(parents=True, exist_ok=True)
+    with open(filepath, "w", encoding="utf-8") as f:
+        f.write(html)
+    print(f"[data_health] 稽核報告 (HTML) 已儲存至:{filepath}")

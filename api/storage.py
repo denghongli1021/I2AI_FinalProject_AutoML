@@ -232,6 +232,9 @@ def save_preprocessor(
     user,
     db: Session,
     test_size: float = 0.2,
+    use_mice: bool = False,
+    use_mi_selection: bool = False,
+    mi_threshold: float = 0.01,
 ) -> str:
     pp_id = f"pp_{uuid.uuid4().hex[:8]}"
     if not _is_authed(user):
@@ -243,6 +246,9 @@ def save_preprocessor(
             "createdAt": time.time(),
             "X_train": X_train, "X_test": X_test,
             "y_train": y_train, "y_test": y_test,
+            "useMice": use_mice,
+            "useMiSelection": use_mi_selection,
+            "miThreshold": mi_threshold,
         }, user)
         return pp_id
 
@@ -257,6 +263,9 @@ def save_preprocessor(
         feature_names_json=json.dumps(feature_names, ensure_ascii=False),
         preprocessor_pkl=pickle.dumps(preprocessor, protocol=pickle.HIGHEST_PROTOCOL),
         train_test_pkl=train_test_blob,
+        use_mice=use_mice,
+        use_mi_selection=use_mi_selection,
+        mi_threshold=mi_threshold,
     ))
     db.commit()
     return pp_id
@@ -298,6 +307,9 @@ def list_preprocessors(user, db: Session) -> list[dict]:
                 "trainSize": int(len(entry["X_train"])) if entry.get("X_train") is not None else 0,
                 "testSize": int(len(entry["X_test"])) if entry.get("X_test") is not None else 0,
                 "createdAt": entry.get("createdAt"),
+                "useMice": bool(entry.get("useMice", False)),
+                "useMiSelection": bool(entry.get("useMiSelection", False)),
+                "miThreshold": float(entry.get("miThreshold", 0.01)),
             })
         items.sort(key=lambda x: x.get("createdAt") or 0, reverse=True)
         return items
@@ -325,6 +337,9 @@ def list_preprocessors(user, db: Session) -> list[dict]:
             "trainSize": train_size,
             "testSize": test_size,
             "createdAt": r.created_at.timestamp() if r.created_at else None,
+            "useMice": bool(getattr(r, "use_mice", False)),
+            "useMiSelection": bool(getattr(r, "use_mi_selection", False)),
+            "miThreshold": float(getattr(r, "mi_threshold", 0.01) or 0.01),
         })
     return out
 

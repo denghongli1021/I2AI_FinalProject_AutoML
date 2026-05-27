@@ -80,12 +80,16 @@ def run_pipeline(
     train_csv_bytes: bytes | None = None,
     test_csv_bytes: bytes | None = None,
     train_file_name: str | None = None,
+    csv_path: str | None = None,         # 已寫好的 CSV 檔路徑 (省掉 bytes 來回 → 大矩陣走這條)
+    train_csv_path: str | None = None,
+    test_csv_path: str | None = None,
     cancel_token=None,   # threading.Event;set 後立刻 terminate subprocess
 ) -> dict[str, Any]:
     """
-    兩種模式擇一:
-      A. csv_bytes + file_name       — 單 CSV,Daniel 自己做 80/20 split
-      B. train_csv_bytes + test_csv_bytes — pre-split (實驗室用預處理結果時)
+    兩種模式擇一 (各自可給 bytes 或「已寫好的檔案路徑」):
+      A. csv_bytes/csv_path + file_name              — 單 CSV,Daniel 自己做 80/20 split
+      B. (train + test) bytes 或 path               — pre-split (實驗室用預處理結果時)
+    給路徑時:caller 自己擁有那些檔,run_pipeline 不會刪;給 bytes 時才寫暫存檔並負責刪除。
 
     options keys (都可省):
       target / timeSeries / metric / fast / timeLimit / skipTabular / skipDl / noNas
@@ -97,28 +101,37 @@ def run_pipeline(
             try: on_progress(ev)
             except Exception: pass
 
-    # 驗證:必須擇一
-    if csv_bytes is None and not (train_csv_bytes and test_csv_bytes):
-        return {"ok": False, "error": "需提供 csv_bytes 或 (train_csv_bytes + test_csv_bytes)"}
+    # 驗證:必須擇一 (bytes 或 path 皆可)
+    have_single = csv_bytes is not None or csv_path is not None
+    have_split = (train_csv_bytes is not None or train_csv_path is not None) and \
+                 (test_csv_bytes is not None or test_csv_path is not None)
+    if not have_single and not have_split:
+        return {"ok": False, "error": "需提供 csv_bytes/csv_path 或 (train + test)"}
 
-    # 寫 temp 檔
+    # 準備餵給子行程的 CSV 檔。只把「我們自己寫的暫存檔」記進 tmp_files,最後才刪;
+    # caller 直接給的路徑不記、不刪 (那是 caller 的檔)。
     tmp_files: list[str] = []
-    if csv_bytes is not None:
-        suffix = os.path.splitext(file_name or "input.csv")[1] or ".csv"
-        with tempfile.NamedTemporaryFile(mode="wb", suffix=suffix, delete=False, prefix="daniel_") as tf:
-            tf.write(csv_bytes)
-            tmp_csv = tf.name
-        tmp_files.append(tmp_csv)
+
+    def _bytes_to_tmp(data: bytes, prefix: str, suffix: str = ".csv") -> str:
+        with tempfile.NamedTemporaryFile(mode="wb", suffix=suffix, delete=False, prefix=prefix) as tf:
+            tf.write(data)
+            path = tf.name
+        tmp_files.append(path)
+        return path
+
+    if have_single:
+        if csv_path is not None:
+            tmp_csv = csv_path
+        else:
+            suffix = os.path.splitext(file_name or "input.csv")[1] or ".csv"
+            tmp_csv = _bytes_to_tmp(csv_bytes, "daniel_", suffix)
         tmp_train = tmp_test = None
     else:
         base = os.path.splitext(train_file_name or "preprocessed.csv")[0]
-        with tempfile.NamedTemporaryFile(mode="wb", suffix=".csv", delete=False, prefix=f"daniel_{base}_train_") as tf:
-            tf.write(train_csv_bytes)
-            tmp_train = tf.name
-        with tempfile.NamedTemporaryFile(mode="wb", suffix=".csv", delete=False, prefix=f"daniel_{base}_test_") as tf:
-            tf.write(test_csv_bytes)
-            tmp_test = tf.name
-        tmp_files.extend([tmp_train, tmp_test])
+        tmp_train = train_csv_path if train_csv_path is not None \
+            else _bytes_to_tmp(train_csv_bytes, f"daniel_{base}_train_")
+        tmp_test = test_csv_path if test_csv_path is not None \
+            else _bytes_to_tmp(test_csv_bytes, f"daniel_{base}_test_")
         tmp_csv = None
 
     # 組指令
@@ -149,9 +162,8 @@ def run_pipeline(
     t0 = time.time()
     result_dict: dict[str, Any] | None = None
 
-    env = os.environ.copy()
-    env["PYTHONIOENCODING"] = "utf-8"
-    env["PYTHONUNBUFFERED"] = "1"
+    from api.bootstrap import subprocess_env
+    env = subprocess_env()
 
     proc = subprocess.Popen(
         cmd,

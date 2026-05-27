@@ -2,8 +2,16 @@
 可配置 MLP（供 NAS 搜尋與獨立訓練使用）。
 架構完全由外部傳入，不預設層數、寬度或激活函式。
 """
-import torch
-import torch.nn as nn
+try:
+    import torch
+    import torch.nn as nn
+    _HAS_TORCH = True
+    _TorchBase = nn.Module
+except ImportError:
+    torch = nn = None  # type: ignore
+    _HAS_TORCH = False
+    class _TorchBase:  # type: ignore
+        """Stub base when torch is unavailable."""
 
 ACT_MAP = {
     "relu": nn.ReLU,
@@ -12,7 +20,7 @@ ACT_MAP = {
 }
 
 
-class MLP(nn.Module):
+class MLP(_TorchBase):
     """
     Parameters
     ----------

@@ -232,6 +232,7 @@ def run(
     test_size = float(options.get("testSize", 0.2))
     random_state = int(options.get("randomState", 42))
     task_override = options.get("taskType")
+    class_weight_balanced = bool(options.get("classWeightBalanced", False))
 
     # 1. Build feature matrix (handle date-derived features)
     X_df, feature_names = _build_features(df, target, features)
@@ -274,7 +275,8 @@ def run(
 
     # 5-8. Standardize + train + sort (與 run_prepared 共用)
     return _train_all(X_train, X_test, y_train, y_test, feature_names, target,
-                      task_type, algorithms, _emit, random_state, cancel_token=cancel_token)
+                      task_type, algorithms, _emit, random_state, cancel_token=cancel_token,
+                      class_weight_balanced=class_weight_balanced)
 
 
 def run_prepared(
@@ -320,12 +322,14 @@ def run_prepared(
         y_test = np.asarray(y_test).astype(str)
 
     random_state = int(options.get("randomState", 42))
+    class_weight_balanced = bool(options.get("classWeightBalanced", False))
 
     _emit({"type": "log", "msg": f"使用已預處理資料: 訓練 {len(X_train)} 筆 / 測試 {len(X_test)} 筆, {X_train.shape[1]} 個特徵", "level": "success"})
     _emit({"type": "log", "msg": f"任務類型: {'回歸' if task_type == 'regression' else '分類'}", "level": "info"})
 
     return _train_all(X_train, X_test, y_train, y_test, feature_names, target,
-                      task_type, algorithms, _emit, random_state, cancel_token=cancel_token)
+                      task_type, algorithms, _emit, random_state, cancel_token=cancel_token,
+                      class_weight_balanced=class_weight_balanced)
 
 
 # ============================================================
@@ -343,8 +347,19 @@ def _train_all(
     _emit: Callable[[dict], None],
     random_state: int = 42,
     cancel_token=None,   # threading.Event;每個演算法之間檢查,set 後 break 早退
+    class_weight_balanced: bool = False,
 ) -> list[tuple[dict[str, Any], Any, StandardScaler, pd.DataFrame]]:
-    # 5. Standardize
+    # 5. Outlier clipping (IQR-based, fit on training set only)
+    #    防止測試集中的極端異常值（感測器錯誤等）讓線性模型產生災難性預測
+    q25 = np.percentile(X_train, 25, axis=0)
+    q75 = np.percentile(X_train, 75, axis=0)
+    iqr_range = q75 - q25
+    clip_lo = q25 - 3.0 * iqr_range
+    clip_hi = q75 + 3.0 * iqr_range
+    X_train = np.clip(X_train, clip_lo, clip_hi)
+    X_test  = np.clip(X_test,  clip_lo, clip_hi)
+
+    # 5b. Standardize (後接 IQR clip，不再被離群值拉偏)
     scaler = StandardScaler()
     X_train_norm = scaler.fit_transform(X_train)
     X_test_norm = scaler.transform(X_test)
@@ -394,6 +409,7 @@ def _train_all(
             bundle, estimator = _train_one(
                 key, task_type, X_train_norm, X_test_norm, y_train, y_test,
                 feature_names, target, feature_stats, scaler, random_state,
+                class_weight_balanced=class_weight_balanced,
             )
             results.append((bundle, estimator, scaler, X_test_df))
             score = bundle["metrics"].get("testScore", 0.0)
@@ -427,9 +443,19 @@ def _train_one(
     feature_stats: list[dict[str, float]],
     scaler: StandardScaler,
     random_state: int = 42,
+    class_weight_balanced: bool = False,
 ) -> tuple[dict[str, Any], Any]:
     t0 = time.perf_counter()
     estimator = _algo_factory(key, task_type, random_state)
+
+    # 不平衡資料：嘗試設定 class_weight='balanced'
+    # 支援的分類器：LogisticRegression, DecisionTree, RandomForest, SVC, LGBM 等
+    # 不支援的（GradientBoosting, XGBoost, KNN…）會靜默跳過
+    if class_weight_balanced and task_type == "classification":
+        try:
+            estimator.set_params(class_weight="balanced")
+        except (ValueError, TypeError):
+            pass  # 該估算器不支援 class_weight，忽略
 
     # XGBoost 分類器要求標籤是 0..n-1 連續整數,其他分類器內部會自處理。
     # 用 LabelEncoder 包一層:訓練時編碼、預測時還原。
@@ -449,6 +475,14 @@ def _train_one(
     train_time_ms = (time.perf_counter() - t0) * 1000
     infer_latency_ms = pred_elapsed_ms / max(len(X_test), 1)
 
+    # 取 predict_proba（AUC 計算用）；失敗時靜默忽略
+    test_proba: np.ndarray | None = None
+    if task_type == "classification" and hasattr(estimator, "predict_proba"):
+        try:
+            test_proba = estimator.predict_proba(X_test)
+        except Exception:
+            test_proba = None
+
     # XGBoost 預測值是編碼空間,decode 回原始標籤,後續 metrics / bundle 才能對齊 y_train / y_test
     if label_encoder is not None:
         train_pred = label_encoder.inverse_transform(train_pred)
@@ -457,7 +491,7 @@ def _train_one(
     metrics = (
         _regression_metrics(y_test, test_pred, y_train, train_pred)
         if task_type == "regression"
-        else _classification_metrics(y_test, test_pred, y_train, train_pred)
+        else _classification_metrics(y_test, test_pred, y_train, train_pred, test_proba=test_proba)
     )
 
     importance = _feature_importance(estimator, X_test, y_test, len(feature_names))
@@ -631,7 +665,12 @@ def _regression_metrics(y_true: np.ndarray, y_pred: np.ndarray, y_train_true: np
     }
 
 
-def _classification_metrics(y_true: np.ndarray, y_pred: np.ndarray, y_train_true: np.ndarray, y_train_pred: np.ndarray) -> dict[str, Any]:
+def _classification_metrics(
+    y_true: np.ndarray, y_pred: np.ndarray,
+    y_train_true: np.ndarray, y_train_pred: np.ndarray,
+    test_proba: "np.ndarray | None" = None,
+) -> dict[str, Any]:
+    from sklearn.metrics import roc_auc_score as _roc_auc
     test_acc = float((y_pred == y_true).mean()) if len(y_true) else 0.0
     train_acc = float((y_train_pred == y_train_true).mean()) if len(y_train_true) else 0.0
     classes = sorted(set(list(y_true) + list(y_train_true)), key=lambda x: str(x))
@@ -646,6 +685,17 @@ def _classification_metrics(y_true: np.ndarray, y_pred: np.ndarray, y_train_true
         recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
         f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0.0
 
+    # ROC-AUC：二元用 proba[:,1]；多類用 ovr macro-average
+    auc: float = 0.0
+    if test_proba is not None and len(classes) >= 2:
+        try:
+            if len(classes) == 2:
+                auc = float(_roc_auc(y_true, test_proba[:, 1]))
+            else:
+                auc = float(_roc_auc(y_true, test_proba, multi_class="ovr", average="macro"))
+        except Exception:
+            auc = 0.0
+
     return {
         "taskType": "classification",
         "testAccuracy": test_acc,
@@ -653,6 +703,7 @@ def _classification_metrics(y_true: np.ndarray, y_pred: np.ndarray, y_train_true
         "precision": float(precision),
         "recall": float(recall),
         "f1": float(f1),
+        "auc": auc,          # ← 新增 ROC-AUC
         "classes": [str(c) for c in classes],
         "testScore": test_acc,
     }
@@ -694,5 +745,5 @@ def _to_jsonable_list(arr) -> list:
         if isinstance(v, float) and (np.isnan(v) or np.isinf(v)):
             out.append(None)
         else:
-            out.append(v)
+                        out.append(v)
     return out

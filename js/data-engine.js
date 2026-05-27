@@ -5,6 +5,8 @@ const DataEngine = {
   currentDataset: null,
   // All loaded datasets
   datasets: [],
+  // Last audit report from Python backend (set by renderAuditReport in app.js)
+  lastAuditReport: null,
 
   // ---- CSV PARSER ----
   parseCSV(text, delimiter) {
@@ -449,6 +451,68 @@ const DataEngine = {
         type: 'success', action: 'interaction', colName: `${top2[0].name} × ${top2[1].name}`, time: timeStr,
         text: `已自動產生交互特徵: <strong class="text-accent-400">${top2[0].name} × ${top2[1].name}</strong>`,
         selectedMethod: 'multiply',
+      });
+    }
+
+    // ---- Merge real audit report (from Python backend) ----
+    const audit = this.lastAuditReport;
+    if (audit && !audit.error) {
+      const seenCols = new Set(logs.map(l => l.colName));
+
+      // 1. Sentinel values (e.g. -7/-8/-9 in financial data)
+      (audit.sentinel_summary || []).forEach(s => {
+        const colName = s.column || s.col || String(s);
+        const vals = s.sentinel_values ? s.sentinel_values.join(', ') : '哨兵值';
+        const cnt = s.count != null ? ` (${s.count} 筆)` : '';
+        logs.push({
+          type: 'warning', action: 'sentinel', colName, time: timeStr,
+          text: `<strong class="text-warning-400">${colName}</strong> 欄位偵測到哨兵值 [${vals}]${cnt}，已自動替換為 NaN`,
+          selectedMethod: 'replace_nan',
+          _fromApi: true,
+        });
+        seenCols.add(colName);
+      });
+
+      // 2. Real missing value data (override mock if higher quality)
+      const missingSummary = audit.missing_summary || {};
+      Object.entries(missingSummary).forEach(([col, info]) => {
+        if (seenCols.has(col)) return;  // already logged by local analysis
+        const pct = info.pct != null ? info.pct.toFixed(1) : (info.missing_pct != null ? info.missing_pct.toFixed(1) : '?');
+        const count = info.count || info.missing_count || '?';
+        const isHigh = parseFloat(pct) >= 50;
+        logs.push({
+          type: isHigh ? 'warning' : 'success',
+          action: isHigh ? 'drop_column' : 'fill_missing',
+          colName: col, time: timeStr,
+          text: isHigh
+            ? `<strong class="text-warning-400">${col}</strong> 欄位缺失率 ${pct}%（${count} 筆），建議移除`
+            : `<strong class="text-accent-400">${col}</strong> 欄位有 ${pct}% 缺失值（${count} 筆），已填補`,
+          selectedMethod: isHigh ? 'drop_column' : 'median',
+          _fromApi: true,
+        });
+        seenCols.add(col);
+      });
+
+      // 3. Dataset-level stats as info entries
+      if (audit.total_rows != null) {
+        logs.unshift({
+          type: 'info', action: 'dataset_info', colName: '資料集', time: timeStr,
+          text: `資料集: <strong class="text-primary-400">${audit.total_rows}</strong> 列 × <strong class="text-primary-400">${audit.total_columns}</strong> 欄，完整欄位 ${audit.perfect_columns ?? '—'} 個`,
+          selectedMethod: null,
+          _fromApi: true,
+        });
+      }
+
+      // 4. API warnings not yet shown
+      (audit.warnings || []).forEach(w => {
+        // Avoid duplicating sentinel/missing already shown above
+        if (w.includes('哨兵') || w.includes('sentinel') || w.toLowerCase().includes('sentinel')) return;
+        logs.push({
+          type: 'warning', action: 'api_warning', colName: '後端', time: timeStr,
+          text: `<span class="text-warning-300">${w}</span>`,
+          selectedMethod: null,
+          _fromApi: true,
+        });
       });
     }
 

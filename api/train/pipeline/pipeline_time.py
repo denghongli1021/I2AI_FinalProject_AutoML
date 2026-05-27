@@ -24,8 +24,22 @@ import warnings
 
 import numpy as np
 import optuna
-import torch
-import torch.nn as nn
+try:
+    import torch
+    import torch.nn as nn
+    _HAS_TORCH = True
+    _TorchBase = nn.Module
+    _TorchDataset = torch.utils.data.Dataset
+    # 可重現性 (從 daniel branch 合入)
+    torch.backends.cudnn.benchmark = False
+    torch.backends.cudnn.deterministic = True
+except ImportError:
+    torch = nn = None  # type: ignore
+    _HAS_TORCH = False
+    class _TorchBase:  # type: ignore
+        pass
+    class _TorchDataset:  # type: ignore
+        pass
 from scipy.optimize import minimize
 from scipy.special import softmax
 from sklearn.ensemble import ExtraTreesRegressor, RandomForestRegressor
@@ -33,7 +47,7 @@ from sklearn.linear_model import Ridge
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from sklearn.model_selection import KFold
 from sklearn.neighbors import KNeighborsRegressor
-from sklearn.preprocessing import StandardScaler
+from sklearn.preprocessing import RobustScaler, StandardScaler
 from tqdm import tqdm
 
 import lightgbm as lgb
@@ -145,7 +159,7 @@ def reg_metric_direction(metric: str) -> str:
 
 # ── 回歸資料載入（y 為 float） ───────────────────────────────────────────────
 
-class _RegDataset(torch.utils.data.Dataset):
+class _RegDataset(_TorchDataset):
     def __init__(self, X: np.ndarray, y: np.ndarray = None):
         self.X = torch.tensor(X, dtype=torch.float32)
         self.y = torch.tensor(y, dtype=torch.float32) if y is not None else None
@@ -1047,6 +1061,15 @@ def run_regression(
     y_train = np.asarray(y_train, dtype=np.float32).ravel()
     direction = reg_metric_direction(metric)
 
+    # RobustScaler uses median/IQR instead of mean/std, so extreme outliers in training
+    # (e.g. SodiumConcentration has 5 values >1000 vs median~35) do not distort the scale.
+    _y_scaler = RobustScaler()
+    y_scaled = _y_scaler.fit_transform(y_train.reshape(-1, 1)).ravel().astype(np.float32)
+    _center = _y_scaler.center_[0]
+    _scale  = _y_scaler.scale_[0]
+    print(f"  [TargetScale] median={_center:.4g}  IQR={_scale:.4g}"
+          f"  range=[{y_train.min():.4g}, {y_train.max():.4g}]")
+
     all_oof = []
     all_test = []
     all_masks = []
@@ -1069,7 +1092,7 @@ def run_regression(
             metric=metric,
             per_model_timeout=_catboost_timeout,
         )
-        scout_scores, scout_best_params = scout.scout(X_train, y_train,
+        scout_scores, scout_best_params = scout.scout(X_train, y_scaled,
                                                       scout_trials=cfg["scout_trials"],
                                                       global_cfg=cfg)
         # 篩選：依方向排序，保留前 2/3 且不偏離 best 太多
@@ -1093,6 +1116,11 @@ def run_regression(
         dropped = [n for n, _ in ranked if n not in selected]
         print(f"  [Scout] 排名: " + "  ".join(f"{n}={s:.4f}" for n, s in ranked))
         print(f"  [Scout] 保留 {len(selected)}/{len(ranked)}: {selected}  (淘汰: {dropped})")
+
+        # Ridge 保底：確保線性基準模型始終參與 Ensemble
+        if "ridge" not in selected and any(n == "ridge" for n, _ in ranked):
+            selected.append("ridge")
+            print("  [Scout] Ridge 強制加入（保底基準模型）")
 
         if not selected:
             print("  [Scout] 無模型通過篩選，退化使用全部模型")
@@ -1118,7 +1146,7 @@ def run_regression(
                 metric=metric,
                 per_model_timeout={"catboost": 1200},  # Full HPO: 20 min
             )
-            tabular_configs = hpo.run(X_train, y_train, global_cfg=cfg,
+            tabular_configs = hpo.run(X_train, y_scaled, global_cfg=cfg,
                                       warm_start=scout_best_params,
                                       locked_feature_sets=locked_fs)
     else:
@@ -1126,16 +1154,35 @@ def run_regression(
 
     # ── [3-6] DL ─────────────────────────────────────────────────────────────
     if not skip_dl:
-        # [4] TSNet 訓練 HPO（架構固定為 _DEFAULT_TSNET_ARCH）
+        # [3.5] TSNet NAS（回歸架構搜尋）
+        if budget.should_skip(0.25):
+            print("\n[3.5] 時間預算緊迫，TSNet NAS 跳過，使用預設架構")
+            best_tsnet_arch = _DEFAULT_TSNET_ARCH
+        else:
+            print("\n[3.5] TSNet NAS（時序回歸架構搜尋）...")
+            from src.nas import TSNASSearcher
+            _folds_nas = get_ts_folds(len(X_train), n_splits=5)
+            _tr_nas, _ = _folds_nas[0]
+            _fb_nas = FeatureBuilder(feature_set="raw", global_cfg=cfg)
+            _X_nas = _fb_nas.fit_transform(X_train[_tr_nas])
+            _ts_nas = TSNASSearcher(
+                max_blocks=4, channels=64,
+                n_supernet_epochs=max(5, cfg.get("tsnet_trials", 6) // 2),
+                n_candidates=10, n_evolution_rounds=2,
+            )
+            best_tsnet_arch = _ts_nas.search(_X_nas, y_scaled[_tr_nas], n_classes=1)
+            del _X_nas, _fb_nas, _ts_nas
+
+        # [4] TSNet 訓練 HPO（arch 改用 NAS 搜尋結果）
         if budget.should_skip(0.20):
             print("\n[4] 時間預算緊迫，跳過 TSNet HPO")
             tsnet_configs = []
         else:
-            print(f"\n[4] TSNet 訓練 HPO ({cfg['tsnet_trials']} trials, arch 固定) ...")
-            tsnet_hpo = DLRegHPO(model_name="tsnet", arch_fixed=_DEFAULT_TSNET_ARCH,
+            print(f"\n[4] TSNet 訓練 HPO ({cfg['tsnet_trials']} trials, arch 來自 NAS) ...")
+            tsnet_hpo = DLRegHPO(model_name="tsnet", arch_fixed=best_tsnet_arch,
                                  n_trials=cfg["tsnet_trials"], top_k=cfg["tsnet_top_k"],
                                  metric=metric)
-            tsnet_configs = tsnet_hpo.run(X_train, y_train, global_cfg=cfg)
+            tsnet_configs = tsnet_hpo.run(X_train, y_scaled, global_cfg=cfg)
 
         # [5] TCN HPO
         if budget.should_skip(0.20):
@@ -1145,7 +1192,7 @@ def run_regression(
             print(f"\n[5] TCN HPO ({cfg['dl_trials']} trials) ...")
             tcn_hpo = DLRegHPO(model_name="tcn", n_trials=cfg["dl_trials"],
                                top_k=cfg["dl_top_k"], metric=metric)
-            tcn_configs = tcn_hpo.run(X_train, y_train, global_cfg=cfg)
+            tcn_configs = tcn_hpo.run(X_train, y_scaled, global_cfg=cfg)
 
         # [6] PatchTST HPO
         if budget.should_skip(0.20):
@@ -1155,7 +1202,7 @@ def run_regression(
             print(f"\n[6] PatchTST HPO ({cfg['dl_trials']} trials) ...")
             patchtst_hpo = DLRegHPO(model_name="patchtst", n_trials=cfg["dl_trials"],
                                     top_k=cfg["dl_top_k"], metric=metric)
-            patchtst_configs = patchtst_hpo.run(X_train, y_train, global_cfg=cfg)
+            patchtst_configs = patchtst_hpo.run(X_train, y_scaled, global_cfg=cfg)
 
         dl_configs = tsnet_configs + tcn_configs + patchtst_configs
     else:
@@ -1180,7 +1227,8 @@ def run_regression(
 
     print(f"\n[7] 5-Fold TimeSeries CV — {len(all_configs)} 個模型 config ...")
     for i, config in enumerate(all_configs):
-        tag = f"reg_{config['model_name']}_{config['feature_set']}_c{i}".replace("/", "_")
+        # _yrs suffix: robust-scaled predictions (RobustScaler); invalidates old StandardScaler cache
+        tag = f"reg_{config['model_name']}_{config['feature_set']}_c{i}_yrs".replace("/", "_")
         oof_path = os.path.join(artifacts_dir, f"{tag}_oof.npy")
         tst_path = os.path.join(artifacts_dir, f"{tag}_test.npy")
         mask_path = os.path.join(artifacts_dir, f"{tag}_mask.npy")
@@ -1191,7 +1239,7 @@ def run_regression(
             counts = np.load(mask_path)
         else:
             oof, test_pred, counts = run_reg_cv(
-                config, X_train, y_train, X_test,
+                config, X_train, y_scaled, X_test,
                 device=DEVICE, tag=tag, global_cfg=cfg, metric=metric,
             )
             np.save(mask_path, counts)
@@ -1200,18 +1248,46 @@ def run_regression(
         all_masks.append(counts)
         model_tags.append(tag)
 
+    # ── Quality filter: drop models with catastrophically bad OOF R² ────────
+    # R² is scale-invariant, so we can compute it directly on y_scaled predictions.
+    _MIN_OOF_R2 = -2.0
+    _keep = []
+    for _i, (_oof_i, _mask_i) in enumerate(zip(all_oof, all_masks)):
+        _common = _mask_i > 0
+        _r2_i = r2_score(y_scaled[_common], _oof_i[_common]) if _common.sum() >= 2 else 0.0
+        if _r2_i < _MIN_OOF_R2:
+            print(f"  [QFilter] Dropping {model_tags[_i]} — OOF R²={_r2_i:.4f} (< {_MIN_OOF_R2})")
+            _keep.append(False)
+        else:
+            _keep.append(True)
+    if not all(_keep):
+        all_oof    = [o for o, k in zip(all_oof,    _keep) if k]
+        all_test   = [t for t, k in zip(all_test,   _keep) if k]
+        all_masks  = [m for m, k in zip(all_masks,  _keep) if k]
+        model_tags = [t for t, k in zip(model_tags, _keep) if k]
+    if not all_oof:
+        raise RuntimeError("所有 model config 被 quality filter 排除！")
+
     # ── [8] Ensemble A ───────────────────────────────────────────────────────
     print("\n[8] Ensemble A — Nelder-Mead Weighted Blending (RMSE-min) ...")
     blender = NelderMeadRegBlender(n_restarts=cfg["blend_restarts"], metric=metric)
-    blender.fit(all_oof, y_train, oof_masks=all_masks)
-    test_blend = blender.predict(all_test)
+    blender.fit(all_oof, y_scaled, oof_masks=all_masks)
+    # Inverse-transform from scaled space back to original target scale
+    test_blend = _y_scaler.inverse_transform(
+        blender.predict(all_test).reshape(-1, 1)
+    ).ravel()
 
     # ── [9] Ensemble B ───────────────────────────────────────────────────────
     print("\n[9] Ensemble B — Meta-Learner Stacking ...")
     stacker = MetaLearnerRegStacker(n_meta_trials=cfg["meta_trials"], metric=metric,
                                     n_samples=len(y_train))
-    stacker.fit(all_oof, y_train, X_orig=X_train, oof_masks=all_masks)
-    test_stack = stacker.predict(all_test, X_orig=X_test)
+    stacker.fit(all_oof, y_scaled, X_orig=X_train, oof_masks=all_masks)
+    test_stack = _y_scaler.inverse_transform(
+        stacker.predict(all_test, X_orig=X_test).reshape(-1, 1)
+    ).ravel()
+
+    # Inverse-transform OOF to original scale for result consistency
+    all_oof = [_y_scaler.inverse_transform(o.reshape(-1, 1)).ravel() for o in all_oof]
 
     return PipelineRegResult(
         test_blend=test_blend,

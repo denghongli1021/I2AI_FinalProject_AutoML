@@ -13,7 +13,11 @@ AutoML Backend API — Routes only
 
 from __future__ import annotations
 
+# 必須最先 import — 處理 Windows UTF-8 終端 + 載入 .env,後面 db.py 才讀得到 DATABASE_URL
+from api import bootstrap  # noqa: F401
+
 import asyncio
+import io
 import json
 import platform
 import queue
@@ -21,24 +25,7 @@ import sys
 import threading
 import time
 import uuid
-from typing import Any
-
-# Windows console defaults to cp950 — 強制 utf-8 才不會被隊友 module 裡的 emoji 噴掉
-if hasattr(sys.stdout, "reconfigure"):
-    try:
-        sys.stdout.reconfigure(encoding="utf-8")
-        sys.stderr.reconfigure(encoding="utf-8")
-    except Exception:
-        pass
-
-# 載入 .env (本地開發用,Render 已經有環境變數注入機制)
-try:
-    from dotenv import load_dotenv
-    load_dotenv()
-except ImportError:
-    pass
-
-import io
+from typing import Any, Optional
 
 import numpy as np
 from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile
@@ -197,6 +184,9 @@ class TransformRequest(BaseModel):
     datasetId: str
     target: str
     testSize: float = 0.2
+    useMice: bool = False           # MICE (IterativeImputer) 補值開關
+    useMiSelection: bool = False    # MI 互資訊特徵選擇開關
+    miThreshold: float = 0.01       # MI 篩選門檻
 
 
 @app.post("/api/preprocess/transform")
@@ -214,6 +204,9 @@ def preprocess_transform_endpoint(
     try:
         X_train, X_test, y_train, y_test, fitted = preprocess_for_training(
             df, req.target, test_size=req.testSize,
+            use_mice=req.useMice,
+            use_mi_selection=req.useMiSelection,
+            mi_threshold=req.miThreshold,
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"transform 失敗: {e}")
@@ -224,6 +217,9 @@ def preprocess_transform_endpoint(
         feature_names=feature_names,
         X_train=X_train, X_test=X_test, y_train=y_train, y_test=y_test,
         user=user, db=db, test_size=req.testSize,
+        use_mice=req.useMice,
+        use_mi_selection=req.useMiSelection,
+        mi_threshold=req.miThreshold,
     )
 
     # Router 分類預覽 (用於前端顯示哪些欄位被分到哪一桶)
@@ -251,6 +247,9 @@ def preprocess_transform_endpoint(
         "testSize": int(len(X_test)),
         "originalFeatureCount": int(df.shape[1] - 1),
         "transformedFeatureCount": int(X_train.shape[1]),
+        # v3 透明度:實際自動觸發的進階特徵工程 + MI 篩選結果
+        "appliedFeatureSteps": getattr(fitted, "applied_feature_steps_", []),
+        "miSelection": getattr(fitted, "mi_selection_", None),
     }
 
 
@@ -644,9 +643,27 @@ async def train_pipeline_stream_endpoint(
             pp_target = pp_entry["target"]
             pp_obj = pp_entry["preprocessor"]
 
-            train_df = X_train_df.copy()
-            train_df[pp_target] = list(y_train)
-            buf_tr = _io.StringIO(); train_df.to_csv(buf_tr, index=False)
+            # 大寬矩陣 (高基數欄 One-Hot 後動輒數千欄) 直接 df.to_csv(檔案路徑) 串流寫到暫存檔,
+            # 不要 .copy() / StringIO / .encode() — 那會把整份矩陣在記憶體裡多複製好幾份 → OOM
+            # (7375 欄 × 3 萬列一份就 1.68 GiB)。寫完即 del 釋放,讓峰值只剩「載入的那一份」。
+            # 暫存檔路徑直接傳給 run_pipeline (它支援路徑模式),省掉 bytes 來回。
+            import tempfile as _tempfile
+            _safe = bundle_safe_name(pp_target)
+
+            def _df_to_temp_csv(frame, prefix):
+                with _tempfile.NamedTemporaryFile(
+                    mode="w", suffix=".csv", delete=False,
+                    prefix=prefix, encoding="utf-8", newline="",
+                ) as _tf:
+                    _path = _tf.name
+                frame.to_csv(_path, index=False)
+                return _path
+
+            # train:就地加上 target 欄 (剛 unpickle 出來、無人共用,可安全 mutate)
+            X_train_df[pp_target] = list(y_train)
+            train_csv_path = _df_to_temp_csv(X_train_df, f"daniel_{_safe}_train_")
+            del X_train_df
+            pp_entry["X_train"] = None
 
             # 決定 test CSV:有 predict_csv 時用使用者上傳的 (套用同一個 preprocessor)
             predict_input_for_job: bytes | None = None
@@ -659,31 +676,35 @@ async def train_pipeline_stream_endpoint(
                     transformed = pp_obj.transform(predict_feat_raw)
                     if hasattr(transformed, "toarray"):
                         transformed = transformed.toarray()
-                    transformed_df = _pd.DataFrame(transformed, columns=list(X_train_df.columns))
+                    # train/test 同一個 preprocessor → 欄位一致,用 X_test 的欄名即可
+                    transformed_df = _pd.DataFrame(transformed, columns=list(X_test_df.columns))
                 except Exception as e:
                     raise HTTPException(
                         status_code=400,
                         detail=f"套用預處理到 predict CSV 失敗 — 欄位需與原始訓練資料一致: {e}",
                     )
-                buf_te = _io.StringIO()
-                transformed_df.to_csv(buf_te, index=False)
+                test_csv_path = _df_to_temp_csv(transformed_df, f"daniel_{_safe}_test_")
+                del transformed_df
                 predict_input_for_job = predict_csv_bytes
             else:
-                test_df = X_test_df.copy()
-                test_df[pp_target] = list(y_test)
-                buf_te = _io.StringIO(); test_df.to_csv(buf_te, index=False)
+                X_test_df[pp_target] = list(y_test)
+                test_csv_path = _df_to_temp_csv(X_test_df, f"daniel_{_safe}_test_")
+            del X_test_df
+            pp_entry["X_test"] = None
 
             pp_options = dict(base_options)
             pp_options["target"] = pp_target
 
             jobs.append({
                 "label": "預處理", "source": "preprocessed",
-                "train_csv_bytes": buf_tr.getvalue().encode("utf-8"),
-                "test_csv_bytes": buf_te.getvalue().encode("utf-8"),
-                "train_file_name": f"{bundle_safe_name(pp_target)}.csv",
+                "train_csv_path": train_csv_path,
+                "test_csv_path": test_csv_path,
+                "train_file_name": f"{_safe}.csv",
                 "options": pp_options,
                 "preprocessorId": preprocessorId,
                 "predict_input_bytes": predict_input_for_job,
+                # run_pipeline 不會刪 caller 給的路徑 → 由 worker 的 finally 收尾刪除
+                "_temp_paths": [train_csv_path, test_csv_path],
             })
 
     if not jobs:
@@ -753,7 +774,17 @@ async def train_pipeline_stream_endpoint(
                     on_prog = lambda ev, _label=label: q.put(prefix(ev, _label))
                     if cancel_token.is_set():
                         break
-                    if "train_csv_bytes" in job:
+                    if "train_csv_path" in job:
+                        # 路徑模式 (預處理大矩陣):CSV 已串流寫好,只傳路徑,不在記憶體扛 bytes
+                        r = run_daniel_pipeline(
+                            train_csv_path=job["train_csv_path"],
+                            test_csv_path=job["test_csv_path"],
+                            train_file_name=job["train_file_name"],
+                            options=job["options"],
+                            on_progress=on_prog,
+                            cancel_token=cancel_token,
+                        )
+                    elif "train_csv_bytes" in job:
                         r = run_daniel_pipeline(
                             train_csv_bytes=job["train_csv_bytes"],
                             test_csv_bytes=job["test_csv_bytes"],
@@ -774,6 +805,42 @@ async def train_pipeline_stream_endpoint(
                     r["dataSourceLabel"] = label
                     if job.get("preprocessorId"):
                         r["preprocessorId"] = job["preprocessorId"]
+
+                    # ── SHAP 支援：最佳 tabular 模型存 storage ─────────────────
+                    if r.get("ok") and r.get("modelBytes"):
+                        try:
+                            import pickle as _pickle
+                            import base64 as _b64
+                            import pandas as _pd
+                            _raw = _b64.b64decode(r["modelBytes"].encode("ascii"))
+                            _m   = _pickle.loads(_raw)
+                            _estimator  = _m["estimator"]
+                            _X_test_np  = _m.get("X_test")          # np.ndarray
+                            _n_feat     = _X_test_np.shape[1] if _X_test_np is not None else 0
+                            _col_names  = [f"f{i}" for i in range(_n_feat)]
+                            _X_test_df  = (
+                                _pd.DataFrame(_X_test_np, columns=_col_names)
+                                if _X_test_np is not None else _pd.DataFrame()
+                            )
+                            _pbundle = {
+                                "type": "pipeline_best",
+                                "name": _m.get("model_tag", "pipeline_best"),
+                                "featureNames": _col_names,
+                                "featureSet": _m.get("feature_set"),
+                                "dataSource": job["source"],
+                            }
+                            _mid = storage.save_model(
+                                bundle=_pbundle, estimator=_estimator, scaler=None,
+                                X_test_df=_X_test_df, user=user, db=db,
+                                preprocessor_id=job.get("preprocessorId"),
+                            )
+                            r["bestModelId"] = _mid
+                            print(f"[Pipeline] 最佳模型存入 storage → modelId={_mid}", flush=True)
+                        except Exception as _me:
+                            import traceback as _tb
+                            print(f"[Pipeline] save_model 失敗（不影響分數）: {_me}", flush=True)
+                            _tb.print_exc()
+                    r.pop("modelBytes", None)   # 大 blob 不需傳進 SSE
 
                     # Option B:有 predict_input 且 pipeline 成功 → 寫 submission artifact
                     predict_input = job.get("predict_input_bytes")
@@ -798,6 +865,12 @@ async def train_pipeline_stream_endpoint(
             except Exception as e:
                 error_msg = str(e)
             finally:
+                # 清掉路徑模式 (預處理) 產生的暫存 CSV — run_pipeline 不刪 caller 的檔
+                import os as _os
+                for _job in jobs:
+                    for _p in _job.get("_temp_paths") or []:
+                        try: _os.unlink(_p)
+                        except Exception: pass
                 q.put(None)
 
         worker_thread = threading.Thread(target=worker, daemon=True)
@@ -929,6 +1002,16 @@ def list_models_endpoint(
     return {"models": storage.list_models(
         user, db, training_run_id=trainingRunId, dataset_id=datasetId, limit=limit,
     )}
+
+
+@app.delete("/api/models/{model_id}")
+def delete_model_endpoint(
+    model_id: str,
+    user = Depends(get_current_user),
+    db: DbSession = Depends(get_db),
+) -> dict[str, Any]:
+    """刪除指定模型（需為模型擁有者）。"""
+    return storage.delete_model(model_id, user, db)
 
 
 # 下載 pipeline 的 submission CSV
@@ -1249,110 +1332,148 @@ def predict_endpoint(
         )
 
     x = np.asarray([req.features], dtype=float)
-    x_norm = scaler.transform(x)
+    # Pipeline 最佳模型儲存時 scaler=None (模型內部已含前處理)
+    x_norm = scaler.transform(x) if scaler is not None else x
     pred = estimator.predict(x_norm)[0]
     # numpy types 不是 JSON serializable
     if hasattr(pred, "item"):
         pred = pred.item()
-    return {"prediction": pred}
+
+    # 分類任務額外回傳機率 (讓 What-If UI 可以顯示信心度)
+    proba: list[float] | None = None
+    classes: list | None = None
+    if hasattr(estimator, "predict_proba"):
+        try:
+            proba = estimator.predict_proba(x_norm)[0].tolist()
+            if hasattr(estimator, "classes_"):
+                classes = [c.item() if hasattr(c, "item") else c for c in estimator.classes_]
+        except Exception:
+            pass
+
+    return {"prediction": pred, "proba": proba, "classes": classes}
 
 
 # ============================================================
-# 4b. PREDICT (BATCH) — 上傳一份 CSV,用訓練好的模型整批預測,回傳含預測欄的 CSV
+# 4c. MODEL INFO — 回傳特徵名稱 + 統計值,供前端 What-If 初始化用
+# ============================================================
+@app.get("/api/model/{model_id}/info")
+def model_info_endpoint(
+    model_id: str,
+    user = Depends(get_current_user),
+    db: DbSession = Depends(get_db),
+) -> dict[str, Any]:
+    # Returns feature names, means, stds, min, max for What-If slider initialization.
+    # Works for Pipeline models (scaler=None) by computing stats from X_test.
+    entry = storage.get_model(model_id, user, db)
+    feature_names: list[str] = entry["featureNames"]
+    scaler = entry["scaler"]
+    n = len(feature_names)
+    if n == 0:
+        return {"featureNames": [], "featureMeans": [], "featureStds": [],
+                "featureMin": [], "featureMax": [], "taskType": "regression"}
+    if scaler is not None and hasattr(scaler, "mean_"):
+        means = scaler.mean_.tolist()
+        stds  = scaler.scale_.tolist()
+    else:
+        x_test = entry.get("X_test_df")
+        if x_test is not None and len(x_test) > 0:
+            import pandas as _pd
+            if not isinstance(x_test, _pd.DataFrame):
+                x_test = _pd.DataFrame(x_test)
+            means = x_test.mean().tolist()
+            stds  = x_test.std(ddof=1).fillna(1.0).tolist()
+        else:
+            means = [0.0] * n
+            stds  = [1.0] * n
+    feat_min = [m - 3 * s for m, s in zip(means, stds)]
+    feat_max = [m + 3 * s for m, s in zip(means, stds)]
+    bundle = entry.get("bundle", {})
+    task_type = bundle.get("taskType", "regression")
+    return {
+        "featureNames": feature_names,
+        "featureMeans": means,
+        "featureStds":  stds,
+        "featureMin":   feat_min,
+        "featureMax":   feat_max,
+        "taskType":     task_type,
+        "targetName":   bundle.get("targetName", ""),
+        "modelName":    bundle.get("name", model_id),
+    }
+
+# ============================================================
+# 4b. PREDICT (BATCH)
 # ============================================================
 @app.post("/api/predict/batch")
 async def predict_batch_endpoint(
     modelId: str = Form(...),
     file: UploadFile = File(...),
-    sampleFile: UploadFile | None = File(None),
+    sampleFile: Optional[UploadFile] = File(None),
     user = Depends(get_current_user),
     db: DbSession = Depends(get_db),
-) -> Response:
+):
     import pandas as pd
-
     entry = storage.get_model(modelId, user, db)
-    estimator = entry["estimator"]
-    scaler = entry["scaler"]
+    estimator     = entry["estimator"]
+    scaler        = entry["scaler"]
     feature_names = entry["featureNames"]
     preprocessor_id = entry.get("preprocessorId")
-    if estimator is None:
-        raise HTTPException(status_code=400, detail="此模型訓練失敗,無法預測")
 
-    raw = await file.read()
+    # --- parse uploaded CSV ---
     try:
-        df = pd.read_csv(io.BytesIO(raw))
+        raw = await file.read()
+        feat_df = pd.read_csv(io.BytesIO(raw))
     except Exception as e:
-        raise HTTPException(status_code=400, detail=f"CSV 解析失敗: {e}")
+        raise HTTPException(400, f"CSV \u89e3\u6790\u5931\u6557: {e}")
 
+    # --- apply preprocessor if any ---
     if preprocessor_id:
-        # ── 預處理來源的模型 ──
-        pp_entry = storage.get_preprocessor(preprocessor_id, user, db)
-        preprocessor = pp_entry["preprocessor"]
-        pp_target = pp_entry["target"]
-        # 丟掉目標欄 (CSV 若有帶),其餘原始欄位交給 preprocessor
-        feat_df = df.drop(columns=[pp_target], errors="ignore")
         try:
-            X_t = preprocessor.transform(feat_df)
-            if hasattr(X_t, "toarray"):
-                X_t = X_t.toarray()
-            X = np.asarray(X_t, dtype=float)
+            pp_entry = storage.get_preprocessor(preprocessor_id)
+            preprocessor = pp_entry["pipeline"]
+            pp_target    = pp_entry.get("target", "")
+            cols = [c for c in feat_df.columns if c != pp_target]
+            feat_df[cols] = preprocessor.transform(feat_df[cols])
         except Exception as e:
-            raise HTTPException(
-                status_code=400,
-                detail=f"套用預處理失敗 — test.csv 的欄位需與訓練資料的原始欄位一致: {e}",
-            )
-    else:
-        # ── 原始來源的模型 ── CSV 需直接含模型的特徵欄位
-        missing = [c for c in feature_names if c not in df.columns]
-        if missing:
-            preview = ", ".join(missing[:8]) + (" ..." if len(missing) > 8 else "")
-            raise HTTPException(
-                status_code=400,
-                detail=f"CSV 缺少 {len(missing)} 個模型需要的特徵欄位: {preview}",
-            )
-        X = df[feature_names].apply(pd.to_numeric, errors="coerce").fillna(0.0).to_numpy(dtype=float)
+            raise HTTPException(400, f"\u5957\u7528\u9810\u8655\u7406\u5931\u6557 \u2014 test.csv \u7684\u6b04\u4f4d\u9700\u8207\u8a13\u7df4\u8cc7\u6599\u7684\u539f\u59cb\u6b04\u4f4d\u4e00\u81f4: {e}")
+
+    # --- select & order features ---
+    missing = [f for f in feature_names if f not in feat_df.columns]
+    if missing:
+        raise HTTPException(400,
+            f"CSV \u7f3a\u5c11 {len(missing)} \u500b\u6a21\u578b\u9700\u8981\u7684\u7279\u5fb5\u6b04\u4f4d: {missing}")
+
+    X_t = feat_df[feature_names].values.astype(float)
+    X   = scaler.transform(X_t) if scaler is not None else X_t
 
     try:
-        X_norm = scaler.transform(X)
-        preds = estimator.predict(X_norm)
+        preds = estimator.predict(X)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"批次預測失敗: {e}")
+        raise HTTPException(500, f"\u6279\u6b21\u9810\u6e2c\u5931\u6557: {e}")
 
-    pred_list = [p.item() if hasattr(p, "item") else p for p in preds]
-
+    # --- build output ---
     if sampleFile is not None:
-        # ── 有給範本 submission ── 輸出比照範本格式 (第一欄=ID,第二欄=預測欄)
-        sample_raw = await sampleFile.read()
         try:
-            sample_df = pd.read_csv(io.BytesIO(sample_raw))
+            sample_raw = await sampleFile.read()
+            sub_df = pd.read_csv(io.BytesIO(sample_raw))
         except Exception as e:
-            raise HTTPException(status_code=400, detail=f"範本 submission 解析失敗: {e}")
-        sample_cols = list(sample_df.columns)
-        if len(sample_cols) < 2:
-            raise HTTPException(status_code=400, detail="範本 submission 至少需要 2 欄 (ID 欄 + 預測欄)")
-        id_col, pred_col = sample_cols[0], sample_cols[1]
-        if id_col not in df.columns:
-            raise HTTPException(
-                status_code=400,
-                detail=f"test.csv 缺少範本要求的 ID 欄位「{id_col}」",
-            )
-        out_df = pd.DataFrame()
-        out_df[id_col] = df[id_col].values
-        out_df[pred_col] = pred_list
-        filename = "submission.csv"
+            raise HTTPException(400, f"\u7bc4\u672c submission \u89e3\u6790\u5931\u6557: {e}")
+        if len(sub_df.columns) < 2:
+            raise HTTPException(400, "\u7bc4\u672c submission \u81f3\u5c11\u9700\u8981 2 \u6b04 (ID \u6b04 + \u9810\u6e2c\u6b04)")
+        id_col   = sub_df.columns[0]
+        pred_col = sub_df.columns[1]
+        if id_col not in feat_df.columns:
+            raise HTTPException(400,
+                f"test.csv \u7f3a\u5c11\u7bc4\u672c\u8981\u6c42\u7684 ID \u6b04\u4f4d\u300c{id_col}\u300d")
+        out_df = pd.DataFrame({id_col: feat_df[id_col], pred_col: preds})
+        out_name = "submission.csv"
     else:
-        # ── 沒給範本 ── 預測結果接回原始 CSV 最右邊
-        out_df = df.copy()
-        out_df["prediction"] = pred_list
-        base = (file.filename or "test.csv").rsplit(".", 1)[0]
-        filename = f"{base}_predicted.csv"
+        out_df   = feat_df[feature_names].copy()
+        out_df["prediction"] = preds
+        out_name = file.filename.replace(".csv", "_predicted.csv") if file.filename else "_predicted.csv"
 
-    buf = io.StringIO()
-    out_df.to_csv(buf, index=False)
-    csv_bytes = buf.getvalue().encode("utf-8-sig")  # BOM 讓 Excel 開中文不亂碼
-
+    csv_bytes = out_df.to_csv(index=False, encoding="utf-8-sig").encode("utf-8-sig")
     return Response(
         content=csv_bytes,
         media_type="text/csv; charset=utf-8",
-        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        headers={"Content-Disposition": f'attachment; filename="{out_name}"'},
     )

@@ -20,12 +20,20 @@ import os
 import math
 import json
 import time
+import shutil
 import numpy as np
 
 from src.config import DEVICE, ARTIFACTS_DIR
-from src.hpo import TabularHPO, DLHPO, MLPTrainHPO, TSNetTrainHPO
-from src.nas import MLPNASSearcher, TSNASSearcher
+from src.hpo import TabularHPO
 from src.train import run_cv
+try:
+    from src.hpo import DLHPO, MLPTrainHPO, TSNetTrainHPO
+    from src.nas import MLPNASSearcher, TSNASSearcher
+    _HAS_DL = True
+except Exception:
+    DLHPO = MLPTrainHPO = TSNetTrainHPO = None  # type: ignore
+    MLPNASSearcher = TSNASSearcher = None  # type: ignore
+    _HAS_DL = False
 from src.ensemble import NelderMeadBlender, MetaLearnerStacker
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -96,11 +104,12 @@ def get_cfg(fast: bool, n_samples: int = 10_000) -> dict:
             "scout_trials": 3,    "scout_val_size": 0.2, "scout_ratio": 2 / 3,
             "nas_epochs": 5,      "nas_candidates": 5,   "nas_rounds": 2,
             "mlp_train_trials": 3,"mlp_top_k": 1,
-            "dl_trials": 3,       "dl_top_k": 1,
+            "dl_trials": 3,       "transformer_trials": 15, "dl_top_k": 1,
             "meta_trials": 3,     "blend_restarts": 1,
             "n_repeats": 1,       "n_seeds": 1,
             "use_kpca": False,    "use_kmeans": False,
             "use_resnet18": False,"use_1d_aug": False,
+            "is_fast": True,      "tabular_model_timeout": 1000,  # 每模型最多 ~17 分鐘
         }
     if n_samples < 500:
         return {
@@ -108,7 +117,7 @@ def get_cfg(fast: bool, n_samples: int = 10_000) -> dict:
             "scout_trials": 5,    "scout_val_size": 0.2, "scout_ratio": 2 / 3,
             "nas_epochs": 8,      "nas_candidates": 8,   "nas_rounds": 2,
             "mlp_train_trials": 8,"mlp_top_k": 1,
-            "dl_trials": 8,       "dl_top_k": 1,
+            "dl_trials": 8,       "transformer_trials": 12, "dl_top_k": 1,
             "meta_trials": 10,    "blend_restarts": 2,
             "n_repeats": 2,       "n_seeds": 3,
             "use_kpca": True,     "use_kmeans": True,
@@ -120,7 +129,7 @@ def get_cfg(fast: bool, n_samples: int = 10_000) -> dict:
             "scout_trials": 7,    "scout_val_size": 0.2, "scout_ratio": 2 / 3,
             "nas_epochs": 10,     "nas_candidates": 8,   "nas_rounds": 2,
             "mlp_train_trials": 8,"mlp_top_k": 1,
-            "dl_trials": 8,       "dl_top_k": 1,
+            "dl_trials": 8,       "transformer_trials": 15, "dl_top_k": 1,
             "meta_trials": 15,    "blend_restarts": 3,   # 更多 meta-learner 試次 + blend 重啟
             "n_repeats": 1,       "n_seeds": 1,
             "use_kpca": True,     "use_kmeans": True,
@@ -131,7 +140,7 @@ def get_cfg(fast: bool, n_samples: int = 10_000) -> dict:
         "scout_trials": 5,    "scout_val_size": 0.2, "scout_ratio": 2 / 3,
         "nas_epochs": 8,      "nas_candidates": 6,   "nas_rounds": 2,
         "mlp_train_trials": 6,"mlp_top_k": 1,
-        "dl_trials": 6,       "dl_top_k": 1,
+        "dl_trials": 6,       "transformer_trials": 10, "dl_top_k": 1,
         "meta_trials": 8,     "blend_restarts": 1,
         "n_repeats": 1,       "n_seeds": 1,
         "use_kpca": False,    "use_kmeans": False,
@@ -270,11 +279,17 @@ def run(
             if locked_fs:
                 print("  [FS Lock] " + "  ".join(f"{n}={fs}" for n, fs in locked_fs.items()))
 
-            # 高維資料對 CatBoost 設定 per-model timeout，防止單模型卡住整個 pipeline
+            # fast 模式或高維 CatBoost:設定 per-model timeout 防止單模型卡住 pipeline
             n_features = X_train.shape[1]
             per_model_timeout = {}
-            if "catboost" in selected and n_features > 300:
-                # 估算單 trial 可承受的最長時間：budget 的 25% 給 catboost，再除以 trial 數
+            _fast_timeout = cfg.get("tabular_model_timeout")
+            if _fast_timeout:
+                # fast 模式:所有模型都加上時間上限
+                for _m in selected:
+                    per_model_timeout[_m] = _fast_timeout
+                print(f"  [Timeout] fast 模式:各 tabular 模型最多 {_fast_timeout}s")
+            elif "catboost" in selected and n_features > 300:
+                # 高維資料對 CatBoost 設定 per-model timeout
                 cat_trials = per_model_trials.get("catboost", 15)
                 cat_timeout = max(60, min(300, int(actual_total * 3 / cat_trials)))
                 per_model_timeout["catboost"] = cat_timeout
@@ -378,7 +393,7 @@ def run(
 
         # [6] Transformer / PatchTST HPO
         tf_name   = "patchtst" if is_ts else "transformer"
-        tf_trials = budget.scale_trials(cfg["dl_trials"])
+        tf_trials = budget.scale_trials(cfg.get("transformer_trials", cfg["dl_trials"]))
         if budget.should_skip(cost_fraction=0.20) or skip_dl_small:
             reason = "時間預算緊迫" if budget.should_skip(0.20) else f"n_train={len(X_train)}<2000"
             print(f"\n[6] 跳過 {tf_name.upper()} HPO（{reason}）")
@@ -418,6 +433,35 @@ def run(
         all_oof.append(oof)
         all_test.append(test_pred)
         model_tags.append(tag)
+
+    # ── [7.5] 儲存最佳 Tabular 與 DL 模型 ────────────────────────────────────
+    from src.metrics import calculate_score as _calc
+    _TABULAR = {"lgbm", "xgb", "catboost", "rf", "extra_trees", "logreg", "knn"}
+    _DL      = {"mlp", "cnn1d", "resnet1d", "tcn", "transformer", "patchtst", "tsnet"}
+    tab_candidates = [
+        (_calc(y_train, oof.argmax(1), metric=metric), tag)
+        for tag, oof in zip(model_tags, all_oof)
+        if tag.split("_")[0] in _TABULAR
+    ]
+    dl_candidates = [
+        (_calc(y_train, oof.argmax(1), metric=metric), tag)
+        for tag, oof in zip(model_tags, all_oof)
+        if tag.split("_")[0] in _DL
+    ]
+    for candidates, ext, dst_name in [
+        (tab_candidates, ".pkl", "best_tabular_model.pkl"),
+        (dl_candidates,  ".pt",  "best_dl_model.pt"),
+    ]:
+        if not candidates:
+            continue
+        _, best_tag = max(candidates)
+        src = os.path.join(ARTIFACTS_DIR, f"{best_tag}_best_model{ext}")
+        dst = os.path.join(artifacts_dir, dst_name)
+        if os.path.exists(src):
+            shutil.copy2(src, dst)
+            print(f"  [Best Model] {best_tag} → {dst_name}")
+        else:
+            print(f"  [Best Model] 模型檔未找到（已跳過快取？）:{src}")
 
     # ── [8] Ensemble A: Nelder-Mead Blending ──────────────────────────────────
     print("\n[8] Ensemble A — Nelder-Mead Weighted Blending ...")

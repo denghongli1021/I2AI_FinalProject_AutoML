@@ -178,13 +178,13 @@ class FeatureBuilder:
             self.reducer_ = None
 
         if self.global_cfg.get("use_kmeans", False) and self.feature_set in ["raw_stat", "raw_stat_fft"]:
-            # 小資料集 cap 一下:n_clusters 必須 < n_samples,不然 MiniBatchKMeans 會炸
-            # (例如 BeetleFly 只有 ~40 筆,CV fold 切下去剩 21 筆,k=30 就 ValueError)
+            # 小資料集 dynamic k:把 k 夾到 n_samples 範圍內,並去重
+            # (例如 BeetleFly 只有 ~40 筆,CV fold 切下去剩 21 筆,k=30 → 改用 21)
             n_samples = X_scaled.shape[0]
-            ks = [k for k in [15, 30] if k < n_samples]
+            valid_ks = sorted(set(min(k, n_samples) for k in [15, 30]))
             self.kmeans_ = [
                 MiniBatchKMeans(n_clusters=k, random_state=42, batch_size=1024, n_init="auto")
-                for k in ks
+                for k in valid_ks
             ]
             for km in self.kmeans_:
                 km.fit(X_scaled)
@@ -317,7 +317,8 @@ class FeatureBuilder:
 
         Returns
         -------
-        np.ndarray, shape [N, F * 6]  （diff + lag1 + lag2 + rmean3 + rmean5 + rstd3 + rstd5 = 7 × F）
+        np.ndarray, shape [N, F * 13]
+            diff + lag1 + lag2 + (mean/std/max/min) × 2 windows + EMA × 2 = 13 × F
         """
         X = np.asarray(X, dtype=np.float32)
         n, f = X.shape
@@ -338,12 +339,18 @@ class FeatureBuilder:
         lag2[2:] = X[:-2]
         parts.append(lag2)
 
-        # Rolling Mean & Std（window=3, 5），使用 pandas 高效計算
+        # Rolling Mean / Std / Max / Min（window=3, 5）
         df_tmp = pd.DataFrame(X)
         for w in (3, 5):
             roll = df_tmp.rolling(window=w, min_periods=1)
             parts.append(roll.mean().values.astype(np.float32))
             parts.append(roll.std(ddof=0).fillna(0.0).values.astype(np.float32))
+            parts.append(roll.max().values.astype(np.float32))
+            parts.append(roll.min().values.astype(np.float32))
+
+        # EMA（span=3, 5）
+        for span in (3, 5):
+            parts.append(df_tmp.ewm(span=span, adjust=False).mean().values.astype(np.float32))
 
         return np.hstack(parts)
 

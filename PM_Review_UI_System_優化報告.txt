@@ -1,0 +1,382 @@
+================================================================================
+  AutoML Platform — PM Review 優化報告
+  審閱日期：2026-05-27
+  審閱範圍：index.html (舊介面) / index-new.html + new-ui/*.jsx (新介面) /
+            api/preprocess / api/train / api/visualize / js/mock-data.js
+================================================================================
+
+優先級定義
+  [HIGH]   影響核心流程或造成明顯 Bug，建議 demo 前修復
+  [MID]    明顯體驗瑕疵，有時間就修
+  [LOW]    polish / 加分項
+  [DEBT]   技術債，短期不 block 但要記住
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+PART 1  UI 介面問題
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+────────────────────────────────────────────────────────────────────────────────
+1-A  舊介面 (index.html)
+────────────────────────────────────────────────────────────────────────────────
+
+[HIGH] 1. 打字錯誤「匯名訪客模式」
+  位置：index.html line 218
+  問題：「匯名」應為「匿名」，出現在頂部 auth 區塊，評審一眼就看到。
+  修法：將 "匯名訪客模式" 改為 "匿名訪客模式"。
+
+------
+
+[HIGH] 2. Real mode 下 AutoML Pipeline 頁面完全消失
+  位置：index.html line 111，class="nav-item nav-mode-demo hidden"
+  問題：Pipeline 觸發訓練的入口只在 Demo 模式下才出現，Real mode 使用者
+        完全找不到如何開始訓練，整個核心流程（上傳 → 預處理 → 訓練 → 結果）
+        在 Real mode 中斷了。評審在 real mode 測試時會以為功能不完整。
+  修法：移除 nav-mode-demo 的 hidden 限制，Real mode 也要顯示 Pipeline，
+        只是根據是否有 dataset 來決定 disabled / enabled 狀態。
+
+------
+
+[HIGH] 3. 「部署與 API」頁面被整個 comment 掉
+  位置：index.html line 129-132（<!-- ... 部署與 API ... -->）
+  問題：完成訓練、模型排名出來之後，使用者沒有部署出口。
+        評審/老師會問「訓練完可以幹嘛？」但找不到答案。
+  修法：取消 comment，加 disabled 樣式或「即將推出 / Coming Soon」badge，
+        至少讓人知道這條路是存在的，比完全消失好太多。
+
+------
+
+[HIGH] 4. Demo / Real 模式切換體驗差，易造成誤解
+  位置：index.html line 181-184，top bar 右側 #mode-badge
+  問題：
+    a. 按鈕很小、視覺層級低，初次使用者不知道「實作模式」是什麼意思。
+    b. 切換後沒有任何 toast 或說明，UI 大幅變化（空頁面）讓人以為系統壞掉。
+    c. 預設是 real mode，但後端可能還沒有資料，導致所有頁面都是空白 empty state。
+  修法：
+    a. 切換時顯示 toast："已切換至 Demo 模式，以下數據為示範用途"。
+    b. 初次進入建議預設 demo mode，讓評審馬上看到效果。
+    c. 在 mode badge 旁加一個 tooltip 說明兩種模式的差異。
+
+------
+
+[MID] 5. Leaderboard mock data 邏輯矛盾
+  位置：js/mock-data.js line 22-29
+  問題：Ensemble (Top 3) 的 F1=0.948、AUC=0.984 最高，但 tags 只有 ['best']
+        沒有 'deployed'；反而 LightGBM (F1=0.942) 有 ['best', 'deployed']。
+        評審會問「為什麼不部署最好的模型？」造成邏輯困惑。
+  修法：兩個選擇：
+        a. 讓 Ensemble 也有 deployed tag，並說明「集成模型通常是生產首選」。
+        b. 移除 Ensemble 的 best tag，改備注「latency 42ms 偏高，不適合部署」。
+
+------
+
+[MID] 6. 數據預覽欄位分頁在小視窗會擠版
+  位置：index.html 約 line 478-493，card-header 同時塞標題 + 筆數 + 左右箭頭 + 欄位 label
+  問題：視窗 < 1024px 時 header 內容嚴重疊字。
+  修法：將分頁按鈕移到表格下方獨立一排，或只有欄位數 > 8 時才顯示分頁控制。
+
+------
+
+[MID] 7. User Avatar fallback 顯示「?」
+  位置：index.html line 222
+  問題：未登入時 avatar letter 顯示「?」，視覺上像 loading error。
+  修法：改為「訪」（訪客縮寫）或使用 guest icon，更清楚表達未登入狀態。
+
+------
+
+[LOW] 8. 「洞察與決策」nav badge 被 comment 掉
+  位置：index.html line 127，「核心」badge
+  問題：這是整個系統最有價值的頁面之一，但 nav 入口毫無標記，讓人低估它的重要性。
+  修法：重新開啟 comment，讓「核心」badge 正式顯示。
+
+------
+
+[LOW] 9. 通知 badge 計數初始化問題
+  位置：index.html line 198，id="notification-badge"，初始 innerHTML 為 "0" 但 hidden
+  問題：如果 JS 初始化失敗或出錯，使用者永遠看不到 badge，不知道有通知。
+  修法：改用 CSS visibility 控制而非 display:none，確保計數 > 0 時一定可見；
+        或加 aria-live="polite" 確保可及性。
+
+------
+
+[LOW] 10. 「系統設定」頁面的 User section 是 comment 掉的
+  位置：index.html line 154-162，sidebar 底部的 user block
+  問題：沒有地方看到當前登入狀態、無法直接點擊到個人設定。
+  修法：將 User section 移至 sidebar 底部並重新啟用，或確認 top bar 的 auth
+        section 已完全覆蓋此功能後才拿掉。
+
+------
+
+[LOW] 11. Dashboard empty state 的按鈕只會到 datasets 頁
+  位置：index.html line 251，onclick="navigateTo('datasets')"
+  問題：real mode 沒有資料時 empty state 引導使用者去「上傳數據集」，
+        但上傳完還要再手動找到 Pipeline 才能訓練，步驟太分散。
+  修法：empty state 的 CTA 可以直接帶入「上傳並開始訓練」的快捷流程。
+
+
+────────────────────────────────────────────────────────────────────────────────
+1-B  新介面 (index-new.html + new-ui/*.jsx)
+────────────────────────────────────────────────────────────────────────────────
+
+[HIGH] 12. 未登入直接強制跳轉，沒有 guest / demo 入口
+  位置：new-ui/app.jsx line 9-23
+  問題：沒有 token 就立刻跳回 index.html?need_login=1，
+        新介面完全沒有 guest mode 或 demo mode 可以瀏覽。
+        評審若沒有帳號就完全進不去新介面。
+  修法：加一個「以 Demo 模式繼續（不需登入）」選項，或在登入頁提供 guest 入口。
+
+------
+
+[HIGH] 13. 訓練進度 hardcode 50%，無真實 polling
+  位置：new-ui/page-experiments.jsx line 34，progress: 0.5
+  問題：running 狀態的訓練永遠顯示 50%，使用者不知道還要多久。
+        訓練完成後也不會自動更新，需要手動重整。
+  修法：
+    a. 後端如果沒有真正的進度 endpoint，至少做 elapsed time 估算
+       （根據 started_at 和歷史平均時長計算假進度）。
+    b. 加 polling 機制：running 狀態下每 5 秒 force refresh 一次 runs list。
+
+------
+
+[MID] 14. Breadcrumb 使用 hardcoded 假資料
+  位置：new-ui/app.jsx line 72-78
+  問題：
+    data: '客戶資料 2024'
+    models: '客戶流失預測 v3'
+  這些是固定寫死的假資料，跟當前實際選中的 dataset/model 無關，
+  會讓評審發現新舊介面之間資料不一致。
+  修法：breadcrumb 應該動態反映當前頁面的選中項目名稱，或直接拿掉 breadcrumb subtitle。
+
+------
+
+[MID] 15. alert() 和 confirm() 用在生產邏輯中
+  位置：new-ui/page-data.jsx line 68，上傳失敗用 alert()；
+        new-ui/page-data.jsx line 77，刪除確認用 confirm()
+  問題：原生 alert/confirm 無法自定義樣式，在深色介面中突兀，
+        且在某些瀏覽器設定下會被 block 掉。
+  修法：換成自製的 Modal 元件，專案裡已有 Surface/Button primitive 可以組合。
+
+------
+
+[MID] 16. 新介面 API base URL 部分 hardcoded
+  位置：new-ui/page-settings.jsx line 15
+  問題：'https://i2ai-automl-api.onrender.com' 寫在 settings 的預設值裡，
+        如果 API server 改位址，使用者要手動去 settings 改，
+        且 localStorage 的舊值會 override 新的預設。
+  修法：將 API base URL 提取到環境設定或 build-time config，settings 頁
+        應該只是「覆蓋」而非唯一來源。
+
+------
+
+[MID] 17. 新介面完全沒有 Error Boundary
+  位置：new-ui/app.jsx，整個 App 沒有包 Error Boundary
+  問題：任何一個 page component 拋出 JS error，整個 app 就會白屏。
+        訓練資料格式不符時 page-insights 的計算邏輯很可能拋錯。
+  修法：在 App 最外層加一個 React Error Boundary component，catch 到 error
+        時顯示友善的錯誤畫面 + reload 按鈕。
+
+------
+
+[MID] 18. 兩套介面並存，定位曖昧
+  位置：index.html sidebar 底部的「新介面 BETA」入口
+  問題：舊介面和新介面（React）並存，功能有重疊但行為不完全一致，
+        評審不知道哪個是主要交付版本。
+  修法：在專案文件或兩個介面的 header 明確說明：
+        「新介面為主要展示版本，舊介面保留以供對照」，
+        或直接讓 index.html 預設 redirect 到 index-new.html。
+
+------
+
+[LOW] 19. 模型頁面 (page-models.jsx) tag 邏輯未使用
+  位置：new-ui/page-models.jsx line 53
+  問題：tag: metrics.tag || (b.taskType === 'regression' ? null : null)
+        兩個分支都回傳 null，tag 永遠是 null，badges 系統形同虛設。
+  修法：實作 tag 邏輯，例如：f1 > 0.95 → 'top'，latency 最低 → 'fastest' 等。
+
+------
+
+[LOW] 20. 刪除 Dataset 的確認文字不夠清楚
+  位置：new-ui/page-data.jsx line 77
+  問題：confirm 只說「會連帶刪除 preprocessor / model」，
+        但沒有告知會刪除多少 model / run，使用者可能誤刪重要實驗。
+  修法：刪除前先查詢 dependent runs/models 數量，在確認 modal 中顯示：
+        「刪除後將連帶移除 3 個實驗、8 個模型，此操作不可復原」。
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+PART 2  系統 / 後端問題
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+[HIGH] 21. visualize.py 的核心 chart_type 未實作 (TODO 懸掛)
+  位置：api/visualize/visualize.py line 31
+  問題：以下 chart_type 尚未實作，請求會直接拋出 HTTP 400：
+          - "residuals"       → 回歸任務必備，看模型殘差分佈
+          - "confusion_matrix"→ 分類任務必備，評審必看
+          - "shap"            → Insights 頁面的核心功能
+        前端 Insights 頁面已有完整 UI 框架在等這些圖表資料，
+        但後端缺位導致整個 Insights 頁面功能殘缺。
+  修法（建議優先順序）：
+    Step 1 - confusion_matrix：
+      labels = sorted(set(testTrue))
+      matrix = [[sum(1 for a,p in zip(testTrue,testPred) if a==t and p==pr)
+                 for pr in labels] for t in labels]
+      回傳 ECharts heatmap option
+    Step 2 - residuals（回歸）：
+      pairs = list(zip(testTrue, [a-p for a,p in zip(testTrue,testPred)]))
+      回傳 ECharts scatter option
+    Step 3 - shap：
+      如果 backend 有存 SHAP values 就用，否則先回傳 feature_importance
+      當作 fallback，並在 response 加一個 "fallback": true 的 flag。
+
+------
+
+[HIGH] 22. preprocess.py 只支援 CSV，但 UI 聲稱支援 TSV
+  位置：api/preprocess/preprocess.py line 38
+  問題：pd.read_csv(io.BytesIO(file_bytes)) 沒有指定 sep，
+        pandas 預設 sep=',' 會讓 TSV 檔案全部塞在第一欄，
+        但 index.html / new-ui 的 upload zone 都標榜「支援 CSV / TSV 格式」。
+  修法：
+    df = pd.read_csv(io.BytesIO(file_bytes), sep=None, engine='python')
+    sep=None + engine='python' 讓 pandas 自動偵測分隔符（CSV/TSV/管道都能處理）。
+    另外 file input 的 accept 屬性應加 .tsv：accept=".csv,.tsv,.txt"（舊介面已有，確認新介面也有）。
+
+------
+
+[HIGH] 23. 訓練模組沒有 cancel 機制
+  位置：api/train/__init__.py，只 export run 和 run_prepared
+  問題：訓練一旦觸發就無法中途取消，長時間（尤其 Neural Network 15m+）訓練
+        會佔用 server 資源。使用者在 UI 上如果點了 cancel 也沒任何效果。
+  修法：
+    a. 短期：在 train.py 中用 multiprocessing 或 thread，訓練 run 存入全域
+       dict，提供 cancel(run_id) 呼叫 process.terminate()。
+    b. 長期：考慮用 Celery / BackgroundTasks + Redis，讓訓練任務可被 revoke。
+
+------
+
+[MID] 24. API cache 沒有明確 TTL 策略，可能顯示過期資料
+  位置：new-ui/api-client.js（實作邏輯），多個 page 使用 getCached()
+  問題：page-dashboard.jsx 的 cache 在 refreshTick > 0 時才 force refresh，
+        但其他頁面（page-models.jsx）只在 mount 時拉一次，沒有 TTL。
+        訓練完成後切回 models 頁，顯示的可能還是舊資料。
+  修法：
+    a. 訓練完成後，所有相關 API path 應一起 invalidate：
+       NewUI.api.invalidate('/api/models')
+       NewUI.api.invalidate('/api/training-runs')
+    b. 或為 cache entry 加 ttl: 60000 ms，超時自動 refetch。
+
+------
+
+[MID] 25. preprocess.py 沒有檔案大小限制
+  位置：api/preprocess/preprocess.py
+  問題：直接把整個 file_bytes 讀進 pandas，
+        如果上傳一個 500MB 的大 CSV，server 會 OOM。
+  修法：
+    MAX_BYTES = 50 * 1024 * 1024  # 50 MB
+    if len(file_bytes) > MAX_BYTES:
+        raise HTTPException(status_code=413, detail="檔案過大，上限 50 MB")
+    同時在前端 upload handler 也做一層 client-side 檢查，提早報錯。
+
+------
+
+[MID] 26. train.py 沒有針對不同任務類型做欄位驗證
+  位置：api/train/__init__.py，run() 和 run_prepared()
+  問題：如果 target 欄位全是 NaN、或只有一個唯一值（e.g. 全部 churn=0），
+        模型訓練會成功但結果毫無意義。
+  修法：在訓練開始前加前置檢查：
+    - target 欄位不能有超過 X% 的 NaN
+    - 分類任務至少要有 2 個 class
+    - 樣本數不能少於 N（建議 50 筆）
+    檢查失敗時拋出明確的錯誤訊息回前端。
+
+------
+
+[LOW] 27. visualize.py 的圖表 textStyle color 是 hardcoded
+  位置：api/visualize/visualize.py line 51，textStyle: {"color": "#e2e8f0"}
+  問題：顏色直接 hardcode 在後端，如果前端改了主題色或有 light mode，
+        圖表文字顏色就會不搭。
+  修法：前端 call visualize API 時帶上 options.theme（"dark"/"light"），
+        後端根據 theme 決定 textStyle 的 color 值。
+
+------
+
+[LOW] 28. data_collect.py 和 data_collect_time.py 有重複邏輯
+  位置：data_collect.py、data_collect_time.py（根目錄）
+  問題：從命名看來是兩個資料收集腳本，但功能應該有重疊。
+        如果有修 bug 只改了一個，另一個會留下問題。
+  修法：合併成一個 data_collect.py，用 flag 或 subcommand 區分一般版和
+        time-series 版，避免維護兩份幾乎相同的程式碼。
+
+------
+
+[DEBT] 29. 新介面使用 Babel Standalone 在瀏覽器即時編譯 JSX
+  位置：index-new.html line 17，@babel/standalone@7.29.0
+  問題：
+    a. 頁面載入時要先下載並執行 Babel（~1-2 MB），
+       再 parse + compile 所有 .jsx 檔，初次載入慢 1-3 秒。
+    b. Console 噴「You are using the in-browser Babel transformer.
+       Be sure to precompile your scripts for production」警告，
+       如果老師開 DevTools，看起來不專業。
+  修法：課堂 demo 短期 OK，長期建議用 Vite 做一次 build：
+    npm create vite@latest  # 選 React
+    把 new-ui/*.jsx 整合進去，build 後 dist/ 是預先編譯的靜態檔。
+
+------
+
+[DEBT] 30. 模型正規化邏輯在 page-models.jsx 和 page-insights.jsx 重複
+  位置：new-ui/page-models.jsx line 34-60，new-ui/page-insights.jsx line 30-48
+  問題：兩個頁面都有幾乎一模一樣的「將 model bundle 正規化」邏輯，
+        維護時改了一個容易忘記改另一個。
+  修法：把 normalizeModel(m) function 提取到 new-ui/utils.js（或 mock.js 頂部）
+        統一管理，兩個頁面 import 同一個 function。
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+PART 3  快速修復清單（Demo 前建議完成）
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+以下這些改動小、影響大，建議在 demo / 交件前先處理：
+
+  ✦ #1   index.html line 218：「匯名」→「匿名」                     （30 秒）
+  ✦ #2   解除 AutoML Pipeline 的 nav-mode-demo 限制                   （10 分鐘）
+  ✦ #3   取消部署頁面的 comment，加 Coming Soon 佔位                  （15 分鐘）
+  ✦ #4   切換模式時加 toast 提示，預設改為 demo mode                   （30 分鐘）
+  ✦ #21  visualize.py 補上 confusion_matrix 實作                       （1-2 小時）
+  ✦ #22  preprocess.py 加 sep=None 支援 TSV                            （5 分鐘）
+  ✦ #13  訓練進度加 elapsed-time 假進度條，或 5 秒 polling             （1 小時）
+  ✦ #14  新介面 breadcrumb 移除假資料                                   （15 分鐘）
+  ✦ #12  新介面加 Demo/Guest 入口讓未登入者可以瀏覽                    （1-2 小時）
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+PART 4  優先修復矩陣（影響 × 實作難度）
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+                  容易 ◀──────────────────────▶ 困難
+               ┌──────────────────┬────────────────────────┐
+ 高  ↑         │  #1 typo fix     │  #21 confusion matrix  │
+ 影  │         │  #22 TSV支援     │  #2 Pipeline unhide     │
+ 響  │         │  #14 breadcrumb  │  #3 部署佔位頁面        │
+     │         │  #4 mode toast   │  #13 訓練進度polling    │
+     │         ├──────────────────┼────────────────────────┤
+ 低  ↓         │  #7 avatar fix   │  #12 新介面guest mode  │
+               │  #8 nav badge    │  #17 Error Boundary     │
+               │  #20 刪除提示    │  #15 alert→Modal        │
+               └──────────────────┴────────────────────────┘
+                  左上角 = 先做      右下角 = 排 backlog
+
+================================================================================
+總結
+================================================================================
+整體系統架構設計完整、模組切分清楚，後端 preprocess/train/visualize 三層分離
+的設計非常好維護。前端同時有舊介面（Vanilla JS）和新介面（React）兩套並行，
+功能覆蓋度高，Mock data 設計也很完整。
+
+主要需要加強的點集中在：
+  1. 流程完整性：Pipeline 頁面在 real mode 要可見、部署頁面要有佔位
+  2. 後端功能補完：confusion_matrix / residuals 等 chart_type 要實作
+  3. 使用者引導：模式切換說明、訓練進度回饋、空狀態提示
+  4. 資料一致性：breadcrumb 假資料、leaderboard 邏輯矛盾
+
+只要把「快速修復清單」裡的 9 項完成，Demo 的體驗品質會大幅提升。
+
+================================================================================

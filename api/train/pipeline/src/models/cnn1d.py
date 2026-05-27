@@ -6,11 +6,19 @@
 TCN（Temporal Convolutional Network）使用因果卷積（Causal Conv）+ 擴張卷積（Dilated Conv），
 確保預測時間 t 的模型絕對不會看到 t+1 之後的資訊。
 """
-import torch
-import torch.nn as nn
+try:
+    import torch
+    import torch.nn as nn
+    _HAS_TORCH = True
+    _TorchBase = nn.Module
+except ImportError:
+    torch = nn = None  # type: ignore
+    _HAS_TORCH = False
+    class _TorchBase:  # type: ignore
+        """Stub base when torch is unavailable."""
 
 
-class ResBlock1D(nn.Module):
+class ResBlock1D(_TorchBase):
     """單個殘差塊：Conv → BN → GELU → Dropout → Conv → BN，加上殘差連接。"""
 
     def __init__(self, channels: int, kernel_size: int, dropout: float):
@@ -30,7 +38,7 @@ class ResBlock1D(nn.Module):
         return self.act(x + self.conv_block(x))
 
 
-class CNN1D(nn.Module):
+class CNN1D(_TorchBase):
     """
     Parameters
     ----------
@@ -79,7 +87,7 @@ class CNN1D(nn.Module):
         return self.head(x)
 
 
-class BasicBlock1D(nn.Module):
+class BasicBlock1D(_TorchBase):
     def __init__(self, in_channels, out_channels, stride=1, dropout=0.2):
         super().__init__()
         self.conv1 = nn.Conv1d(in_channels, out_channels, kernel_size=3, stride=stride, padding=1, bias=False)
@@ -112,7 +120,7 @@ class BasicBlock1D(nn.Module):
         return out
 
 
-class ResNet1D_18(nn.Module):
+class ResNet1D_18(_TorchBase):
     def __init__(self, in_features: int, channels: int = 64, dropout: float = 0.2, n_classes: int = 15):
         super().__init__()
         self.in_channels = channels
@@ -153,7 +161,7 @@ class ResNet1D_18(nn.Module):
 
 # ── TCN（Temporal Convolutional Network）────────────────────────────────────
 
-class _CausalConv1d(nn.Module):
+class _CausalConv1d(_TorchBase):
     """因果擴張 1D 卷積：只看當前與過去的資料，不看未來。"""
 
     def __init__(self, in_ch: int, out_ch: int, kernel_size: int, dilation: int):
@@ -174,7 +182,7 @@ class _CausalConv1d(nn.Module):
         return out
 
 
-class _TCNBlock(nn.Module):
+class _TCNBlock(_TorchBase):
     """單個 TCN 殘差塊：兩層因果擴張卷積 + 殘差連接。"""
 
     def __init__(self, in_ch: int, out_ch: int, kernel_size: int, dilation: int, dropout: float):
@@ -196,7 +204,7 @@ class _TCNBlock(nn.Module):
         return self.act(self.net(x) + self.residual(x))
 
 
-class TCN(nn.Module):
+class TCN(_TorchBase):
     """
     Temporal Convolutional Network（TCN）。
 
