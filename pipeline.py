@@ -318,7 +318,7 @@ def run(
 
         tf_name   = "patchtst" if is_ts else "transformer"
         if not (budget.should_skip(cost_fraction=0.20) or skip_dl_small):
-            tf_hpo = DLHPO(model_name=tf_name, n_trials=tf_trials, top_k=cfg["dl_top_k"], n_classes=n_classes, device=DEVICE, metric=metric)
+            tf_hpo = DLHPO(model_name=tf_name, n_trials=dl_trials, top_k=cfg["dl_top_k"], n_classes=n_classes, device=DEVICE, metric=metric)
             # 🧠 深度學習餵熟肉
             tf_configs = tf_hpo.run(X_train_dl, y_train, cfg)
         else:
