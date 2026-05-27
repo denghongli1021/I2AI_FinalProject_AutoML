@@ -45,10 +45,15 @@ def auto_detect_task(y: pd.Series) -> str:
 
 
 def find_target_col(df: pd.DataFrame) -> str:
+    """批次模式專用：只做精確名稱比對，找不到則報錯。"""
     for cand in ("target", "label", "class", "y", "c"):
         if cand in df.columns:
             return cand
-    return df.columns[-1]
+    raise ValueError(
+        f"找不到標準目標欄位（target/label/class/y/c）。"
+        f"可用欄位：{list(df.columns)}。"
+        f"請以 --target 明確指定目標欄位名稱。"
+    )
 
 
 def print_metrics(task: str, y_true, y_pred, label: str = ""):
@@ -409,7 +414,10 @@ def run_presplit(args):
 
     train_df = pd.read_csv(train_path)
     test_df  = pd.read_csv(test_path)
-    target_col = args.target if args.target else find_target_col(train_df)
+    if not args.target:
+        print(f"[錯誤] --train/--test 模式需以 --target 明確指定目標欄位名稱。可用欄位：{train_df.columns.tolist()}")
+        sys.exit(1)
+    target_col = args.target
     if target_col not in train_df.columns:
         print(f"[錯誤] 找不到欄位 '{target_col}'，可用：{train_df.columns.tolist()}")
         sys.exit(1)
@@ -513,7 +521,7 @@ def main():
     parser.add_argument("--csv",         default=None,   help="CSV 檔案路徑（單一 CSV 模式）")
     parser.add_argument("--train",       default=None,   help="訓練集 CSV 路徑（搭配 --test 使用預切分模式）")
     parser.add_argument("--test",        default=None,   help="測試集 CSV 路徑（搭配 --train 使用預切分模式）")
-    parser.add_argument("--target",      default=None,   help="目標欄位名稱（預設自動偵測）")
+    parser.add_argument("--target",      default=None,   help="目標欄位名稱（--csv / --train/--test 模式必填）")
     parser.add_argument("--task",        default=None,   choices=["classification", "regression"])
     parser.add_argument("--ts",          action="store_true",
                         help="標記為時序資料（單一 CSV 模式下，回歸改用 chronological split）")
@@ -572,7 +580,10 @@ def main():
         sys.exit(1)
 
     df = pd.read_csv(csv_path)
-    target_col = args.target if args.target else find_target_col(df)
+    if not args.target:
+        print(f"[錯誤] --csv 模式需以 --target 明確指定目標欄位名稱。可用欄位：{df.columns.tolist()}")
+        sys.exit(1)
+    target_col = args.target
     if target_col not in df.columns:
         print(f"[錯誤] 找不到欄位 '{target_col}'，可用：{df.columns.tolist()}")
         sys.exit(1)

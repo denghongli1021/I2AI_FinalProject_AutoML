@@ -54,10 +54,15 @@ def _auto_detect_task(y: pd.Series) -> str:
 
 
 def _find_target_col(df: pd.DataFrame) -> str:
+    """批次模式專用：只做精確名稱比對，找不到則報錯（不做啟發式 fallback）。"""
     for cand in ("target", "label", "class", "y", "c"):
         if cand in df.columns:
             return cand
-    return df.columns[-1]
+    raise ValueError(
+        f"找不到標準目標欄位（target/label/class/y/c）。"
+        f"可用欄位：{list(df.columns)}。"
+        f"請以 --target 明確指定目標欄位名稱。"
+    )
 
 
 def _prepare_X(df: pd.DataFrame, target_col: str) -> np.ndarray:
@@ -253,7 +258,10 @@ def run_single(args):
     t_ds = time.time()
 
     df = pd.read_csv(csv_path)
-    target_col = args.target if getattr(args, "target", None) else _find_target_col(df)
+    if not getattr(args, "target", None):
+        print(f"[錯誤] --csv 模式需以 --target 明確指定目標欄位名稱。可用欄位：{list(df.columns)}")
+        sys.exit(1)
+    target_col = args.target
     if target_col not in df.columns:
         print(f"[錯誤] 找不到目標欄位 '{target_col}'，可用欄位：{list(df.columns)}")
         sys.exit(1)
@@ -337,7 +345,10 @@ def run_presplit(args):
 
     train_df = pd.read_csv(train_path)
     test_df  = pd.read_csv(test_path)
-    target_col = args.target if args.target else _find_target_col(train_df)
+    if not args.target:
+        print(f"[錯誤] --train/--test 模式需以 --target 明確指定目標欄位名稱。可用欄位：{list(train_df.columns)}")
+        sys.exit(1)
+    target_col = args.target
     if target_col not in train_df.columns:
         print(f"[錯誤] 找不到目標欄位 '{target_col}'，可用欄位：{list(train_df.columns)}")
         sys.exit(1)
@@ -451,7 +462,7 @@ def main():
     parser.add_argument("--test",         type=str, default=None,
                         help="測試集 CSV 路徑（搭配 --train 使用預切分模式）")
     parser.add_argument("--target",       type=str, default=None,
-                        help="目標欄位名稱（未指定時自動偵測）")
+                        help="目標欄位名稱（--csv / --train/--test 模式必填）")
     parser.add_argument("--result-file",  default=None,
                         help="附加結果 CSV（含 source 欄，附加模式）")
 

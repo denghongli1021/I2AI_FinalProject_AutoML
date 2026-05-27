@@ -38,10 +38,15 @@ import pipeline_time as _pt
 # ── 工具 ─────────────────────────────────────────────────────────────────────
 
 def _find_target_col(df: pd.DataFrame) -> str:
+    """批次模式專用：只做精確名稱比對，找不到則報錯。"""
     for c in ("target", "label", "class", "y", "c"):
         if c in df.columns:
             return c
-    return df.columns[-1]
+    raise ValueError(
+        f"找不到標準目標欄位（target/label/class/y/c）。"
+        f"可用欄位：{list(df.columns)}。"
+        f"請以 --target 明確指定目標欄位名稱。"
+    )
 
 
 def _auto_detect_task(filename: str, y: pd.Series) -> str:
@@ -77,7 +82,11 @@ def _process_one(csv_path: str, args, t_ds: float) -> dict:
     dataset_name = os.path.splitext(os.path.basename(csv_path))[0]
 
     df = pd.read_csv(csv_path)
-    target_col = args.target if args.target else _find_target_col(df)
+    if not args.target:
+        raise ValueError(
+            f"--csv 模式需以 --target 明確指定目標欄位名稱。可用欄位：{list(df.columns)}"
+        )
+    target_col = args.target
     if target_col not in df.columns:
         raise ValueError(f"找不到目標欄 '{target_col}'，可用：{list(df.columns)}")
 
@@ -590,7 +599,8 @@ def main():
     parser.add_argument("--csv",    default=None, help="單一 CSV 路徑（或 _TRAIN.csv 自動找 _TEST.csv）")
     parser.add_argument("--train",  default=None, help="訓練集 CSV 路徑（搭配 --test 使用預切分模式）")
     parser.add_argument("--test",   default=None, help="測試集 CSV 路徑（搭配 --train 使用預切分模式）")
-    parser.add_argument("--target", default=None)
+    parser.add_argument("--target", default=None,
+                        help="目標欄位名稱（--csv 模式必填）")
 
     args = parser.parse_args()
     if args.new_ts_batch:
