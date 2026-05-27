@@ -99,16 +99,20 @@ _SCOUT_DEFAULTS: dict = {
 
 # ── 各模型的超參數搜尋空間 ─────────────────────────────────────────────────────
 
-def _tabular_space(name: str, trial: optuna.Trial, feat_sets: list) -> dict:
+def _tabular_space(name: str, trial: optuna.Trial, feat_sets: list,
+                   global_cfg: dict = None) -> dict:
     """傳統 Tabular 模型搜尋空間（所有邊界不人為固定於 train.py）。"""
+    global_cfg = global_cfg or {}
+    is_fast = global_cfg.get("is_fast", False)
     feature_set = trial.suggest_categorical("feature_set", feat_sets)
     params = {"feature_set": feature_set}
 
     if name == "lgbm":
+        n_est_max = 500 if is_fast else 2000
         params.update({
             "num_leaves": trial.suggest_int("num_leaves", 16, 512, log=True),
             "learning_rate": trial.suggest_float("learning_rate", 1e-3, 0.3, log=True),
-            "n_estimators": trial.suggest_int("n_estimators", 200, 2000),
+            "n_estimators": trial.suggest_int("n_estimators", 100, n_est_max),
             "min_child_samples": trial.suggest_int("min_child_samples", 5, 100),
             "subsample": trial.suggest_float("subsample", 0.5, 1.0),
             "colsample_bytree": trial.suggest_float("colsample_bytree", 0.5, 1.0),
@@ -116,10 +120,11 @@ def _tabular_space(name: str, trial: optuna.Trial, feat_sets: list) -> dict:
             "reg_lambda": trial.suggest_float("reg_lambda", 1e-8, 10.0, log=True),
         })
     elif name == "xgb":
+        n_est_max = 500 if is_fast else 2000
         params.update({
-            "max_depth": trial.suggest_int("max_depth", 3, 12),
+            "max_depth": trial.suggest_int("max_depth", 3, 10 if is_fast else 12),
             "learning_rate": trial.suggest_float("learning_rate", 1e-3, 0.3, log=True),
-            "n_estimators": trial.suggest_int("n_estimators", 200, 2000),
+            "n_estimators": trial.suggest_int("n_estimators", 100, n_est_max),
             "subsample": trial.suggest_float("subsample", 0.5, 1.0),
             "colsample_bytree": trial.suggest_float("colsample_bytree", 0.5, 1.0),
             "min_child_weight": trial.suggest_int("min_child_weight", 1, 30),
@@ -179,7 +184,7 @@ def _tabular_space(name: str, trial: optuna.Trial, feat_sets: list) -> dict:
 
 
 def _dl_train_space(trial: optuna.Trial) -> dict:
-    """DL 訓練超參數搜尋空間（所有值由 HPO 決定）。"""
+    """DL 訓練超參數搜尋空間（CNN / MLP 用）。"""
     return {
         "lr": trial.suggest_float("lr", 1e-5, 1e-2, log=True),
         "weight_decay": trial.suggest_float("weight_decay", 1e-6, 1e-2, log=True),
@@ -190,6 +195,21 @@ def _dl_train_space(trial: optuna.Trial) -> dict:
         "t_max": trial.suggest_int("t_max", 5, 30),
         "n_epochs": trial.suggest_int("n_epochs", 20, 50),
         "patience": trial.suggest_int("patience", 5, 10),
+    }
+
+
+def _transformer_train_space(trial: optuna.Trial) -> dict:
+    """Transformer / PatchTST 專用訓練超參數（更多 epoch、更低 lr）。"""
+    return {
+        "lr": trial.suggest_float("lr", 1e-5, 3e-3, log=True),
+        "weight_decay": trial.suggest_float("weight_decay", 1e-5, 1e-2, log=True),
+        "batch_size": trial.suggest_categorical("batch_size", [64, 128, 256]),
+        "label_smoothing": trial.suggest_float("label_smoothing", 0.0, 0.15),
+        "mixup_alpha": trial.suggest_float("mixup_alpha", 0.0, 0.4),
+        "mixup_prob": trial.suggest_float("mixup_prob", 0.0, 0.8),
+        "t_max": trial.suggest_int("t_max", 30, 100),
+        "n_epochs": trial.suggest_int("n_epochs", 80, 200),
+        "patience": trial.suggest_int("patience", 10, 20),
     }
 
 
@@ -205,18 +225,20 @@ def _cnn_arch_space(trial: optuna.Trial) -> dict:
 
 def _transformer_arch_space(trial: optuna.Trial, in_features: int) -> dict:
     """SignalTransformer 架構搜尋空間。"""
-    # 固定候選集：d_model∈{64,128,256} 永遠整除 [2,4,8]，無需動態過濾
-    # patch_size 固定候選集，事後 clamp 到 in_features，避免動態 value space 錯誤
-    d_model    = trial.suggest_categorical("d_model", [64, 128, 256])
-    n_heads    = trial.suggest_categorical("n_heads", [2, 4, 8])
+    # d_model 從 128 起，確保對大特徵維度有足夠容量；n_heads 移除 2（太小）
+    d_model    = trial.suggest_categorical("d_model", [128, 256, 512])
+    n_heads    = trial.suggest_categorical("n_heads", [4, 8])
     patch_size = trial.suggest_categorical("patch_size", [8, 16, 32, 64])
+    # norm_first: True=Pre-Norm（深層/大資料穩定），False=Post-Norm（淺層精度高），HPO 自動選擇
+    norm_first = trial.suggest_categorical("norm_first", [True, False])
     return {
         "patch_size": min(patch_size, max(1, in_features)),
         "d_model": d_model,
         "n_heads": n_heads,
-        "depth": trial.suggest_int("depth", 1, 8),
-        "ff_dim": trial.suggest_categorical("ff_dim", [64, 128, 256, 512]),
-        "dropout": trial.suggest_float("dropout", 0.0, 0.5),
+        "depth": trial.suggest_int("depth", 2, 6),
+        "ff_dim": trial.suggest_categorical("ff_dim", [256, 512, 1024, 2048]),
+        "dropout": trial.suggest_float("dropout", 0.0, 0.3),
+        "norm_first": norm_first,
     }
 
 
@@ -347,12 +369,12 @@ class TabularHPO:
             _cw = "balanced" if self.metric != "accuracy" else None
 
             def objective(trial, _name=name, _fs=fs_candidates, _device=self.device,
-                          _locked=_locked_fs, _cw=_cw):
+                          _locked=_locked_fs, _cw=_cw, _gcfg=global_cfg):
                 if _locked:
                     # 固定 feature_set，讓 TPE 專注在超參數空間
-                    merged = _tabular_space(_name, trial, [_locked])
+                    merged = _tabular_space(_name, trial, [_locked], global_cfg=_gcfg)
                 else:
-                    merged = _tabular_space(_name, trial, _fs)
+                    merged = _tabular_space(_name, trial, _fs, global_cfg=_gcfg)
                 fs = merged.pop("feature_set")
                 model_params = merged
 
@@ -482,8 +504,9 @@ class TabularHPO:
 
             _scout_cw = "balanced" if self.metric != "accuracy" else None
 
-            def objective(trial, _name=name, _fs=fs_candidates, _scout_cw=_scout_cw):
-                merged = _tabular_space(_name, trial, _fs)
+            def objective(trial, _name=name, _fs=fs_candidates, _scout_cw=_scout_cw,
+                         _gcfg=global_cfg):
+                merged = _tabular_space(_name, trial, _fs, global_cfg=_gcfg)
                 fs = merged.pop("feature_set")
                 fold_scores = []
                 for _fi, (tr_idx, val_idx) in enumerate(scout_folds):
@@ -552,7 +575,7 @@ class TabularHPO:
 class DLHPO:
     """
     對 CNN1D 或 Transformer 同時搜尋架構參數 + 訓練參數 + feature_set。
-    為加速評估，使用單一 fold（fold 0）做快速篩選。
+    使用前 n_hpo_folds 個 fold 平均評分，減少 selection bias（預設 2 fold）。
     """
 
     def __init__(
@@ -592,50 +615,62 @@ class DLHPO:
         else:
             fs_candidates = TRANSFORMER_FEATURE_SETS
 
-        # 快速 HPO 評估：使用第一個 fold（時序模式則用時序切割）
+        # HPO 評估：使用前 n_hpo_folds 個 fold 平均分數，降低 selection bias
         if is_ts:
             fold_splits = get_ts_folds(len(X), n_splits=5)
         else:
             cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=SEED)
             fold_splits = list(cv.split(X, y))
-        tr_idx, val_idx = fold_splits[0]
+        n_hpo_folds = 2
+        hpo_folds = fold_splits[:n_hpo_folds]
 
         trial_records = []
 
         def objective(trial):
             fs = trial.suggest_categorical("feature_set", fs_candidates)
-            fb = FeatureBuilder(feature_set=fs, global_cfg=global_cfg)
-            X_tr = fb.fit_transform(X[tr_idx])
-            X_val = fb.transform(X[val_idx])
-            cur_in = X_tr.shape[1]
-
-            train_p = _dl_train_space(trial)
-
-            if self.model_name in ("cnn1d", "resnet1d"):
-                arch_p = _cnn_arch_space(trial)
-            elif self.model_name == "tcn":
-                arch_p = _tcn_arch_space(trial)
-            elif self.model_name == "patchtst":
-                arch_p = _patchtst_arch_space(trial, cur_in)
+            if self.model_name in ("transformer", "patchtst"):
+                train_p = _transformer_train_space(trial)
             else:
-                arch_p = _transformer_arch_space(trial, cur_in)
+                train_p = _dl_train_space(trial)
 
-            score = train_dl_single_fold(
-                model_name=self.model_name,
-                arch_params=arch_p,
-                train_params=train_p,
-                X_tr=X_tr,
-                y_tr=y[tr_idx],
-                X_val=X_val,
-                y_val=y[val_idx],
-                n_classes=n_classes,
-                device=device,
-                global_cfg=global_cfg,
-            )
+            scores = []
+            arch_p = None
+            for i, (tr_idx, val_idx) in enumerate(hpo_folds):
+                fb = FeatureBuilder(feature_set=fs, global_cfg=global_cfg)
+                X_tr = fb.fit_transform(X[tr_idx])
+                X_val = fb.transform(X[val_idx])
+
+                # arch space 只在第一個 fold 確定（in_features 跨 fold 穩定）
+                if i == 0:
+                    cur_in = X_tr.shape[1]
+                    if self.model_name in ("cnn1d", "resnet1d"):
+                        arch_p = _cnn_arch_space(trial)
+                    elif self.model_name == "tcn":
+                        arch_p = _tcn_arch_space(trial)
+                    elif self.model_name == "patchtst":
+                        arch_p = _patchtst_arch_space(trial, cur_in)
+                    else:
+                        arch_p = _transformer_arch_space(trial, cur_in)
+
+                score = train_dl_single_fold(
+                    model_name=self.model_name,
+                    arch_params=arch_p,
+                    train_params=train_p,
+                    X_tr=X_tr,
+                    y_tr=y[tr_idx],
+                    X_val=X_val,
+                    y_val=y[val_idx],
+                    n_classes=n_classes,
+                    device=device,
+                    global_cfg=global_cfg,
+                )
+                scores.append(score)
+
+            mean_score = float(np.mean(scores))
             trial.set_user_attr("feature_set", fs)
             trial.set_user_attr("arch_params", arch_p)
             trial.set_user_attr("train_params", train_p)
-            return score
+            return mean_score
 
         sampler = optuna.samplers.TPESampler(seed=SEED)
         pruner = optuna.pruners.MedianPruner(n_warmup_steps=3)

@@ -172,8 +172,9 @@ python data_collect_time.py
   │
   ▼
 [6] Transformer / PatchTST HPO（DLHPO）
-      表格模式：SignalTransformer（CLS token）
-      時序模式：PatchTST（patch 嵌入 + mean pooling）
+      表格模式：SignalTransformer（CLS token + 固定 Sinusoidal PE + norm_first HPO 搜尋）
+      時序模式：PatchTST（Patch Embedding + Mean Pooling）
+      獨立搜尋空間：大 n_epochs（80–200）、低 lr；HPO 評分 2-fold 平均；AMP 加速
   │
   ▼
 [7] 5-Fold CV → OOF + Test 預測（run_cv）
@@ -210,16 +211,16 @@ python data_collect_time.py
 │   ├── preprocess.py       # FeatureBuilder（10 種特徵集）+ TSFeatureBuilder + robust_clean_dataframe
 │   ├── data.py             # get_folds(), get_ts_folds(), TabularDataset
 │   ├── metrics.py          # calculate_score(), get_metric_name()
-│   ├── hpo.py              # TabularHPO, DLHPO, MLPTrainHPO, TSNetTrainHPO
+│   ├── hpo.py              # TabularHPO, DLHPO（2-fold）, _transformer_arch/train_space, MLPTrainHPO, TSNetTrainHPO
 │   ├── nas.py              # MLPNASSearcher, TSNASSearcher（TSNet + CausalConv1d）
-│   ├── train.py            # run_cv, run_tabular_cv, run_dl_cv
+│   ├── train.py            # run_cv, run_tabular_cv, run_dl_cv（AMP Mixed Precision）
 │   ├── ensemble.py         # NelderMeadBlender, MetaLearnerStacker
 │   ├── make_submission.py  # generate_submission()
 │   ├── best_presets.json   # 黃金預設超參數（各模型最佳設定）
 │   └── models/
 │       ├── mlp.py          # 可配置 MLP（depth/hidden_dim/activations/skip）
 │       ├── cnn1d.py        # CNN1D, ResNet1D_18, TCN
-│       ├── transformer.py  # SignalTransformer, PatchTST
+│       ├── transformer.py  # SignalTransformer（Sinusoidal PE, norm_first HPO）, PatchTST
 │       └── tabular.py      # build_tabular_model() 工廠函式
 ├── result.csv    # 合併後的完整批次結果（pipeline + baseline + pipeline_time）
 ├── openml_cc18_data/       # OpenML-CC18 表格分類資料集（CSV）

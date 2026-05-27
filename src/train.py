@@ -14,6 +14,7 @@ train_dl_single_fold : 僅訓練單一 fold，供 HPO 快速評估使用
 n_epochs, patience, dropout, channels ...）完全由傳入的 config dict 決定。
 """
 import os
+import joblib
 import numpy as np
 import torch
 import torch.nn as nn
@@ -107,6 +108,7 @@ def _build_dl_model(
             ff_dim=arch_params["ff_dim"],
             dropout=arch_params["dropout"],
             n_classes=n_classes,
+            norm_first=arch_params.get("norm_first", True),
         )
     if model_name == "resnet1d":
         from .models.cnn1d import ResNet1D_18
@@ -200,6 +202,9 @@ def train_dl_single_fold(
     train_loader = make_loader(X_tr, y_tr, batch_size=bs, shuffle=True)
     X_val_t = torch.tensor(X_val, dtype=torch.float32, device=device)
 
+    use_amp = device.startswith("cuda")
+    amp_scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
+
     best_f1, patience_cnt = 0.0, 0
     best_state = None
 
@@ -209,17 +214,20 @@ def train_dl_single_fold(
             xb, yb = xb.to(device), yb.to(device)
             if use_1d_aug:
                 xb = _aug_1d(xb, device)
-            if ma > 0 and np.random.rand() < mp:
-                xb, ya, yb2, lam = _mixup_batch(xb, yb, ma, device)
-                logits = model(xb)
-                loss = _mixup_loss(criterion, logits, ya, yb2, lam)
-            else:
-                logits = model(xb)
-                loss = criterion(logits, yb)
+            with torch.amp.autocast("cuda", enabled=use_amp):
+                if ma > 0 and np.random.rand() < mp:
+                    xb, ya, yb2, lam = _mixup_batch(xb, yb, ma, device)
+                    logits = model(xb)
+                    loss = _mixup_loss(criterion, logits, ya, yb2, lam)
+                else:
+                    logits = model(xb)
+                    loss = criterion(logits, yb)
             optimizer.zero_grad()
-            loss.backward()
+            amp_scaler.scale(loss).backward()
+            amp_scaler.unscale_(optimizer)
             nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-            optimizer.step()
+            amp_scaler.step(optimizer)
+            amp_scaler.update()
         scheduler.step()
 
         # 驗證
@@ -323,6 +331,9 @@ def run_tabular_cv(
     n_seeds = 1 if is_ts else global_cfg.get("n_seeds", 1)
     n_repeats = 1 if is_ts else global_cfg.get("n_repeats", 1)
 
+    best_fold_score = -np.inf
+    best_fold_model = None
+
     for seed_idx in range(n_seeds):
         cur_seed = SEED + seed_idx * 100
         if is_ts:
@@ -353,6 +364,10 @@ def run_tabular_cv(
             )
             fold_pbar.set_postfix({f"fold_{metric}": f"{val_score:.4f}"})
 
+            if val_score > best_fold_score:
+                best_fold_score = val_score
+                best_fold_model = model
+
     oof /= np.maximum(oof_counts, 1.0)
     oof_score = calculate_score(y, oof.argmax(axis=1), metric=metric)
     print(f"  [CV] {tag:30s} OOF {get_metric_name(metric)} = {oof_score:.4f}")
@@ -360,6 +375,8 @@ def run_tabular_cv(
     if save_artifacts:
         np.save(os.path.join(ARTIFACTS_DIR, f"{tag}_oof.npy"), oof)
         np.save(os.path.join(ARTIFACTS_DIR, f"{tag}_test.npy"), test_preds)
+        if best_fold_model is not None:
+            joblib.dump(best_fold_model, os.path.join(ARTIFACTS_DIR, f"{tag}_best_model.pkl"))
 
     return oof, test_preds
 
@@ -392,6 +409,10 @@ def run_dl_cv(
     oof = np.zeros((n, n_classes), dtype=np.float32)
     oof_counts = np.zeros((n, 1), dtype=np.float32)
     test_preds = np.zeros((len(X_test), n_classes), dtype=np.float32)
+
+    best_fold_score = -np.inf
+    best_fold_state = None
+    best_fold_in_features = None
 
     train_params = config.get("train_params") or {}
     arch_params_cfg = config.get("arch_params") or {}
@@ -446,6 +467,8 @@ def run_dl_cv(
             X_val_t = torch.tensor(X_val, dtype=torch.float32, device=device)
             X_te_t = torch.tensor(X_te, dtype=torch.float32, device=device)
 
+            use_amp = device.startswith("cuda")
+            amp_scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
             best_f1, patience_cnt = 0.0, 0
             best_state = None
 
@@ -461,17 +484,20 @@ def run_dl_cv(
                     xb, yb = xb.to(device), yb.to(device)
                     if use_1d_aug:
                         xb = _aug_1d(xb, device)
-                    if ma > 0 and np.random.rand() < mp:
-                        xb, ya, yb2, lam = _mixup_batch(xb, yb, ma, device)
-                        logits = model(xb)
-                        loss = _mixup_loss(criterion, logits, ya, yb2, lam)
-                    else:
-                        logits = model(xb)
-                        loss = criterion(logits, yb)
+                    with torch.amp.autocast("cuda", enabled=use_amp):
+                        if ma > 0 and np.random.rand() < mp:
+                            xb, ya, yb2, lam = _mixup_batch(xb, yb, ma, device)
+                            logits = model(xb)
+                            loss = _mixup_loss(criterion, logits, ya, yb2, lam)
+                        else:
+                            logits = model(xb)
+                            loss = criterion(logits, yb)
                     optimizer.zero_grad()
-                    loss.backward()
+                    amp_scaler.scale(loss).backward()
+                    amp_scaler.unscale_(optimizer)
                     nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-                    optimizer.step()
+                    amp_scaler.step(optimizer)
+                    amp_scaler.update()
                 scheduler.step()
 
                 with torch.no_grad():
@@ -498,6 +524,11 @@ def run_dl_cv(
                 oof_counts[val_idx] += 1
                 test_preds += torch.softmax(model(X_te_t), dim=1).cpu().numpy() / (len(folds) * n_seeds)
 
+            if best_f1 > best_fold_score:
+                best_fold_score = best_f1
+                best_fold_state = best_state
+                best_fold_in_features = in_features
+
             if device.startswith("cuda"):
                 torch.cuda.empty_cache()
 
@@ -508,6 +539,16 @@ def run_dl_cv(
     if save_artifacts:
         np.save(os.path.join(ARTIFACTS_DIR, f"{tag}_oof.npy"), oof)
         np.save(os.path.join(ARTIFACTS_DIR, f"{tag}_test.npy"), test_preds)
+        if best_fold_state is not None:
+            torch.save(
+                {
+                    "state_dict": best_fold_state,
+                    "config": config,
+                    "in_features": best_fold_in_features,
+                    "n_classes": n_classes,
+                },
+                os.path.join(ARTIFACTS_DIR, f"{tag}_best_model.pt"),
+            )
 
     return oof, test_preds
 
