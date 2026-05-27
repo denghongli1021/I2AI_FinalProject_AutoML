@@ -367,9 +367,11 @@ class TabularHPO:
             _locked_fs = locked_feature_sets.get(name)
 
             _cw = "balanced" if self.metric != "accuracy" else None
+            _min_train = min(len(tr) for tr, _ in folds)
 
             def objective(trial, _name=name, _fs=fs_candidates, _device=self.device,
-                          _locked=_locked_fs, _cw=_cw, _gcfg=global_cfg):
+                          _locked=_locked_fs, _cw=_cw, _gcfg=global_cfg,
+                          _min_train=_min_train):
                 if _locked:
                     # 固定 feature_set，讓 TPE 專注在超參數空間
                     merged = _tabular_space(_name, trial, [_locked], global_cfg=_gcfg)
@@ -377,6 +379,9 @@ class TabularHPO:
                     merged = _tabular_space(_name, trial, _fs, global_cfg=_gcfg)
                 fs = merged.pop("feature_set")
                 model_params = merged
+                # KNN 防呆：n_neighbors 不得超過最小 fold 訓練樣本數
+                if _name == "knn" and "n_neighbors" in model_params:
+                    model_params["n_neighbors"] = max(1, min(model_params["n_neighbors"], _min_train - 1))
 
                 scores = []
                 for _fi, (tr_idx, val_idx) in enumerate(folds):

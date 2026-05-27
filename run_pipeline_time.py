@@ -351,10 +351,12 @@ def run_new_ts_batch_pipeline(args):
         print(f"[錯誤] 找不到目錄：{new_ts_dir}"); sys.exit(1)
 
     train_files = sorted(f for f in os.listdir(new_ts_dir) if f.endswith("_TRAIN.csv"))
-    cls_top = getattr(args, "cls_top_n", 3)
-    reg_top = getattr(args, "reg_top_n", 3)
-    cls_bases = [f[:-10] for f in train_files if f.startswith("CLS_")][:cls_top]
-    reg_bases = [f[:-10] for f in train_files if f.startswith("REG_")][:reg_top]
+    cls_top    = getattr(args, "cls_top_n",   3)
+    reg_top    = getattr(args, "reg_top_n",   3)
+    cls_offset = getattr(args, "cls_offset",  0)
+    reg_offset = getattr(args, "reg_offset",  0)
+    cls_bases = [f[:-10] for f in train_files if f.startswith("CLS_")][cls_offset:cls_offset + cls_top]
+    reg_bases = [f[:-10] for f in train_files if f.startswith("REG_")][reg_offset:reg_offset + reg_top]
     selected = cls_bases + reg_bases
 
     result_file = getattr(args, "result_file", None)
@@ -575,9 +577,13 @@ def main():
     parser.add_argument("--new-ts-batch", action="store_true",
                         help="新TS批次：讀 ucr_ts_80_new，各取N個CLS+REG，寫 time_results.csv")
     parser.add_argument("--cls-top-n",   type=int, default=3,
-                        help="--new-ts-batch 模式：取前 N 個 CLS 資料集（預設 3）")
+                        help="--new-ts-batch 模式：取 N 個 CLS 資料集（預設 3）")
     parser.add_argument("--reg-top-n",   type=int, default=3,
-                        help="--new-ts-batch 模式：取前 N 個 REG 資料集（預設 3）")
+                        help="--new-ts-batch 模式：取 N 個 REG 資料集（預設 3）")
+    parser.add_argument("--cls-offset",  type=int, default=0,
+                        help="--new-ts-batch 模式：CLS 資料集起始偏移（預設 0，即從第 1 個開始）")
+    parser.add_argument("--reg-offset",  type=int, default=0,
+                        help="--new-ts-batch 模式：REG 資料集起始偏移（預設 0，即從第 1 個開始）")
     parser.add_argument("--result-file", default=None,
                         help="附加結果 CSV（含 source 欄，附加模式）")
 

@@ -138,6 +138,7 @@ def run_batch(args):
         try:
             df = pd.read_csv(csv_path)
             target_col = _find_target_col(df)
+            df = df.dropna(subset=[target_col]).reset_index(drop=True)
             y_raw = df[target_col]
             task = force_task if force_task else _auto_detect_task(y_raw)
             X_all = _prepare_X(df, target_col)
