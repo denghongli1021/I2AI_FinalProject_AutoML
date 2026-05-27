@@ -35,8 +35,17 @@ import json
 import pickle
 import time
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Optional
+
+
+def _utc_naive_to_epoch(dt) -> Optional[float]:
+    """DB created_at 用 datetime.utcnow() 存的 naive datetime (代表 UTC,但無 tz)。
+    直接 .timestamp() Python 會誤判成 local time → 偏 server tz 小時。
+    這裡明確標 UTC 再轉,確保前端 new Date(epoch*1000) 拿到正確時間。"""
+    if dt is None:
+        return None
+    return dt.replace(tzinfo=timezone.utc).timestamp()
 
 import pandas as pd
 from fastapi import HTTPException
@@ -82,7 +91,7 @@ def _db_dataset_to_bundle(ds: DbDataset, include_df: bool = True) -> dict:
         "rowCount": ds.row_count,
         "colCount": ds.col_count,
         "headers": json.loads(ds.headers_json) if ds.headers_json else [],
-        "loadedAt": ds.created_at.timestamp() if ds.created_at else time.time(),
+        "loadedAt": _utc_naive_to_epoch(ds.created_at) or time.time(),
         "response": response,
     }
     if include_df:
@@ -167,7 +176,7 @@ def list_datasets(user, db: Session) -> list[dict]:
     return [{
         "id": r.id,
         "fileName": r.file_name,
-        "loadedAt": r.created_at.timestamp() if r.created_at else None,
+        "loadedAt": _utc_naive_to_epoch(r.created_at),
         "rowCount": r.row_count,
         "colCount": r.col_count,
         "headers": json.loads(r.headers_json) if r.headers_json else [],
@@ -284,7 +293,7 @@ def get_preprocessor(preprocessor_id: str, user, db: Session) -> dict:
         "target": pp.target,
         "datasetId": pp.dataset_id,
         "featureNames": json.loads(pp.feature_names_json) if pp.feature_names_json else [],
-        "createdAt": pp.created_at.timestamp() if pp.created_at else None,
+        "createdAt": _utc_naive_to_epoch(pp.created_at),
         "X_train": X_train, "X_test": X_test,
         "y_train": y_train, "y_test": y_test,
     }
@@ -336,7 +345,7 @@ def list_preprocessors(user, db: Session) -> list[dict]:
             "featureCount": len(json.loads(r.feature_names_json) if r.feature_names_json else []),
             "trainSize": train_size,
             "testSize": test_size,
-            "createdAt": r.created_at.timestamp() if r.created_at else None,
+            "createdAt": _utc_naive_to_epoch(r.created_at),
             "useMice": bool(getattr(r, "use_mice", False)),
             "useMiSelection": bool(getattr(r, "use_mi_selection", False)),
             "miThreshold": float(getattr(r, "mi_threshold", 0.01) or 0.01),
@@ -357,19 +366,32 @@ def save_model(
     training_run_id: Optional[str] = None,
     hyperparameters: Optional[dict] = None,
     commit: bool = True,
+    blob_max_override: Optional[int] = None,
+    estimator_pkl_bytes: Optional[bytes] = None,
 ) -> str:
     """存 sklearn 模型 — bundle + estimator + scaler + X_test (給 SHAP) + hyperparams。
 
     commit=False:只 db.add() 不 commit,讓呼叫者 (event_stream) 在迴圈結束後一次 commit,
                   把 N 次 round-trip 壓成 1 次,大幅加速。
+    blob_max_override:覆寫單一 blob 的大小上限 (預設 20 MB),給 Daniel ensemble bundle
+                       這種特別大的物件用 (200 MB+)。
+    estimator_pkl_bytes:直接傳「已經 pickle 好的 bytes」,跳過 estimator 參數的二次 pickle。
+                         給 daniel pipeline 用 (bundle 已在 subprocess 內 dump 完)。
     """
     model_id = f"model_{uuid.uuid4().hex[:8]}"
     bundle["id"] = model_id
 
     if not _is_authed(user):
+        # 若有 pre-pickled bytes (daniel ensemble) → 直接 loads 一次,讓 get_model 拿到的 entry["estimator"] 永遠是物件
+        _guest_estimator = estimator
+        if _guest_estimator is None and estimator_pkl_bytes is not None:
+            try:
+                _guest_estimator = pickle.loads(estimator_pkl_bytes)
+            except Exception as e:
+                print(f"[save_model:guest] unpickle estimator_pkl_bytes 失敗: {e}", flush=True)
         MODELS[model_id] = stamp({
             "bundle": bundle,
-            "estimator": estimator,
+            "estimator": _guest_estimator,
             "scaler": scaler,
             "featureNames": bundle.get("featureNames", []),
             "X_test_df": X_test_df,
@@ -378,8 +400,8 @@ def save_model(
         }, user)
         return model_id
 
-    # DB path — pickle 太大時(>20MB)就跳過,只存 bundle。
-    _BLOB_MAX = 20 * 1024 * 1024  # 20 MB per blob
+    # DB path — pickle 太大時(>BLOB_MAX)就跳過,只存 bundle。
+    _BLOB_MAX = blob_max_override if blob_max_override is not None else 20 * 1024 * 1024
 
     def _safe_pickle(obj, label):
         """pickle 物件;太大或失敗就回 None 並印 warning。"""
@@ -388,7 +410,8 @@ def save_model(
         try:
             blob = pickle.dumps(obj, protocol=pickle.HIGHEST_PROTOCOL)
             if len(blob) > _BLOB_MAX:
-                print(f"[save_model] {label} pickle 太大 ({len(blob)/1024/1024:.1f}MB > 20MB),跳過 — "
+                print(f"[save_model] {label} pickle 太大 ({len(blob)/1024/1024:.1f}MB > "
+                      f"{_BLOB_MAX/1024/1024:.0f}MB),跳過 — "
                       f"此模型不能跑 SHAP/predict,但洞察/排行榜顯示正常",
                       flush=True)
                 return None
@@ -397,7 +420,16 @@ def save_model(
             print(f"[save_model] {label} pickle 失敗: {e} — 此模型不能跑 SHAP/predict", flush=True)
             return None
 
-    estimator_blob = _safe_pickle(estimator, "estimator")
+    # daniel ensemble:bytes 已從 subprocess 寫好的 pickle 檔讀進來,直接驗 size 用,不再 pickle 一次
+    if estimator_pkl_bytes is not None:
+        if len(estimator_pkl_bytes) > _BLOB_MAX:
+            print(f"[save_model] estimator (pre-pickled bytes) 太大 "
+                  f"({len(estimator_pkl_bytes)/1024/1024:.1f}MB > {_BLOB_MAX/1024/1024:.0f}MB),跳過", flush=True)
+            estimator_blob = None
+        else:
+            estimator_blob = estimator_pkl_bytes
+    else:
+        estimator_blob = _safe_pickle(estimator, "estimator")
     scaler_blob    = _safe_pickle(scaler,    "scaler")
     # x_test_pkl: 預處理來源的 X_test 已經存在 preprocessor 表裡,N 個模型不要重複存
     # (raw 來源的 X_test 是該模型訓練時 train_test_split 切出來的,獨一無二,還是要存)
@@ -472,7 +504,7 @@ def list_models(user, db: Session, *, training_run_id: Optional[str] = None,
             "dataSource": m.data_source,
             "testScore": m.test_score,
             "trainTimeMs": m.train_time_ms,
-            "createdAt": m.created_at.timestamp() if m.created_at else None,
+            "createdAt": _utc_naive_to_epoch(m.created_at),
         })
     return out
 
@@ -646,9 +678,9 @@ def get_training_progress(run_id: str, user, db: Session) -> Optional[dict]:
         "progressPct": run.progress_pct or 0,
         "currentStep": run.current_step,
         "latestLog": log_lines,
-        "lastSeenAt": run.last_seen_at.timestamp() if run.last_seen_at else None,
-        "startedAt": run.started_at.timestamp() if run.started_at else None,
-        "finishedAt": run.finished_at.timestamp() if run.finished_at else None,
+        "lastSeenAt": _utc_naive_to_epoch(run.last_seen_at),
+        "startedAt": _utc_naive_to_epoch(run.started_at),
+        "finishedAt": _utc_naive_to_epoch(run.finished_at),
         "elapsedSec": run.elapsed_sec,
         "errorMsg": run.error_msg,
     }
@@ -701,8 +733,8 @@ def list_training_runs(
         "status": r.status,
         "errorMsg": r.error_msg,
         "hasPredictions": bool(r.has_predictions),
-        "startedAt": r.started_at.timestamp() if r.started_at else None,
-        "finishedAt": r.finished_at.timestamp() if r.finished_at else None,
+        "startedAt": _utc_naive_to_epoch(r.started_at),
+        "finishedAt": _utc_naive_to_epoch(r.finished_at),
         "elapsedSec": r.elapsed_sec,
     } for r in rows]
 
@@ -722,8 +754,8 @@ def get_training_run(run_id: str, user, db: Session) -> dict:
         "modelIds": json.loads(r.model_ids_json) if r.model_ids_json else [],
         "status": r.status, "errorMsg": r.error_msg,
         "hasPredictions": bool(r.has_predictions),
-        "startedAt": r.started_at.timestamp() if r.started_at else None,
-        "finishedAt": r.finished_at.timestamp() if r.finished_at else None,
+        "startedAt": _utc_naive_to_epoch(r.started_at),
+        "finishedAt": _utc_naive_to_epoch(r.finished_at),
         "elapsedSec": r.elapsed_sec,
     }
 

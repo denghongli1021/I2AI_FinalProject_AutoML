@@ -19,6 +19,7 @@ from api import bootstrap  # noqa: F401
 import asyncio
 import io
 import json
+import os
 import platform
 import queue
 import sys
@@ -806,41 +807,86 @@ async def train_pipeline_stream_endpoint(
                     if job.get("preprocessorId"):
                         r["preprocessorId"] = job["preprocessorId"]
 
-                    # ── SHAP 支援：最佳 tabular 模型存 storage ─────────────────
-                    if r.get("ok") and r.get("modelBytes"):
+                    # ── Ensemble bundle 持久化 (給 batch predict / Insights / re-login 用) ─────
+                    print(f"[Pipeline] [{label}] subprocess 回傳 ok={r.get('ok')} "
+                          f"ensembleBundlePath={r.get('ensembleBundlePath')!r}", flush=True)
+                    if r.get("ok") and r.get("ensembleBundlePath"):
                         try:
-                            import pickle as _pickle
-                            import base64 as _b64
                             import pandas as _pd
-                            _raw = _b64.b64decode(r["modelBytes"].encode("ascii"))
-                            _m   = _pickle.loads(_raw)
-                            _estimator  = _m["estimator"]
-                            _X_test_np  = _m.get("X_test")          # np.ndarray
-                            _n_feat     = _X_test_np.shape[1] if _X_test_np is not None else 0
-                            _col_names  = [f"f{i}" for i in range(_n_feat)]
-                            _X_test_df  = (
-                                _pd.DataFrame(_X_test_np, columns=_col_names)
-                                if _X_test_np is not None else _pd.DataFrame()
-                            )
-                            _pbundle = {
-                                "type": "pipeline_best",
-                                "name": _m.get("model_tag", "pipeline_best"),
-                                "featureNames": _col_names,
-                                "featureSet": _m.get("feature_set"),
-                                "dataSource": job["source"],
-                            }
-                            _mid = storage.save_model(
-                                bundle=_pbundle, estimator=_estimator, scaler=None,
-                                X_test_df=_X_test_df, user=user, db=db,
-                                preprocessor_id=job.get("preprocessorId"),
-                            )
-                            r["bestModelId"] = _mid
-                            print(f"[Pipeline] 最佳模型存入 storage → modelId={_mid}", flush=True)
+                            bundle_path = r["ensembleBundlePath"]
+                            if os.path.exists(bundle_path):
+                                with open(bundle_path, "rb") as _bf:
+                                    bundle_bytes = _bf.read()
+                                size_mb = len(bundle_bytes) / 1024 / 1024
+                                print(f"[Pipeline] ensemble bundle = {size_mb:.1f}MB → 寫入 DB", flush=True)
+                                # Insights / Leaderboard 顯示用的 bundle (不含 estimator)
+                                _ens_bundle = {
+                                    "type": "daniel_pipeline_ensemble",
+                                    "name": f"[{label}] Pipeline Ensemble",
+                                    "dataSource": job["source"],
+                                    "dataSourceLabel": label,
+                                    "taskType": "classification",
+                                    "target": r.get("target"),
+                                    "featureNames": r.get("featureNames", []),
+                                    "featureImportance": r.get("featureImportance", []),
+                                    "testTrue": r.get("testTrueDecoded"),
+                                    "testPred": r.get("testPredDecoded"),
+                                    "classes": r.get("classes", []),
+                                    "canPredict": True,
+                                    "metrics": {
+                                        "testScore": r.get("bestScore"),
+                                        "testScoreLabel": (r.get("metric") or "F1").upper(),
+                                        "testAccuracy": r.get("accuracy"),
+                                        "f1": r.get("f1"),
+                                        "scoreBlend": r.get("scoreBlend"),
+                                        "scoreStack": r.get("scoreStack"),
+                                    },
+                                }
+                                # 把 X_test 小切 50 筆包成 DataFrame,給 SHAP 當 background
+                                _xs = r.get("xTestSample")
+                                _fn = r.get("featureNames") or []
+                                _x_test_df = _pd.DataFrame()
+                                if _xs and _fn and len(_xs) > 0:
+                                    try:
+                                        _x_test_df = _pd.DataFrame(_xs, columns=_fn)
+                                    except Exception as _xe:
+                                        print(f"[Pipeline] xTestSample → DataFrame 失敗: {_xe}", flush=True)
+
+                                # estimator_pkl_bytes:bundle 已是 pickle bytes,直接給 save_model
+                                # 200MB cap (ensemble bundle 可能很大)
+                                # 一定要傳 training_run_id + dataset_id,不然 hydration
+                                # 的 modelsByRun[r.id] 找不到 → 前端 fallback 到 placeholder
+                                _mid = storage.save_model(
+                                    bundle=_ens_bundle, estimator=None, scaler=None,
+                                    X_test_df=_x_test_df, user=user, db=db,
+                                    preprocessor_id=job.get("preprocessorId"),
+                                    dataset_id=datasetId,
+                                    training_run_id=pipeline_run_id,
+                                    blob_max_override=200 * 1024 * 1024,
+                                    estimator_pkl_bytes=bundle_bytes,
+                                )
+                                r["bestModelId"] = _mid
+                                print(f"[Pipeline] ensemble 存入 storage → modelId={_mid} "
+                                      f"(run={pipeline_run_id})", flush=True)
+                                # 大 blob 在 SSE 不需要傳
+                                r.pop("featureImportance", None)
+                                r.pop("testTrueDecoded", None)
+                                r.pop("testPredDecoded", None)
+                                r.pop("xTestSample", None)
+                            else:
+                                print(f"[Pipeline] ensembleBundlePath 不存在: {bundle_path}", flush=True)
                         except Exception as _me:
                             import traceback as _tb
-                            print(f"[Pipeline] save_model 失敗（不影響分數）: {_me}", flush=True)
+                            print(f"[Pipeline] ensemble save_model 失敗 (不影響分數): {_me}", flush=True)
                             _tb.print_exc()
-                    r.pop("modelBytes", None)   # 大 blob 不需傳進 SSE
+                    elif r.get("ok"):
+                        # subprocess 成功但沒回 bundle 路徑 — 通常是 _dump_ensemble_bundle 拒絕 persist
+                        # (某 config 來自快取沒有 fold artifacts → bundle 沒被 dump)
+                        print(f"[Pipeline] [{label}] 沒拿到 ensembleBundlePath → "
+                              f"skip ensemble save (前端會 fallback 到 placeholder,需重訓才有 batch predict)",
+                              flush=True)
+                    r.pop("ensembleBundlePath", None)   # 不需傳進 SSE
+                    r.pop("modelBytes", None)           # legacy field,保險起見也清掉
 
                     # Option B:有 predict_input 且 pipeline 成功 → 寫 submission artifact
                     predict_input = job.get("predict_input_bytes")
@@ -1251,6 +1297,48 @@ class ShapRequest(BaseModel):
                           # 50 在大部分情況下圖夠穩,使用者要更穩可在系統設定調回 100~200。
 
 
+class _EnsembleSHAPAdapter:
+    """讓 AutoMLVisualizer 把 ensemble bundle 當成單一 sklearn 模型 — 暴露 predict/predict_proba。
+    SHAP 會走 PermutationExplainer (model-agnostic),所以只要有 predict_proba 就能算,
+    只是會比樹模型慢很多 (要 replay 整個 ensemble: fold-averaged → blender + stacker)。"""
+
+    def __init__(self, bundle: dict):
+        self.bundle = bundle
+
+    def _ensemble_predict_proba(self, X):
+        all_test_preds = []
+        for cfg_entry in self.bundle["configs"]:
+            folds = cfg_entry.get("folds") or []
+            if not folds:
+                continue
+            fold_preds = []
+            for fold in folds:
+                fb = fold.get("fb")
+                X_fb = fb.transform(X) if fb is not None else X
+                if "model" in fold:
+                    pred = fold["model"].predict_proba(X_fb)
+                else:
+                    pred = _predict_dl_fold(fold, X_fb, int(self.bundle["n_classes"]))
+                fold_preds.append(pred)
+            all_test_preds.append(np.mean(fold_preds, axis=0))
+        if not all_test_preds:
+            raise RuntimeError("ensemble bundle 無 fold 可推論")
+        # 跟 _predict_batch_ensemble 一致:優先 stacker
+        try:
+            return self.bundle["stacker"].predict_proba(all_test_preds, X_orig=X)
+        except Exception:
+            try:
+                return self.bundle["blender"].predict_proba(all_test_preds)
+            except Exception:
+                return self.bundle["blender"].predict(all_test_preds)
+
+    def predict_proba(self, X):
+        return self._ensemble_predict_proba(np.asarray(X))
+
+    def predict(self, X):
+        return self._ensemble_predict_proba(np.asarray(X)).argmax(axis=1)
+
+
 @app.post("/api/visualize/shap")
 def visualize_shap_endpoint(
     req: ShapRequest,
@@ -1262,11 +1350,24 @@ def visualize_shap_endpoint(
             status_code=500,
             detail="AutoMLVisualizer 未啟用 — 請安裝 shap + plotly: pip install shap plotly",
         )
+    _ensure_pipeline_path_for_unpickle()
     entry = storage.get_model(req.modelId, user, db)
 
     estimator = entry.get("estimator")
     X_test_df = entry.get("X_test_df")
     feature_names = entry.get("featureNames", [])
+    bundle_meta = entry.get("bundle") or {}
+
+    # Daniel ensemble → 包 adapter,讓 AutoMLVisualizer 用 Permutation 算 SHAP
+    is_ensemble = bundle_meta.get("type") == "daniel_pipeline_ensemble"
+    if is_ensemble:
+        if not (isinstance(estimator, dict) and estimator.get("version") == 1):
+            raise HTTPException(status_code=400,
+                detail="ensemble bundle 在儲存時超過大小上限,SHAP 不可用。請重訓 (fast mode 縮小)。")
+        # ensemble 的 featureNames 用 bundle 內的 raw 特徵名
+        feature_names = estimator.get("feature_names_raw", feature_names)
+        estimator = _EnsembleSHAPAdapter(estimator)
+
     if estimator is None:
         raise HTTPException(status_code=400, detail="該模型訓練失敗,無法產生 SHAP")
     if X_test_df is None or len(X_test_df) == 0:
@@ -1403,6 +1504,168 @@ def model_info_endpoint(
 # ============================================================
 # 4b. PREDICT (BATCH)
 # ============================================================
+def _ensure_pipeline_path_for_unpickle():
+    """Daniel ensemble bundle pickle 內參考 src.preprocess / src.ensemble 等模組,
+    主 API 預設不在 sys.path,unpickle 會 ModuleNotFoundError → 在這先補上。
+    idempotent — 多次呼叫只 insert 一次。"""
+    _pipe = os.path.join(os.path.dirname(__file__), "train", "pipeline")
+    if _pipe not in sys.path:
+        sys.path.insert(0, _pipe)
+
+
+def _predict_dl_fold(fold: dict, X_fb: "np.ndarray", n_classes: int) -> "np.ndarray":
+    """重建 DL 模型 → load_state_dict → 推論。回 N×C 機率矩陣。"""
+    import torch
+    _ensure_pipeline_path_for_unpickle()
+    from src.train import _build_dl_model
+    model = _build_dl_model(fold["model_name"], fold["arch_params"],
+                            fold["in_features"], n_classes)
+    model.load_state_dict(fold["state_dict"])
+    model.eval()
+    X_t = torch.tensor(X_fb, dtype=torch.float32)
+    with torch.no_grad():
+        logits = model(X_t)
+        probs  = torch.softmax(logits, dim=1).cpu().numpy()
+    return probs
+
+
+async def _predict_batch_ensemble(bundle: dict, file: UploadFile,
+                                  sample_file: Optional[UploadFile],
+                                  preprocessor_id: Optional[str] = None,
+                                  user=None, db=None):
+    """ensemble bundle 的批次預測 — replay 訓練時的 fold-averaged → blender + stacker flow。
+
+    若 ensemble 訓練時用 'preprocessed' source (preprocessor_id 有值),
+    先把 raw test CSV 套同樣的 ColumnTransformer 才會跟訓練 schema 對得上。
+    """
+    import pandas as pd
+    _ensure_pipeline_path_for_unpickle()
+
+    # 1. 讀 CSV (原始欄位)
+    try:
+        raw = await file.read()
+        feat_df_raw = pd.read_csv(io.BytesIO(raw))   # 原樣保留供 ID + 沒範本時 output
+    except Exception as e:
+        raise HTTPException(400, f"CSV 解析失敗: {e}")
+
+    # 2. 若有 preprocessor → 先套 transform → 對齊 ensemble 訓練時看到的 schema
+    target_col = bundle.get("target", "")
+    if preprocessor_id and user is not None and db is not None:
+        try:
+            pp_entry = storage.get_preprocessor(preprocessor_id, user, db)
+            preprocessor = pp_entry["preprocessor"]
+            pp_target = pp_entry.get("target", "")
+            X_in = feat_df_raw.drop(columns=[pp_target], errors="ignore")
+            X_transformed = preprocessor.transform(X_in)
+            if hasattr(X_transformed, "toarray"):
+                X_transformed = X_transformed.toarray()
+            try:
+                tx_names = (list(preprocessor.get_feature_names_out())
+                            if hasattr(preprocessor, "get_feature_names_out")
+                            else [f"f{i}" for i in range(X_transformed.shape[1])])
+            except Exception:
+                tx_names = [f"f{i}" for i in range(X_transformed.shape[1])]
+            if len(tx_names) != X_transformed.shape[1]:
+                tx_names = [f"f{i}" for i in range(X_transformed.shape[1])]
+            feat_df = pd.DataFrame(X_transformed, columns=tx_names)
+        except HTTPException:
+            raise
+        except Exception as e:
+            raise HTTPException(400,
+                f"套用預處理失敗 — test.csv 的欄位需與訓練時的原始欄位一致: {e}")
+    else:
+        feat_df = feat_df_raw
+
+    # 3. 抽出 ensemble 需要的特徵 (對齊訓練時 _prepare_xy 的邏輯)
+    cols_required = bundle.get("feature_names_raw", [])
+    missing = [c for c in cols_required if c not in feat_df.columns]
+    if missing:
+        raise HTTPException(400,
+            f"CSV 缺少 {len(missing)} 個模型需要的特徵欄位: {missing[:10]}{'...' if len(missing) > 10 else ''}")
+    X_raw = feat_df[cols_required].fillna(0).values.astype(np.float32)
+
+    # 3. 每 config: 5 fold 預測平均
+    n_classes = int(bundle["n_classes"])
+    all_test_preds = []
+    for cfg_entry in bundle["configs"]:
+        folds = cfg_entry.get("folds") or []
+        if not folds:
+            continue
+        fold_preds = []
+        for fold in folds:
+            fb = fold.get("fb")
+            try:
+                X_fb = fb.transform(X_raw) if fb is not None else X_raw
+            except Exception as e:
+                raise HTTPException(500, f"FeatureBuilder.transform 失敗 ({cfg_entry['tag']}): {e}")
+            if "model" in fold:
+                # tabular
+                model = fold["model"]
+                pred = model.predict_proba(X_fb)
+            else:
+                # DL
+                pred = _predict_dl_fold(fold, X_fb, n_classes)
+            fold_preds.append(pred)
+        avg = np.mean(fold_preds, axis=0)
+        all_test_preds.append(avg)
+
+    if not all_test_preds:
+        raise HTTPException(500, "ensemble bundle 無任何 config 有 fold 可推論")
+
+    # 4. blender + stacker
+    blender = bundle["blender"]
+    stacker = bundle["stacker"]
+    try:
+        blend_pred = blender.predict_proba(all_test_preds)
+    except Exception:
+        blend_pred = blender.predict(all_test_preds)
+    try:
+        stack_pred = stacker.predict_proba(all_test_preds, X_orig=X_raw)
+    except Exception:
+        stack_pred = stacker.predict(all_test_preds, X_orig=X_raw)
+
+    # 5. 取 stacker (通常較強);若失敗回退 blender
+    final = stack_pred if stack_pred is not None else blend_pred
+
+    # 6. 解碼 label
+    le = bundle.get("label_encoder")
+    final_arr = np.asarray(final)
+    if final_arr.ndim == 2:
+        idx = final_arr.argmax(axis=1)
+    else:
+        idx = final_arr.astype(int)
+    preds = le.inverse_transform(idx) if le is not None else idx
+
+    # 7. submission / predicted CSV — ID 從 raw df 抓 (transformed df 沒這欄)
+    if sample_file is not None:
+        try:
+            sample_raw = await sample_file.read()
+            sub_df = pd.read_csv(io.BytesIO(sample_raw))
+        except Exception as e:
+            raise HTTPException(400, f"範本 submission 解析失敗: {e}")
+        if len(sub_df.columns) < 2:
+            raise HTTPException(400, "範本 submission 至少需要 2 欄 (ID 欄 + 預測欄)")
+        id_col   = sub_df.columns[0]
+        pred_col = sub_df.columns[1]
+        if id_col not in feat_df_raw.columns:
+            raise HTTPException(400, f"test.csv 缺少範本要求的 ID 欄位「{id_col}」")
+        out_df = pd.DataFrame({id_col: feat_df_raw[id_col], pred_col: preds})
+        out_name = "submission.csv"
+    else:
+        # 沒範本 → 在原始 raw df 加 prediction 欄,使用者一目了然
+        out_df = feat_df_raw.copy()
+        out_df["prediction"] = preds
+        out_name = (file.filename.replace(".csv", "_predicted.csv")
+                    if file.filename else "_predicted.csv")
+
+    csv_bytes = out_df.to_csv(index=False, encoding="utf-8-sig").encode("utf-8-sig")
+    return Response(
+        content=csv_bytes,
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{out_name}"'},
+    )
+
+
 @app.post("/api/predict/batch")
 async def predict_batch_endpoint(
     modelId: str = Form(...),
@@ -1412,35 +1675,73 @@ async def predict_batch_endpoint(
     db: DbSession = Depends(get_db),
 ):
     import pandas as pd
+    _ensure_pipeline_path_for_unpickle()
     entry = storage.get_model(modelId, user, db)
-    estimator     = entry["estimator"]
-    scaler        = entry["scaler"]
-    feature_names = entry["featureNames"]
+    estimator       = entry["estimator"]
+    scaler          = entry["scaler"]
+    feature_names   = entry["featureNames"]
     preprocessor_id = entry.get("preprocessorId")
+    bundle_meta     = entry.get("bundle") or {}
+
+    # Daniel ensemble:bundle.type 是真相 (estimator 可能因 size cap 沒存進 DB)
+    if bundle_meta.get("type") == "daniel_pipeline_ensemble":
+        if not (isinstance(estimator, dict) and estimator.get("version") == 1 and "configs" in estimator):
+            raise HTTPException(
+                status_code=410,
+                detail="此 ensemble 模型在儲存時 pickle 超過大小上限 (>200MB),estimator 沒進 DB,"
+                       "無法批次預測。請重訓 (建議 --fast 或減少 trials 讓 bundle 縮小)。",
+            )
+        # preprocessor_id / user / db 傳下去 — preprocessed source 訓的 ensemble
+        # 需要先把 raw test.csv 套同樣的 ColumnTransformer
+        return await _predict_batch_ensemble(estimator, file, sampleFile,
+                                             preprocessor_id=preprocessor_id,
+                                             user=user, db=db)
 
     # --- parse uploaded CSV ---
     try:
         raw = await file.read()
-        feat_df = pd.read_csv(io.BytesIO(raw))
+        feat_df_raw = pd.read_csv(io.BytesIO(raw))   # \u4fdd\u7559\u539f\u59cb\u6b04\u4f4d\u4f9b ID + \u6c92\u7bc4\u672c\u6642 output
     except Exception as e:
         raise HTTPException(400, f"CSV \u89e3\u6790\u5931\u6557: {e}")
 
-    # --- apply preprocessor if any ---
+    # --- apply preprocessor if any (raw \u2192 transformed) ---
+    # \u9810\u8655\u7406\u6a21\u578b\u8a13\u7df4\u6642\u7684 feature_names \u662f transformed \u5f8c\u7684\u540d\u7a31
+    # (\u4f8b:cat_pipeline__workclass_Private)\u3002\u76f4\u63a5\u62ff\u539f\u59cb test.csv \u7684\u6b04\u4f4d\u9078\u4e0d\u5230,
+    # \u5fc5\u9808\u7528 train \u6642\u7684 preprocessor \u628a raw \u2192 transformed \u518d select\u3002
     if preprocessor_id:
         try:
-            pp_entry = storage.get_preprocessor(preprocessor_id)
-            preprocessor = pp_entry["pipeline"]
-            pp_target    = pp_entry.get("target", "")
-            cols = [c for c in feat_df.columns if c != pp_target]
-            feat_df[cols] = preprocessor.transform(feat_df[cols])
+            pp_entry = storage.get_preprocessor(preprocessor_id, user, db)
+            preprocessor = pp_entry["preprocessor"]
+            pp_target = pp_entry.get("target", "")
+            # \u4e1f\u6389 target \u6b04\u4f4d (test.csv \u53ef\u80fd\u6709\u4e5f\u53ef\u80fd\u6c92\u6709)
+            X_in = feat_df_raw.drop(columns=[pp_target], errors="ignore")
+            X_transformed = preprocessor.transform(X_in)
+            # sparse \u2192 dense
+            if hasattr(X_transformed, "toarray"):
+                X_transformed = X_transformed.toarray()
+            # \u9084\u539f\u6210 DataFrame,column \u5c0d\u9f4a preprocessor \u7684 transformed names
+            try:
+                tx_names = (list(preprocessor.get_feature_names_out())
+                            if hasattr(preprocessor, "get_feature_names_out")
+                            else [f"f{i}" for i in range(X_transformed.shape[1])])
+            except Exception:
+                tx_names = [f"f{i}" for i in range(X_transformed.shape[1])]
+            if len(tx_names) != X_transformed.shape[1]:
+                tx_names = [f"f{i}" for i in range(X_transformed.shape[1])]
+            feat_df = pd.DataFrame(X_transformed, columns=tx_names)
+        except HTTPException:
+            raise
         except Exception as e:
-            raise HTTPException(400, f"\u5957\u7528\u9810\u8655\u7406\u5931\u6557 \u2014 test.csv \u7684\u6b04\u4f4d\u9700\u8207\u8a13\u7df4\u8cc7\u6599\u7684\u539f\u59cb\u6b04\u4f4d\u4e00\u81f4: {e}")
+            raise HTTPException(400,
+                f"\u5957\u7528\u9810\u8655\u7406\u5931\u6557 \u2014 test.csv \u7684\u6b04\u4f4d\u9700\u8207\u8a13\u7df4\u6642\u7684\u300c\u539f\u59cb\u6b04\u4f4d\u300d\u4e00\u81f4: {e}")
+    else:
+        feat_df = feat_df_raw   # raw \u6a21\u578b\u76f4\u63a5\u7528\u539f\u59cb df
 
     # --- select & order features ---
     missing = [f for f in feature_names if f not in feat_df.columns]
     if missing:
         raise HTTPException(400,
-            f"CSV \u7f3a\u5c11 {len(missing)} \u500b\u6a21\u578b\u9700\u8981\u7684\u7279\u5fb5\u6b04\u4f4d: {missing}")
+            f"CSV \u7f3a\u5c11 {len(missing)} \u500b\u6a21\u578b\u9700\u8981\u7684\u7279\u5fb5\u6b04\u4f4d (\u524d 10 \u500b): {missing[:10]}")
 
     X_t = feat_df[feature_names].values.astype(float)
     X   = scaler.transform(X_t) if scaler is not None else X_t
@@ -1461,13 +1762,15 @@ async def predict_batch_endpoint(
             raise HTTPException(400, "\u7bc4\u672c submission \u81f3\u5c11\u9700\u8981 2 \u6b04 (ID \u6b04 + \u9810\u6e2c\u6b04)")
         id_col   = sub_df.columns[0]
         pred_col = sub_df.columns[1]
-        if id_col not in feat_df.columns:
+        # ID \u5f9e\u539f\u59cb raw df \u6293 (transformed df \u6c92\u9019\u6b04)
+        if id_col not in feat_df_raw.columns:
             raise HTTPException(400,
                 f"test.csv \u7f3a\u5c11\u7bc4\u672c\u8981\u6c42\u7684 ID \u6b04\u4f4d\u300c{id_col}\u300d")
-        out_df = pd.DataFrame({id_col: feat_df[id_col], pred_col: preds})
+        out_df = pd.DataFrame({id_col: feat_df_raw[id_col], pred_col: preds})
         out_name = "submission.csv"
     else:
-        out_df   = feat_df[feature_names].copy()
+        # \u6c92\u7bc4\u672c \u2192 \u5728\u539f\u59cb raw df \u5f8c\u9762\u52a0 prediction \u6b04,\u4f7f\u7528\u8005\u4e00\u76ee\u4e86\u7136
+        out_df = feat_df_raw.copy()
         out_df["prediction"] = preds
         out_name = file.filename.replace(".csv", "_predicted.csv") if file.filename else "_predicted.csv"
 

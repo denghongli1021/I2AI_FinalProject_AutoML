@@ -55,6 +55,89 @@ def _prepare_xy(df, target_col, np, le=None):
     return X, y_enc, le
 
 
+def _dump_ensemble_bundle(result, *, task_type, n_classes, target_col, label_encoder,
+                          global_cfg, feature_names_raw, bundle_path):
+    """
+    把 PipelineResult 組成完整 ensemble bundle pickle (含 fold models + blender + stacker),
+    dump 到 bundle_path。回傳 None 表示無法 persist (某些 config cache hit 沒 fold artifacts)。
+    回傳 bundle_path 表示成功。
+
+    Bundle 結構見 [設計] 文件:configs 是每 config 的 fold list,blender/stacker 是 fitted 物件。
+    """
+    import pickle as _pickle
+
+    # 任何一個 config 沒 fold artifacts → blender/stacker 在訓練時用全部 config 的 OOF fit,
+    # 推論時若少 config,輸入維度對不上 → 拒絕 persist 比較安全。
+    if any(folds is None for folds in result.per_config_folds):
+        missing = [i for i, f in enumerate(result.per_config_folds) if f is None]
+        print(f"[bundle] config {missing} 來自快取沒有 fold artifacts → 跳過 ensemble persist "
+              f"(清掉 artifacts/ 後重訓可解決)")
+        return None
+
+    bundle = {
+        "version": 1,
+        "task_type": task_type,
+        "n_classes": int(n_classes),
+        "target": target_col,
+        "label_encoder": label_encoder,
+        "global_cfg": dict(global_cfg or {}),
+        "ts_preprocessor": None,    # 未來 preprocessed source 用
+        "configs": [
+            {"tag": tag, "folds": folds}
+            for tag, folds in zip(result.model_tags, result.per_config_folds)
+        ],
+        "blender": result.blender,
+        "stacker": result.stacker,
+        "model_tags": list(result.model_tags),
+        "feature_names_raw": list(feature_names_raw),
+    }
+    os.makedirs(os.path.dirname(bundle_path) or ".", exist_ok=True)
+    with open(bundle_path, "wb") as f:
+        _pickle.dump(bundle, f, protocol=_pickle.HIGHEST_PROTOCOL)
+    return bundle_path
+
+
+def _extract_feature_importance(result, per_model_meta):
+    """
+    從 ensemble 裡 OOF 分數最高的 tabular config 抽 feature_importance,
+    回傳 list of [name, score] tuple (依 score 降冪)。沒抓到回 []。
+    """
+    TABULAR = {"lgbm", "xgb", "catboost", "rf", "extra_trees"}
+    candidates = []
+    for i, (tag, meta) in enumerate(zip(result.model_tags, per_model_meta)):
+        if tag.split("_")[0] not in TABULAR:
+            continue
+        if meta.get("oofScore") is None:
+            continue
+        folds = result.per_config_folds[i] if i < len(result.per_config_folds) else None
+        if not folds:
+            continue
+        candidates.append((meta["oofScore"], i, folds))
+    if not candidates:
+        return []
+
+    candidates.sort(reverse=True)   # 高分排前
+    _, _best_i, best_folds = candidates[0]
+    first_fold = best_folds[0]
+    model = first_fold.get("model")
+    fb = first_fold.get("fb")
+    if model is None or not hasattr(model, "feature_importances_"):
+        return []
+    imps = list(model.feature_importances_)
+    # 取 transformed 後的特徵名稱;沒有就 f0/f1/...
+    try:
+        if fb is not None and hasattr(fb, "get_feature_names_out"):
+            names = list(fb.get_feature_names_out())
+        else:
+            names = [f"f{i}" for i in range(len(imps))]
+    except Exception:
+        names = [f"f{i}" for i in range(len(imps))]
+    if len(names) != len(imps):
+        names = [f"f{i}" for i in range(len(imps))]
+    pairs = sorted(zip(names, imps), key=lambda p: float(p[1]), reverse=True)
+    return [[str(n), float(s)] for n, s in pairs]
+
+
 def _prepare_xy_reg(df, target_col, np):
     """回歸專用:X (數值矩陣) + y (float 連續值,不編碼)。"""
     X = (df.drop(columns=[target_col])
@@ -76,11 +159,12 @@ def _run_ts_regression(X_tr, y_tr, X_te, y_te, target_col, source_tag, test_has_
     budget = _pt.TimeBudget(limit_sec=args.time_limit, t_start=t0)
     cfg = _pt.get_cfg_time(args.fast, n_samples=len(y_tr))
 
+    # 每次跑用獨立 artifacts dir (timestamp 為後綴),防止快取命中跳過重訓
     result = _pt.run_regression(
         X_tr, y_tr, X_te, cfg, budget,
         skip_tabular=args.skip_tabular,
         skip_dl=args.skip_dl,
-        artifacts_dir=os.path.join(ARTIFACTS_DIR, "api", source_tag),
+        artifacts_dir=os.path.join(ARTIFACTS_DIR, "api", source_tag, str(int(t0))),
         metric="rmse",
     )
 
@@ -234,6 +318,7 @@ def main():
             le = LabelEncoder()
             le.fit(fit_target_series.astype(str).values)
             X_tr, y_tr, _ = _prepare_xy(df_tr, target_col, np, le=le)
+            feature_cols_classify = list(df_tr.drop(columns=[target_col]).select_dtypes(include=[np.number]).columns)
             if test_has_label:
                 X_te, y_te, _ = _prepare_xy(df_te, target_col, np, le=le)
             else:
@@ -282,6 +367,7 @@ def main():
                 return 1
 
             X_all, y_all, le = _prepare_xy(df, target_col, np)
+            feature_cols_classify = list(df.drop(columns=[target_col]).select_dtypes(include=[np.number]).columns)
             n_classes = len(le.classes_)
             if X_all.shape[1] == 0:
                 print(f"__RESULT_JSON__:{json.dumps({'ok': False, 'error': '沒有可用的數值欄位 (pipeline 僅讀數值型,請先做 one-hot 或選只含數值欄的資料集)'})}")
@@ -315,13 +401,17 @@ def main():
         cfg = _pl.get_cfg(args.fast, n_samples=len(y_tr))
         cfg["is_timeseries"] = is_forecasting
 
+        # 每次跑用獨立 artifacts dir (timestamp 為後綴),避免同 CSV 第二次跑時
+        # OOF/.npy 快取命中導致 fold model 沒重訓 → ensemble bundle 拒絕 persist
+        run_artifacts_dir = os.path.join(ARTIFACTS_DIR, "api", source_tag, str(int(t0)))
+
         result = _pl.run(
             X_tr, y_tr, X_te, n_classes, cfg, budget,
             skip_tabular=args.skip_tabular,
             skip_dl=args.skip_dl,
             no_nas=args.no_nas,
             is_ts=is_forecasting,
-            artifacts_dir=os.path.join(ARTIFACTS_DIR, "api", source_tag),
+            artifacts_dir=run_artifacts_dir,
             metric=args.metric,
         )
 
@@ -406,6 +496,42 @@ def main():
 
         def _r(v): return round(v, 4) if v is not None else None
 
+        # ── Ensemble bundle 持久化 (給 batch predict / re-login 用) ──────────
+        # 診斷:印出每 config 的 fold artifact 狀態
+        _folds_status = []
+        for _i, _f in enumerate(getattr(result, "per_config_folds", []) or []):
+            _tag = result.model_tags[_i] if _i < len(result.model_tags) else f"c{_i}"
+            if _f is None:
+                _folds_status.append(f"{_tag}=CACHED(None)")
+            else:
+                _folds_status.append(f"{_tag}={len(_f)}folds")
+        print(f"[bundle] per_config_folds: {' / '.join(_folds_status) if _folds_status else '(empty)'}",
+              flush=True)
+        bundle_path = _dump_ensemble_bundle(
+            result,
+            task_type="classification",
+            n_classes=n_classes,
+            target_col=target_col,
+            label_encoder=le,
+            global_cfg=cfg,
+            feature_names_raw=feature_cols_classify,
+            bundle_path=os.path.join(run_artifacts_dir, "ensemble_bundle.pkl"),
+        )
+        print(f"[bundle] _dump_ensemble_bundle 回傳: {bundle_path!r}", flush=True)
+        # 從 ensemble 中最佳 tabular config 抽 feature_importance (cap 200 個)
+        fi_pairs = _extract_feature_importance(result, per_model)[:200]
+        # testTrue / testPred — 給 Insights 圖表用 (cap 5000 筆,防 SSE done 事件爆)
+        _CAP = 5000
+        if test_has_label and y_te is not None:
+            test_true_decoded = le.inverse_transform(y_te[:_CAP]).tolist()
+            test_true_out = [str(v) for v in test_true_decoded]
+        else:
+            test_true_out = None
+        test_pred_out = [str(v) for v in best_preds_labels[:_CAP].tolist()]
+        # X_test 樣本 (cap 50 筆) — 給 SHAP 當 background;raw 特徵值 + 對應 featureNames
+        _SHAP_CAP = 50
+        x_test_sample = _np.asarray(X_te[:_SHAP_CAP]).tolist()
+
         out = {
             "ok": True,
             "metric": m_name,
@@ -435,6 +561,13 @@ def main():
             "predictions": [str(v) for v in best_preds_labels.tolist()],
             "predictionsBlend": [str(v) for v in preds_blend_labels.tolist()],
             "predictionsStack": [str(v) for v in preds_stack_labels.tolist()],
+            # 新增:ensemble bundle + Insights 圖表資料
+            "ensembleBundlePath": bundle_path,
+            "featureNames": feature_cols_classify,
+            "featureImportance": fi_pairs,
+            "testTrueDecoded": test_true_out,
+            "testPredDecoded": test_pred_out,
+            "xTestSample": x_test_sample,   # 50 筆 raw 特徵,給 SHAP 用
         }
         print(f"__RESULT_JSON__:{json.dumps(out, ensure_ascii=False)}")
         return 0

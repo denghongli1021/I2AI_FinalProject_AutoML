@@ -4475,6 +4475,37 @@ async function startDanielExperimentTraining(ds, targetCol, options) {
       engine: 'daniel',  // 標記是 Daniel 跑的,洞察頁可以判斷
     });
 
+    // 訓練後從 DB re-hydrate,把上面塞的 placeholder bundle 換成 DB 真實的 ensemble Model
+    // (backend 在訓練成功時用 storage.save_model 寫入 ensemble bundle,training_run_id 對得起來;
+    //  hydrate 後 MLEngine.trainedModels 會變成可以 batch predict / 跑 SHAP 的真模型)
+    try {
+      await hydrateUserHistoryFromDb();
+      console.log(`[pipeline] re-hydrate done. runId=${runId}, _trainingHistory ids:`,
+                  _trainingHistory.map(h => h.id).slice(0, 5));
+      // 用 DB 的版本覆蓋掉 placeholder,但只取對應的 run
+      let dbRun = _trainingHistory.find(h => h.id === runId);
+      // SSE 的 runId 是 DB UUID;pushTrainingHistory 塞的是 client 假 id (run_xxx)。
+      // 若找不到,fallback 用最新一筆 (剛訓練的應該排在第一)
+      if (!dbRun && _trainingHistory.length > 0) {
+        console.warn(`[pipeline] 找不到 runId=${runId} 在 _trainingHistory,fallback 用第 0 筆`);
+        dbRun = _trainingHistory[0];
+      }
+      if (dbRun && dbRun.models && dbRun.models.length > 0) {
+        // 同步 _activeHistoryRunId 到 DB id,否則 cascade dropdown 切到別筆
+        _activeHistoryRunId = dbRun.id;
+        MLEngine.trainedModels = dbRun.models.sort(
+          (a, b) => (b.metrics?.testScore || 0) - (a.metrics?.testScore || 0)
+        );
+        console.log(`[pipeline] DB re-hydrate: ${MLEngine.trainedModels.length} 個 model 取代 placeholder ` +
+                    `(activeHistoryRunId=${_activeHistoryRunId})`);
+        renderExperimentResults(MLEngine.trainedModels, { taskType: pipelineTaskType, target: targetCol });
+      } else {
+        console.warn(`[pipeline] dbRun 沒 models,保留 placeholder. dbRun=`, dbRun);
+      }
+    } catch (e) {
+      console.warn('[pipeline] 訓練後 re-hydrate 失敗:', e.message);
+    }
+
     notify(
       'Pipeline 完成 ✓',
       `${ds.fileName || 'Dataset'} — 最佳: ${best.name} (${best.metrics.testScoreLabel}=${best.metrics.testScore.toFixed(4)})`,
@@ -4858,8 +4889,15 @@ function initBatchPredict(models) {
   const statusEl = document.getElementById('batch-predict-status');
   if (!modelSel || !btn) return;
 
-  // 只列有 id 且後端有對應 estimator 的模型 — Daniel pipeline 沒在 MODELS store,跳過
-  const usable = models.filter(m => m.id && m.type !== 'daniel_pipeline');
+  // 只列有 id 且後端有對應 estimator 的模型。
+  // - sklearn 模型:全部都可預測
+  // - Daniel ensemble (canPredict=true):後端有完整 ensemble bundle,可走批次預測
+  // - Daniel placeholder (沒有 canPredict):純歷史紀錄,沒實 estimator,排除
+  const usable = models.filter(m => {
+    if (!m.id) return false;
+    if (m.type === 'daniel_pipeline') return false;   // 舊 placeholder (DB 只有 summary)
+    return true;
+  });
   modelSel.innerHTML = '';
   if (usable.length === 0) {
     modelSel.innerHTML = '<option value="">無可用模型 (需後端 API 模式訓練)</option>';
@@ -5051,6 +5089,8 @@ function renderRealLeaderboard() {
   let models = MLEngine.trainedModels;
   if (models.length === 0) return;
 
+  _lbWirePredictInputs();   // 確保上方 file input 的 change listener 綁好 (idempotent)
+
   // Apply filters
   const filterSource = document.getElementById('lb-filter-source')?.value || '';
   const filterType = document.getElementById('lb-filter-type')?.value || '';
@@ -5121,17 +5161,23 @@ function renderRealLeaderboard() {
         ? '<span class="inline-flex items-center justify-center w-7 h-7 rounded-full bg-dark-600 text-dark-200 text-xs font-bold">2</span>'
         : `<span class="text-dark-400 text-sm">${i + 1}</span>`;
 
+    // metric 全部走「沒值就 —」防禦 — pipeline ensemble 在 test.csv 沒 target 時這些可能是 null
+    const _fmt = (v, digits = 4, suffix = '') =>
+      (typeof v === 'number' && isFinite(v))
+        ? `${v.toFixed(digits)}${suffix}`
+        : '<span class="text-dark-500">—</span>';
+    const mm = m.metrics || {};
     let extraCols;
     if (isReg) {
       extraCols = `
-        <td class="py-3 px-4 font-mono text-xs">${m.metrics.testR2.toFixed(4)}</td>
-        <td class="py-3 px-4 font-mono text-xs">${m.metrics.testRMSE.toFixed(4)}</td>
-        <td class="py-3 px-4 font-mono text-xs">${m.metrics.testMAE.toFixed(4)}</td>`;
+        <td class="py-3 px-4 font-mono text-xs">${_fmt(mm.testR2, 4)}</td>
+        <td class="py-3 px-4 font-mono text-xs">${_fmt(mm.testRMSE, 4)}</td>
+        <td class="py-3 px-4 font-mono text-xs">${_fmt(mm.testMAE, 4)}</td>`;
     } else {
       extraCols = `
-        <td class="py-3 px-4 font-mono text-xs">${m.metrics.f1.toFixed(4)}</td>
-        <td class="py-3 px-4 font-mono text-xs ${m.metrics.auc > 0 ? '' : 'text-dark-500'}">${m.metrics.auc > 0 ? m.metrics.auc.toFixed(4) : '—'}</td>
-        <td class="py-3 px-4 font-mono text-xs">${(m.metrics.testAccuracy * 100).toFixed(2)}%</td>`;
+        <td class="py-3 px-4 font-mono text-xs">${_fmt(mm.f1, 4)}</td>
+        <td class="py-3 px-4 font-mono text-xs ${mm.auc > 0 ? '' : 'text-dark-500'}">${mm.auc > 0 ? mm.auc.toFixed(4) : '—'}</td>
+        <td class="py-3 px-4 font-mono text-xs">${_fmt(mm.testAccuracy * 100, 2, '%')}</td>`;
     }
 
     // 標籤:最佳 (rank 1) + 最快 (訓練時間最短)
@@ -5147,10 +5193,16 @@ function renderRealLeaderboard() {
       ? (m.inferLatency < 0.01 ? '<0.01ms' : m.inferLatency.toFixed(3) + 'ms')
       : '<span class="text-dark-600">—</span>';
 
-    // 操作:分析按鈕 → 跳到洞察頁; 刪除按鈕 → 呼叫 API 刪除
+    // 操作:分析 → 跳洞察; 預測 → batch predict; ✕ → 刪除
+    // Pipeline 舊 placeholder (type === 'daniel_pipeline') 是前端假 id,後端查 DB 會 404 → 不顯示預測按鈕
+    const isLegacyPipelinePlaceholder = m.type === 'daniel_pipeline';
+    const predictBtn = isLegacyPipelinePlaceholder
+      ? `<span class="text-xs text-dark-600" title="舊版 Pipeline 紀錄,後端沒有 estimator pickle。重新訓練即可啟用預測。">預測 (需重訓)</span>`
+      : `<button class="text-xs text-accent-400 hover:text-accent-300 transition-colors" onclick="leaderboardPredict('${m.id}', this)" title="用上方上傳的 test CSV 批次預測,下載對應 CSV">預測</button>`;
     const actions = m.id
       ? `<span class="flex items-center gap-2">` +
         `<button class="text-xs text-primary-400 hover:text-primary-300 transition-colors" onclick="analyzeModel('${m.id}')">分析</button>` +
+        predictBtn +
         `<button class="text-xs text-danger-400 hover:text-danger-300 transition-colors" onclick="deleteModelById('${m.id}', this)" title="刪除模型">✕</button>` +
         `</span>`
       : '<span class="text-dark-600 text-xs">—</span>';
@@ -5168,13 +5220,16 @@ function renderRealLeaderboard() {
       srcBadge = '<span class="text-dark-500 text-xs">—</span>';
     }
 
+    const trainTimeStr = (typeof m.trainTime === 'number' && isFinite(m.trainTime))
+      ? `${m.trainTime.toFixed(0)}ms`
+      : '<span class="text-dark-500">—</span>';
     tr.innerHTML = `
       <td class="py-3 px-4"><input type="checkbox" class="model-select-cb" data-idx="${i}"></td>
       <td class="py-3 px-4">${rankEl}</td>
       <td class="py-3 px-4">${srcBadge}</td>
       <td class="py-3 px-4"><span class="font-medium">${escapeHtml(cleanName)}</span></td>
       ${extraCols}
-      <td class="py-3 px-4 font-mono text-xs">${m.trainTime.toFixed(0)}ms</td>
+      <td class="py-3 px-4 font-mono text-xs">${trainTimeStr}</td>
       <td class="py-3 px-4 font-mono text-xs">${lat}</td>
       <td class="py-3 px-4">${tags}</td>
       <td class="py-3 px-4">${actions}</td>
@@ -5445,6 +5500,118 @@ let _shapRequestedModelId = null;   // 排行榜「分析」按鈕指定要看�
 function analyzeModel(modelId) {
   _shapRequestedModelId = modelId || null;
   navigateTo('insights');
+}
+
+// 排行榜上方的 file input — 給 leaderboardPredict() 用
+function _lbPredictTestFile() {
+  return document.getElementById('lb-predict-test-csv')?.files?.[0] || null;
+}
+function _lbPredictSampleFile() {
+  return document.getElementById('lb-predict-sample-csv')?.files?.[0] || null;
+}
+function _lbSetStatus(msg, level) {
+  const el = document.getElementById('lb-predict-status');
+  if (!el) return;
+  const colorMap = { info: 'text-dark-400', success: 'text-success-400',
+                     error: 'text-danger-400', warning: 'text-warning-400' };
+  el.className = `text-xs px-4 pb-3 ${colorMap[level] || colorMap.info}`;
+  el.textContent = msg || '';
+  el.classList.toggle('hidden', !msg);
+}
+
+// 排行榜每列的「預測」按鈕觸發 — 用上面 file input 的測試 CSV + 範本跑批次預測
+async function leaderboardPredict(modelId, btnEl) {
+  const testFile   = _lbPredictTestFile();
+  const sampleFile = _lbPredictSampleFile();
+  if (!testFile) {
+    _lbSetStatus('✗ 請先在上方選擇「測試 CSV」', 'error');
+    return;
+  }
+  if (typeof ApiClient === 'undefined' || !ApiClient.enabled) {
+    _lbSetStatus('✗ 批次預測需要開啟「使用 Python 後端 API」', 'error');
+    return;
+  }
+  const origLabel = btnEl?.textContent;
+  if (btnEl) { btnEl.disabled = true; btnEl.textContent = '預測中…'; }
+  _lbSetStatus(`處理中 — 模型 ${modelId} × ${testFile.name}`, 'info');
+  setGlobalStatus('running', `批次預測中 — ${testFile.name}`);
+  try {
+    const blob = await ApiClient.predictBatch(modelId, testFile, sampleFile);
+    const outName = sampleFile
+      ? 'submission.csv'
+      : `${testFile.name.replace(/\.[^.]+$/, '')}_predicted.csv`;
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = outName;
+    document.body.appendChild(a); a.click(); a.remove();
+    URL.revokeObjectURL(url);
+    const note = sampleFile ? '(已套用範本 submission 格式)' : '(新增 prediction 欄)';
+    _lbSetStatus(`✓ 預測完成,已下載 ${outName} ${note}`, 'success');
+    setGlobalStatus('success', `預測完成 — ${outName}`);
+    notify('批次預測完成 ✓', `${testFile.name} → ${outName}`, 'success');
+  } catch (e) {
+    _lbSetStatus(`✗ 預測失敗: ${e.message}`, 'error');
+    setGlobalStatus('error', '預測失敗');
+    notify('批次預測失敗', e.message, 'error');
+  } finally {
+    if (btnEl) { btnEl.disabled = false; btnEl.textContent = origLabel || '預測'; }
+  }
+}
+
+// 排行榜 header 中的緊湊 file picker — change 時把 label 文字換成檔名 + 顯示清除鈕
+// 重點:input 用 display:none 隱藏時,某些瀏覽器不會自動把 label click 派發過去 →
+//      改用 JS 顯式 input.click(),確保任何點擊都能開檔案選取視窗
+function _lbWirePredictInputs() {
+  const wire = (labelId, inputId, textId, clearId, defaultText) => {
+    const label  = document.getElementById(labelId);
+    const input  = document.getElementById(inputId);
+    const text   = document.getElementById(textId);
+    const clear  = document.getElementById(clearId);
+    if (!input || input.__wired) return;
+    input.__wired = true;
+
+    const refresh = () => {
+      const f = input.files?.[0];
+      if (f && text) {
+        const short = f.name.length > 24 ? f.name.slice(0, 22) + '…' : f.name;
+        text.textContent = short;
+        text.classList.remove('text-dark-400');
+        text.classList.add('text-primary-300');
+        clear?.classList.remove('hidden');
+      } else if (text) {
+        text.textContent = defaultText;
+        text.classList.add('text-dark-400');
+        text.classList.remove('text-primary-300');
+        clear?.classList.add('hidden');
+      }
+    };
+    input.addEventListener('change', refresh);
+
+    // label 整塊都可點 → 觸發 input
+    if (label) {
+      label.addEventListener('click', (e) => {
+        // 點 ✕ 清除鈕時,不要也觸發檔案選取
+        if (clear && (e.target === clear || clear.contains(e.target))) return;
+        // 點到 input 自己時 (Chrome 偶爾會 native 觸發),不要重複觸發
+        if (e.target === input) return;
+        e.preventDefault();
+        input.click();
+      });
+    }
+
+    if (clear) {
+      clear.addEventListener('click', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        input.value = '';
+        refresh();
+      });
+    }
+  };
+  wire('lb-predict-test-label',   'lb-predict-test-csv',   'lb-predict-test-text',
+       'lb-predict-test-clear',   '測試 CSV');
+  wire('lb-predict-sample-label', 'lb-predict-sample-csv', 'lb-predict-sample-text',
+       'lb-predict-sample-clear', 'submission 範本 (選填)');
 }
 
 async function deleteModelById(modelId, btnEl) {
@@ -5838,11 +6005,19 @@ function renderRealFeatureImportance(model) {
 
   const names = model.featureNames;
   const values = model.featureImportance;
-  if (!names || !values || names.length === 0) {
+  // 兩種格式都接受:
+  //   A. 純 array,跟 featureNames 等長對齊 (sklearn 引擎)
+  //   B. [[name, score], ...] 已配對 (daniel ensemble — pipeline 轉換後的特徵名跟 raw 不一樣)
+  let pairs;
+  if (Array.isArray(values) && values.length > 0 && Array.isArray(values[0])) {
+    pairs = values.map(([n, v]) => ({ name: String(n), value: Number(v) || 0 }));
+  } else if (names && values && names.length > 0) {
+    pairs = names.map((n, i) => ({ name: n, value: values[i] }));
+  } else {
     _chartPlaceholderMessage(chart, '此歷史紀錄的特徵重要性資料已被壓縮\n請重新訓練以查看完整圖表');
     return;
   }
-  const pairs = names.map((n, i) => ({ name: n, value: values[i] })).sort((a, b) => b.value - a.value).slice(0, 15);
+  pairs = pairs.sort((a, b) => b.value - a.value).slice(0, 15);
 
   chart.setOption({
     tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' }, backgroundColor: '#1e293b', borderColor: '#334155', textStyle: { color: '#e2e8f0', fontSize: 11 } },

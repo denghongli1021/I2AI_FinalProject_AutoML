@@ -153,7 +153,8 @@ def get_cfg(fast: bool, n_samples: int = 10_000) -> dict:
 class PipelineResult:
     """封裝 run() 的所有輸出，呼叫端按需取用。"""
 
-    def __init__(self, test_blend, test_stack, all_oof, all_test, model_tags, blender, stacker):
+    def __init__(self, test_blend, test_stack, all_oof, all_test, model_tags, blender, stacker,
+                 per_config_folds=None):
         self.test_blend  = test_blend    # np.ndarray — Ensemble A（Nelder-Mead）測試預測
         self.test_stack  = test_stack    # np.ndarray — Ensemble B（Meta-Learner）測試預測
         self.all_oof     = all_oof       # list[np.ndarray] — 各模型 OOF 預測
@@ -161,6 +162,10 @@ class PipelineResult:
         self.model_tags  = model_tags    # list[str]
         self.blender     = blender       # NelderMeadBlender（已 fit）
         self.stacker     = stacker       # MetaLearnerStacker（已 fit）
+        # per_config_folds[i] = [{"fb": .., "model": ..} ...] for tabular configs;
+        # 或 [{"fb": .., "model_name": .., "arch_params": .., "state_dict": .., ...} ...] for DL.
+        # 若 cache hit 沒重訓的 config,該 entry 為 None。給 ensemble 持久化用。
+        self.per_config_folds = per_config_folds or []
 
 
 # ── 主引擎 ────────────────────────────────────────────────────────────────────
@@ -417,19 +422,25 @@ def run(
         raise RuntimeError("沒有任何 model config！請確認 HPO 成功完成。")
 
     print(f"\n[7] 5-Fold CV — {len(all_configs)} 個模型 config ...")
+    per_config_folds = []   # 每 config 一個 list of fold artifacts (cache hit 則為 None)
     for i, config in enumerate(all_configs):
         tag      = f"{config['model_name']}_{config['feature_set']}_c{i}".replace("/", "_")
         oof_path = os.path.join(artifacts_dir, f"{tag}_oof.npy")
         tst_path = os.path.join(artifacts_dir, f"{tag}_test.npy")
         if os.path.exists(oof_path) and os.path.exists(tst_path):
-            print(f"  [CV] 載入快取 {tag}")
+            # 快取命中:OOF / test 不重算,但 fold model 也沒重訓 → bundle 缺這個 config
+            print(f"  [CV] 載入快取 {tag} (fold model 沒在快取裡 → ensemble bundle 會缺這個 config)")
             oof      = np.load(oof_path)
             test_pred = np.load(tst_path)
+            per_config_folds.append(None)
         else:
+            fold_artifacts = []   # 收集這個 config 的 5 fold (fb, model)
             oof, test_pred = run_cv(
                 config, X_train, y_train, X_test, n_classes,
                 device=DEVICE, tag=tag, global_cfg=cfg, metric=metric,
+                collect_folds=fold_artifacts,
             )
+            per_config_folds.append(fold_artifacts)
         all_oof.append(oof)
         all_test.append(test_pred)
         model_tags.append(tag)
@@ -483,4 +494,5 @@ def run(
         model_tags=model_tags,
         blender=blender,
         stacker=stacker,
+        per_config_folds=per_config_folds,
     )

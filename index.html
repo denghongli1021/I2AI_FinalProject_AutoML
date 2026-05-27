@@ -1581,9 +1581,28 @@
           </div>
         </div>
         <div id="leaderboard-demo-content">
+
         <div class="card mb-6">
           <div class="card-header">
             <h3 class="card-title">模型排行榜</h3>
+
+            <!-- 中央:批次預測 CSV 上傳 (緊湊版) — 上傳後在每列點「預測」可下載 -->
+            <div class="flex items-center gap-3 text-xs" title="上傳後在每列點「預測」按鈕用該模型生成對應的 CSV">
+              <label id="lb-predict-test-label" class="flex items-center gap-1.5 px-2.5 py-1.5 bg-dark-800 hover:bg-dark-700 border border-dark-600 hover:border-primary-500 rounded-lg cursor-pointer transition-colors">
+                <svg class="w-3.5 h-3.5 text-dark-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 13h6m-3-3v6m5 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/></svg>
+                <span id="lb-predict-test-text" class="text-dark-300">測試 CSV</span>
+                <button type="button" id="lb-predict-test-clear" class="hidden text-dark-500 hover:text-danger-400 ml-1" title="清除">✕</button>
+                <input type="file" id="lb-predict-test-csv" accept=".csv,.tsv,.txt" class="hidden">
+              </label>
+              <span class="text-dark-600">+</span>
+              <label id="lb-predict-sample-label" class="flex items-center gap-1.5 px-2.5 py-1.5 bg-dark-800 hover:bg-dark-700 border border-dark-600 hover:border-primary-500 rounded-lg cursor-pointer transition-colors" title="範本 submission (選填) — 給才會輸出 Kaggle 格式;不給輸出原欄位 + prediction">
+                <svg class="w-3.5 h-3.5 text-dark-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/></svg>
+                <span id="lb-predict-sample-text" class="text-dark-400">submission 範本 (選填)</span>
+                <button type="button" id="lb-predict-sample-clear" class="hidden text-dark-500 hover:text-danger-400 ml-1" title="清除">✕</button>
+                <input type="file" id="lb-predict-sample-csv" accept=".csv,.tsv,.txt" class="hidden">
+              </label>
+            </div>
+
             <div class="flex items-center gap-3 flex-wrap">
               <div id="lb-history-cascade" class="history-cascade flex items-center gap-2"></div>
               <!-- Filter chips -->
@@ -1603,6 +1622,7 @@
               <button id="btn-compare" class="btn btn-sm btn-primary" disabled>比較選取的模型</button>
             </div>
           </div>
+          <p id="lb-predict-status" class="text-xs px-4 py-2 hidden border-b border-dark-700/30"></p>
           <div class="overflow-x-auto">
             <table class="w-full text-sm" id="leaderboard-table">
               <thead>
