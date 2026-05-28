@@ -61,7 +61,7 @@ _SCOUT_DEFAULTS: dict = {
         "feature_set": "raw",
         "depth": 6,
         "learning_rate": 0.05,
-        "iterations": 150,
+        "iterations": 500,
         "l2_leaf_reg": 3.0,
         "bagging_temperature": 0.5,
     },
@@ -133,9 +133,9 @@ def _tabular_space(name: str, trial: optuna.Trial, feat_sets: list,
         })
     elif name == "catboost":
         params.update({
-            "depth": trial.suggest_int("depth", 4, 6),
+            "depth": trial.suggest_int("depth", 4, 10),
             "learning_rate": trial.suggest_float("learning_rate", 5e-3, 0.3, log=True),
-            "iterations": trial.suggest_int("iterations", 100, 200),
+            "iterations": trial.suggest_int("iterations", 200, 1000),
             "l2_leaf_reg": trial.suggest_float("l2_leaf_reg", 1e-8, 10.0, log=True),
             "bagging_temperature": trial.suggest_float("bagging_temperature", 0.0, 1.0),
         })
@@ -185,6 +185,9 @@ def _tabular_space(name: str, trial: optuna.Trial, feat_sets: list,
 
 def _dl_train_space(trial: optuna.Trial) -> dict:
     """DL 訓練超參數搜尋空間（CNN / MLP 用）。"""
+    n_epochs = trial.suggest_int("n_epochs", 20, 50)
+    # t_max ∈ [n_epochs//2, n_epochs]，確保 CosineAnnealingLR 最多 2 個週期
+    t_max = trial.suggest_int("t_max", max(5, n_epochs // 2), n_epochs)
     return {
         "lr": trial.suggest_float("lr", 1e-5, 1e-2, log=True),
         "weight_decay": trial.suggest_float("weight_decay", 1e-6, 1e-2, log=True),
@@ -192,14 +195,17 @@ def _dl_train_space(trial: optuna.Trial) -> dict:
         "label_smoothing": trial.suggest_float("label_smoothing", 0.0, 0.2),
         "mixup_alpha": trial.suggest_float("mixup_alpha", 0.0, 0.5),
         "mixup_prob": trial.suggest_float("mixup_prob", 0.0, 1.0),
-        "t_max": trial.suggest_int("t_max", 5, 30),
-        "n_epochs": trial.suggest_int("n_epochs", 20, 50),
+        "t_max": t_max,
+        "n_epochs": n_epochs,
         "patience": trial.suggest_int("patience", 5, 10),
     }
 
 
 def _transformer_train_space(trial: optuna.Trial) -> dict:
     """Transformer / PatchTST 專用訓練超參數（更多 epoch、更低 lr）。"""
+    n_epochs = trial.suggest_int("n_epochs", 80, 200)
+    # t_max ∈ [n_epochs//2, n_epochs]，確保 CosineAnnealingLR 最多 2 個週期
+    t_max = trial.suggest_int("t_max", max(30, n_epochs // 2), n_epochs)
     return {
         "lr": trial.suggest_float("lr", 1e-5, 3e-3, log=True),
         "weight_decay": trial.suggest_float("weight_decay", 1e-5, 1e-2, log=True),
@@ -207,8 +213,8 @@ def _transformer_train_space(trial: optuna.Trial) -> dict:
         "label_smoothing": trial.suggest_float("label_smoothing", 0.0, 0.15),
         "mixup_alpha": trial.suggest_float("mixup_alpha", 0.0, 0.4),
         "mixup_prob": trial.suggest_float("mixup_prob", 0.0, 0.8),
-        "t_max": trial.suggest_int("t_max", 30, 100),
-        "n_epochs": trial.suggest_int("n_epochs", 80, 200),
+        "t_max": t_max,
+        "n_epochs": n_epochs,
         "patience": trial.suggest_int("patience", 10, 20),
     }
 
@@ -239,6 +245,14 @@ def _transformer_arch_space(trial: optuna.Trial, in_features: int) -> dict:
         "ff_dim": trial.suggest_categorical("ff_dim", [256, 512, 1024, 2048]),
         "dropout": trial.suggest_float("dropout", 0.0, 0.3),
         "norm_first": norm_first,
+    }
+
+
+def _resnet_arch_space(trial: optuna.Trial) -> dict:
+    """ResNet1D_18 架構搜尋空間（固定深度，只搜 channels 與 dropout）。"""
+    return {
+        "channels": trial.suggest_categorical("channels", [32, 64, 128, 256]),
+        "dropout": trial.suggest_float("dropout", 0.0, 0.5),
     }
 
 
@@ -391,7 +405,7 @@ class TabularHPO:
                         import lightgbm as _lgb
                         m.fit(X_tr, y[tr_idx],
                               eval_set=[(X_val, y[val_idx])],
-                              callbacks=[_lgb.early_stopping(50, verbose=False),
+                              callbacks=[_lgb.early_stopping(100, verbose=False),
                                          _lgb.log_evaluation(-1)])
                     elif hasattr(m, "early_stopping_rounds") and m.early_stopping_rounds:
                         m.fit(X_tr, y[tr_idx], eval_set=[(X_val, y[val_idx])], verbose=False)
@@ -648,8 +662,10 @@ class DLHPO:
                 # arch space 只在第一個 fold 確定（in_features 跨 fold 穩定）
                 if i == 0:
                     cur_in = X_tr.shape[1]
-                    if self.model_name in ("cnn1d", "resnet1d"):
+                    if self.model_name == "cnn1d":
                         arch_p = _cnn_arch_space(trial)
+                    elif self.model_name == "resnet1d":
+                        arch_p = _resnet_arch_space(trial)
                     elif self.model_name == "tcn":
                         arch_p = _tcn_arch_space(trial)
                     elif self.model_name == "patchtst":

@@ -4,7 +4,10 @@ ucr_ts_80*/
 
 # 模型快取
 autogluon_models/
-artifacts/
+artifacts/**
+!artifacts/single/
+!artifacts/single/179_adult/
+!artifacts/single/179_adult/**
 catboost_info/
 
 # 本地測試與內部文件

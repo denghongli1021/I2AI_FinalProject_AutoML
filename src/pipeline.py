@@ -97,7 +97,7 @@ def get_cfg(fast: bool, n_samples: int = 10_000) -> dict:
             "scout_trials": 3,    "scout_val_size": 0.2, "scout_ratio": 2 / 3,
             "nas_epochs": 5,      "nas_candidates": 5,   "nas_rounds": 2,
             "mlp_train_trials": 3,"mlp_top_k": 1,
-            "dl_trials": 3,       "transformer_trials": 15, "dl_top_k": 1,
+            "dl_trials": 3,       "transformer_trials": 10, "dl_top_k": 1,
             "meta_trials": 3,     "blend_restarts": 1,
             "n_repeats": 1,       "n_seeds": 1,
             "use_kpca": False,    "use_kmeans": False,
@@ -424,17 +424,26 @@ def run(
 
     # ── [7.5] 儲存最佳 Tabular 與 DL 模型 ────────────────────────────────────
     from src.metrics import calculate_score as _calc
-    _TABULAR = {"lgbm", "xgb", "catboost", "rf", "extra_trees", "logreg", "knn"}
-    _DL      = {"mlp", "cnn1d", "resnet1d", "tcn", "transformer", "patchtst", "tsnet"}
+    _TABULAR   = {"lgbm", "xgb", "catboost", "rf", "extra_trees", "logreg", "knn"}
+    _DL        = {"mlp", "cnn1d", "resnet1d", "tcn", "transformer", "patchtst", "tsnet"}
+    _ALL_NAMES = sorted(_TABULAR | _DL, key=len, reverse=True)
+
+    def _model_type(tag: str) -> str:
+        """從 tag（如 extra_trees_raw_stat_c0）還原正確的 model_name。"""
+        for n in _ALL_NAMES:
+            if tag.startswith(n + "_"):
+                return n
+        return tag.split("_")[0]
+
     tab_candidates = [
         (_calc(y_train, oof.argmax(1), metric=metric), tag)
         for tag, oof in zip(model_tags, all_oof)
-        if tag.split("_")[0] in _TABULAR
+        if _model_type(tag) in _TABULAR
     ]
     dl_candidates = [
         (_calc(y_train, oof.argmax(1), metric=metric), tag)
         for tag, oof in zip(model_tags, all_oof)
-        if tag.split("_")[0] in _DL
+        if _model_type(tag) in _DL
     ]
     for candidates, ext, dst_name in [
         (tab_candidates, ".pkl", "best_tabular_model.pkl"),
@@ -459,6 +468,30 @@ def run(
         if os.path.exists(fb_src):
             shutil.copy2(fb_src, fb_dst)
             print(f"  [Best Model] FeatureBuilder({best_tab_tag}) → best_tabular_model_fb.pkl")
+
+    # ── [7.5b] 每種模型類型各儲存一個最佳模型 ──────────────────────────────────
+    model_best: dict = {}  # model_name -> (score, tag)
+    for tag, oof in zip(model_tags, all_oof):
+        mname = _model_type(tag)
+        score = _calc(y_train, oof.argmax(1), metric=metric)
+        if mname not in model_best or score > model_best[mname][0]:
+            model_best[mname] = (score, tag)
+
+    print("\n  [Per-Model Best] 儲存各模型類型最佳版本：")
+    for mname, (score, best_tag) in sorted(model_best.items()):
+        ext = ".pkl" if mname in _TABULAR else ".pt"
+        src = os.path.join(ARTIFACTS_DIR, f"{best_tag}_best_model{ext}")
+        dst = os.path.join(artifacts_dir, f"{mname}_best_model{ext}")
+        if os.path.exists(src):
+            shutil.copy2(src, dst)
+            print(f"    {mname}_best_model{ext}  (OOF {metric}={score:.4f}，來自 {best_tag})")
+        else:
+            print(f"    {mname}_best_model{ext}  ← 模型檔未找到（快取跳過？）")
+        if mname in _TABULAR:
+            fb_src = os.path.join(ARTIFACTS_DIR, f"{best_tag}_best_model_fb.pkl")
+            fb_dst = os.path.join(artifacts_dir, f"{mname}_best_model_fb.pkl")
+            if os.path.exists(fb_src):
+                shutil.copy2(fb_src, fb_dst)
 
     # ── [7.6] 丟掉最差 DL 模型 ───────────────────────────────────────────────
     if len(dl_candidates) > 1:

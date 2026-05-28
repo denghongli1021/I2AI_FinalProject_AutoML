@@ -165,7 +165,7 @@ def _process_one(csv_path: str, args, t_ds: float) -> dict:
 
         budget = _pt.TimeBudget(limit_sec=args.time_limit, t_start=t_ds)
         # 分類沿用 pipeline.get_cfg
-        import pipeline as _pl
+        from src import pipeline as _pl
         cfg = _pl.get_cfg(args.fast, n_samples=len(y_tr))
         cfg["is_timeseries"] = False  # UCR 分類視為樣本獨立
 
@@ -327,7 +327,7 @@ def _process_new_ts_one(base_name: str, train_df: pd.DataFrame,
         print(f"  [Task] classification  n_train={len(y_tr)}  n_test={len(y_te)}  n_classes={n_classes}")
 
         budget = _pt.TimeBudget(limit_sec=args.time_limit, t_start=t_ds)
-        import pipeline as _pl
+        from src import pipeline as _pl
         cfg = _pl.get_cfg(args.fast, n_samples=len(y_tr))
         cfg["is_timeseries"] = False
 

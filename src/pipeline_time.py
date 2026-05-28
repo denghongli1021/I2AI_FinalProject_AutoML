@@ -1293,6 +1293,6 @@ def run_regression(
 
 def run_classification(*args, **kwargs):
     """時序分類直接委派給既有 pipeline.run。"""
-    import pipeline as _pl
+    from . import pipeline as _pl
     kwargs["is_ts"] = True
     return _pl.run(*args, **kwargs)
