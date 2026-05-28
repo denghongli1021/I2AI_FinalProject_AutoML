@@ -1,5 +1,8 @@
 # 資料集（大型，使用者自行下載）
 openml_cc18_data/
+!openml_cc18_data/
+openml_cc18_data/*
+!openml_cc18_data/179_adult.csv
 openml_regression_data/
 ucr_ts_80*/
 
@@ -12,6 +15,7 @@ artifacts/**
 catboost_info/
 
 # 本地測試與內部文件
+test/
 doc/
 LOG/
 improve.txt
