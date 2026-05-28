@@ -17,6 +17,12 @@ pip install -r requirements.txt
 ### Pipeline（自製系統）
 
 ```cmd
+#最常用(用來跑一個資料集:給目標欄位)
+python run_pipeline.py --csv openml_cc18_data/179_adult.csv --target class --viz
+python run_pipeline.py --train mydata/train.csv --test mydata/test.csv --target income --viz
+python run_pipeline_time.py --csv sensor_data.csv --target pressure --viz
+python run_pipeline_time.py --train mydata/train.csv --test mydata/test.csv --target pressure --viz
+
 # 批次評估：前 5 個 OpenML-CC18 分類資料集
 python run_pipeline.py --batch --top-n 5
 
