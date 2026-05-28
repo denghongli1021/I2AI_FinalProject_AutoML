@@ -12,7 +12,6 @@ artifacts/**
 catboost_info/
 
 # 本地測試與內部文件
-test/
 doc/
 LOG/
 improve.txt
