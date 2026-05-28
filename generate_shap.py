@@ -174,8 +174,28 @@ def run_dl_viz(artifacts_dir: str, X_tr_raw: np.ndarray, X_te_raw: np.ndarray,
     predictor = _DLPredictor(pt_path)
 
     # 重新 fit FeatureBuilder（DL 的 feature_set 從 .pt config 讀取）
-    print(f"[DL] 重新 fit FeatureBuilder(feature_set={predictor.feature_set}) on 訓練集...")
-    fb = FeatureBuilder(feature_set=predictor.feature_set).fit(X_tr_raw)
+    # 自動偵測訓練時的 global_cfg：依序嘗試常見的 use_kmeans 組合，
+    # 找到與 checkpoint in_features 一致的設定即停止（避免 KMeans 維度不符）
+    _target_dim = predictor.in_features
+    _gcfg_candidates = [
+        {"use_kmeans": True,  "use_kpca": False},
+        {"use_kmeans": False, "use_kpca": False},
+        {"use_kmeans": True,  "use_kpca": True},
+        {"use_kmeans": False, "use_kpca": True},
+    ]
+    fb = None
+    for _gcfg in _gcfg_candidates:
+        _fb_try = FeatureBuilder(feature_set=predictor.feature_set,
+                                  global_cfg=_gcfg).fit(X_tr_raw)
+        if _fb_try.transform(X_tr_raw[:1]).shape[1] == _target_dim:
+            fb = _fb_try
+            print(f"[DL] FeatureBuilder(feature_set={predictor.feature_set}, "
+                  f"use_kmeans={_gcfg['use_kmeans']}) → {_target_dim} 維（與 checkpoint 吻合）")
+            break
+    if fb is None:
+        print(f"[DL] 警告：無法自動匹配 in_features={_target_dim}，"
+              f"使用預設 global_cfg（維度可能不符，SHAP 結果僅供參考）")
+        fb = FeatureBuilder(feature_set=predictor.feature_set).fit(X_tr_raw)
 
     X_tf  = fb.transform(X_te_raw)
     col_names = _build_col_names(predictor.feature_set, feature_names, X_tf.shape[1])
@@ -246,19 +266,33 @@ def main():
     if task != "classification":
         print(f"[Warning] 偵測到回歸任務（task={task}）。SHAP 圖表目前只針對分類最佳化，仍繼續執行。")
 
-    X_raw, feature_names = _prepare_X_raw(df, args.target)
     y = df[args.target].values
+    # 優先使用與 pipeline 相同的雙軌前處理，確保特徵數與訓練時一致
+    _adv_ok = False
+    try:
+        from preprocessing.interface import preprocess_for_training
+        _Xd_tr, _Xd_te, _, _, _ = preprocess_for_training(
+            df, args.target, test_size=args.test_size
+        )
+        X_tr = _Xd_tr["tree"].values.astype(np.float32)
+        X_te = _Xd_te["tree"].values.astype(np.float32)
+        feature_names = list(_Xd_tr["tree"].columns)
+        _adv_ok = True
+    except Exception as _adv_err:
+        print(f"[Preprocess] 雙軌前處理失敗: {_adv_err}")
+
+    if not _adv_ok:
+        X_raw, feature_names = _prepare_X_raw(df, args.target)
+        try:
+            X_tr, X_te, _, _ = train_test_split(
+                X_raw, y, test_size=args.test_size,
+                random_state=args.split_seed, stratify=y)
+        except ValueError:
+            X_tr, X_te, _, _ = train_test_split(
+                X_raw, y, test_size=args.test_size, random_state=args.split_seed)
+
     print(f"[Load] shape={df.shape}  target={args.target}  task={task}")
     print(f"       features={len(feature_names)}  → {feature_names[:5]}{'...' if len(feature_names)>5 else ''}")
-
-    try:
-        X_tr, X_te, _, _ = train_test_split(
-            X_raw, y, test_size=args.test_size,
-            random_state=args.split_seed, stratify=y)
-    except ValueError:
-        X_tr, X_te, _, _ = train_test_split(
-            X_raw, y, test_size=args.test_size, random_state=args.split_seed)
-
     print(f"[Split] train={len(X_tr)}  test={len(X_te)}  seed={args.split_seed}")
 
     artifacts_dir = (args.artifacts if args.artifacts

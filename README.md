@@ -249,8 +249,16 @@ python scripts/data_collect_time.py
 │       ├── cnn1d.py        # CNN1D, ResNet1D_18, TCN
 │       ├── transformer.py  # SignalTransformer（Sinusoidal PE, norm_first HPO）, PatchTST
 │       └── tabular.py      # build_tabular_model() 工廠函式
+├── preprocessing/          # 雙軌前處理模組（樹模型軌 + 深度學習軌）
+│   ├── interface.py        # preprocess_for_training()：統一呼叫入口，回傳 {"tree":…, "dl":…}
+│   ├── data_loader.py      # 資料載入與型別解析
+│   ├── core/
+│   │   ├── router.py       # 欄位型別路由（數值/類別/文字/時序/影像）
+│   │   └── assembler.py    # 兩軌特徵組裝（樹軌：OrdinalEncoder；DL 軌：OHE）
+│   ├── processors/         # 各型別處理器（numeric / category / text / time / image / feature_generator）
+│   └── utils/              # 記憶體優化（memory_optimizer）、資料健康度（data_health）、自訂轉換器
 ├── visualization/
-│   └── visualizer.py       # AutoMLVisualizer：SHAP 視覺化（TreeExplainer / PermutationExplainer，輸出 PNG）
+│   └── visualizer.py       # AutoMLVisualizer：SHAP 視覺化（TreeExplainer 精確解 / PermutationExplainer 最多 500 筆取樣，輸出高畫質 PNG）
 ├── test/
 │   ├── dataset.csv               # 測試用資料集
 │   ├── ground_truth.csv          # 測試標準答案

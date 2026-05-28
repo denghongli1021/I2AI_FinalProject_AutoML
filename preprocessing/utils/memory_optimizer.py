@@ -8,7 +8,7 @@ def reduce_mem_usage(df, use_float32_safeguard=True):
     :param use_float32_safeguard: 若為 True，則浮點數最低只會壓縮到 float32，避免特徵工程時發生 float16 溢位 (inf)。
     """
     start_mem = df.memory_usage().sum() / 1024**2
-    print(f'🔧 [記憶體壓縮] 初始佔用大小: {start_mem:.2f} MB')
+    print(f'[記憶體壓縮] 初始佔用大小: {start_mem:.2f} MB')
     
     for col in df.columns:
         if is_numeric_dtype(df[col]):
@@ -62,6 +62,6 @@ def reduce_mem_usage(df, use_float32_safeguard=True):
                 df[col] = df[col].astype('category')
 
     end_mem = df.memory_usage().sum() / 1024**2
-    print(f'✅ [記憶體壓縮] 壓縮後大小: {end_mem:.2f} MB (減少了 {100 * (start_mem - end_mem) / start_mem:.1f}%)')
+    print(f'[記憶體壓縮] 壓縮後大小: {end_mem:.2f} MB (減少了 {100 * (start_mem - end_mem) / start_mem:.1f}%)')
     
     return df

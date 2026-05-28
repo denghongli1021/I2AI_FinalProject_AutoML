@@ -16,7 +16,10 @@ from sklearn.feature_selection import (
 )
 
 from ..processors.numeric_processor import build_numeric_pipeline
-from ..processors.category_processor import build_category_pipeline
+from ..processors.category_processor import (
+    build_category_pipeline,
+    build_tree_category_pipeline,
+)
 from ..processors.text_processor import build_text_pipeline
 from ..processors.time_processor import build_time_pipeline
 
@@ -231,13 +234,18 @@ class PipelineAssembler:
             transformers.append(("num_pipeline", num_pipe, numeric_cols))
 
 
-        # ── 2. 低基數類別特徵（OHE）─────────────────────────────────
+        # ── 2. 低基數類別特徵 ────────────────────────────────────────
+        # Tree 軌道：OrdinalEncoder（單欄整數，LGBM/XGB 原生支援，節省維度）
+        # DL  軌道：OHE + RareCategoryGrouper（one-hot，合併低頻類別防稀疏爆維）
         categorical_cols = self.feature_groups.get("categorical", [])
         if categorical_cols:
-            transformers.append((
-                "cat_pipeline", build_category_pipeline(), categorical_cols
-            ))
-            print(f"  [Assembler] 類別管線(OHE)  ← {len(categorical_cols):2d} 欄: {categorical_cols[:5]}...")
+            if track == "tree":
+                cat_pipe = build_tree_category_pipeline()
+                print(f"  [Assembler] 類別管線(Ordinal) ← {len(categorical_cols):2d} 欄: {categorical_cols[:5]}...")
+            else:
+                cat_pipe = build_category_pipeline()
+                print(f"  [Assembler] 類別管線(OHE)     ← {len(categorical_cols):2d} 欄: {categorical_cols[:5]}...")
+            transformers.append(("cat_pipeline", cat_pipe, categorical_cols))
 
         # ── 3. 高基數類別特徵（OrdinalEncoder，防 OHE 維度爆炸）────
         high_card_cols = self.feature_groups.get("high_cardinality", [])
@@ -293,7 +301,7 @@ class PipelineAssembler:
                 ),
                 list(set(potential_ids[:3] + potential_nums[:2])),
             ))
-            print(f"  [Assembler] 🛡️ 注入自動群組聚合統計 分支！(ID: {potential_ids[:3]} | 數值: {potential_nums[:2]})")
+            print(f"  [Assembler] 注入自動群組聚合統計分支 (ID: {potential_ids[:3]} | 數值: {potential_nums[:2]})")
 
         # (B) 自動多項式交互特徵 (Polynomial Interactions)
         # 挑選前 3 個最重要的數值特徵進行兩兩交叉乘除，避免維度過度爆炸
@@ -304,7 +312,7 @@ class PipelineAssembler:
                 PolynomialInteracter(target_cols=poly_targets, allow_division=True),
                 poly_targets,
             ))
-            print(f"  [Assembler] ⚔️ 注入多項式交叉乘除 分支！(目標特徵: {poly_targets})")
+            print(f"  [Assembler] 注入多項式交叉乘除分支 (目標特徵: {poly_targets})")
 
         # (C) 自動非線性縮放 (Non-linear Transformations)
         # 專門抓出金額類特徵進行常態化分位數轉換，矯正長尾偏態
@@ -315,7 +323,7 @@ class PipelineAssembler:
                 NonLinearScaler(target_cols=amt_cols, strategy="quantile"),
                 amt_cols,
             ))
-            print(f"  [Assembler] 🧪 注入非線性長尾偏態矯正 分支！(目標特徵: {amt_cols})")
+            print(f"  [Assembler] 注入非線性長尾偏態矯正分支 (目標特徵: {amt_cols})")
 
         # ── 空管線早期錯誤 ────────────────────────────────────────
         if not transformers:

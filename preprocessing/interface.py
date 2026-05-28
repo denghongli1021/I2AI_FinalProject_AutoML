@@ -47,25 +47,46 @@ warnings.filterwarnings(
 def _clean_raw_data(df: pd.DataFrame) -> pd.DataFrame:
     """
     進場前清理（在進入 sklearn 管線之前完成）。
-    
+
     ⚙️ 記憶體優化版：
     移除 cleaned = df.copy() 這種完全複製行為（記憶體翻倍的元兇）。
     改用覆蓋賦值（Reassignment），利用 Pandas 內部的區塊共享機制（Block Sharing），
     既能省下 90% 的複製記憶體，又能 100% 避免修改到外部原始資料的副作用！
     """
     # ❌ 移除這行：cleaned = df.copy()
-    
+
     # ── 1. inf → NaN ──────────────────────────────────────────────
     numeric_cols = df.select_dtypes(include=[np.number]).columns
-    
+
     # 用原本的 df 來計算統計量，不佔額外空間
     n_inf = np.isinf(df[numeric_cols]).sum().sum()
-    
+
     if n_inf > 0:
         # ✅ 安全無副作用：不開 inplace=True。
         # 當執行賦值給局部變數 df 時，Python 會自動打破與外部大表的直接引用綁定
         df = df.replace([np.inf, -np.inf], np.nan)
         print(f"   [前處理] 替換了 {n_inf:,} 個 inf / -inf 值為 NaN")
+
+    # ── 1.5. 字串型缺失標記 → NaN ──────────────────────────────────
+    # 許多真實資料集（如 adult/census）用 '?'、'NA'、'none' 等字串標記缺失值，
+    # 若不替換則 OHE 會為這些「假類別」建立獨立欄位，對模型毫無幫助。
+    _MISSING_TOKENS = frozenset({'?', 'na', 'n/a', 'none', 'null', 'nan',
+                                  'missing', 'unknown', '-', '--'})
+    obj_cols = df.select_dtypes(include=['object', 'category']).columns.tolist()
+    if obj_cols:
+        replace_map = {}
+        n_replaced_total = 0
+        for col in obj_cols:
+            unique_vals = df[col].dropna().unique()
+            bad_vals = [v for v in unique_vals
+                        if str(v).strip().lower() in _MISSING_TOKENS]
+            if bad_vals:
+                replace_map[col] = {v: np.nan for v in bad_vals}
+                n_replaced_total += int(df[col].isin(bad_vals).sum())
+        if replace_map:
+            df = df.replace(replace_map)
+            print(f"   [前處理] 字串型缺失標記替換：{n_replaced_total:,} 個值 → NaN"
+                  f"（欄位：{list(replace_map.keys())}）")
 
     # ── 2. 刪除完全重複列 ──────────────────────────────────────────
     n_before = len(df)
@@ -82,8 +103,8 @@ def _clean_raw_data(df: pd.DataFrame) -> pd.DataFrame:
     # ── 3. 👻 刪除幽靈欄位 (100% 缺失值) ───────────────────────────
     ghost_cols = df.columns[df.isnull().all()].tolist()
     if ghost_cols:
-        print(f"   [前處理] ⚠️ 警告：偵測到 {len(ghost_cols)} 個欄位缺失率高達 100%！")
-        print(f"   [前處理] 🔪 已自動刪除無效欄位 (範例: {ghost_cols[:5]}...)")
+        print(f"   [前處理] 警告：偵測到 {len(ghost_cols)} 個欄位缺失率高達 100%！")
+        print(f"   [前處理] 已自動刪除無效欄位 (範例: {ghost_cols[:5]}...)")
         # ✅ 安全無副作用：直接回傳排除幽靈欄位後的矩陣
         df = df.drop(columns=ghost_cols)
 
@@ -138,9 +159,9 @@ def run_data_audit(
     report = generate_health_report(raw_df, target_col)
 
     if report["warnings"]:
-        print(f"⚠️ 發現 {len(report['warnings'])} 個潛在問題！")
+        print(f"[警告] 發現 {len(report['warnings'])} 個潛在問題！")
     else:
-        print("✅ 資料健康狀況良好！")
+        print("[OK] 資料健康狀況良好！")
 
     return report
 
@@ -177,10 +198,10 @@ def preprocess_for_training(
     (X_train_clean, X_test_clean, y_train, y_test, fitted_preprocessor)
 
     """
-    print(">>> 🔵 Phase 1: 資料載入與整合 (Data Ingestion)")
+    print(">>> [Phase 1] 資料載入與整合 (Data Ingestion)")
     raw_df = load_and_merge_data(data_source, main_file_index=main_file_index)
 
-    print(">>> 🔵 Phase 2: 特徵預處理管線 (Feature Engineering)")
+    print(">>> [Phase 2] 特徵預處理管線 (Feature Engineering)")
 
     if target_col not in raw_df.columns:
         raise ValueError(f"找不到目標欄位 '{target_col}'，現有欄位：{list(raw_df.columns)}")
@@ -294,7 +315,7 @@ def preprocess_for_training(
     X_test_dict = {"tree": X_test_tree, "dl": X_test_dl}
     preprocessors = {"tree": tree_preprocessor, "dl": dl_preprocessor}
 
-    print("[預處理模組] 雙軌處理完成！🚀")
+    print("[預處理模組] 雙軌處理完成！")
     return X_train_dict, X_test_dict, y_train, y_test, preprocessors
 
 def preprocess_for_inference(
@@ -333,11 +354,11 @@ def preprocess_for_inference(
             "再傳入此函式。"
         )
 
-    print(">>> 🟢 推論期 Phase 1: 測試資料載入與整合")
+    print(">>> [推論 Phase 1] 測試資料載入與整合")
     # 1. 智慧載入器 (支援多表 Join 與 記憶體壓縮)
     raw_df = load_and_merge_data(data_source, main_file_index=main_file_index)
-    
-    print(">>> 🟢 推論期 Phase 2: 基礎清理 (不刪除任何資料列)")
+
+    print(">>> [推論 Phase 2] 基礎清理 (不刪除任何資料列)")
     # ⚠️ 注意：這裡不能呼叫 _clean_raw_data，因為推論階段絕對不能刪除重複列！
     # 我們只手動替換 inf -> NaN
     clean_df = raw_df.copy()
@@ -349,20 +370,20 @@ def preprocess_for_inference(
     
     X_new = clean_df
 
-    print(">>> 🟢 推論期 Phase 3: 特徵強制對齊")
+    print(">>> [推論 Phase 3] 特徵強制對齊")
     # 2. 特徵對齊裝甲 (Feature Alignment)
     missing_cols = set(training_features) - set(X_new.columns)
     extra_cols = set(X_new.columns) - set(training_features)
     
     if missing_cols:
-        print(f"  [推論對齊] ⚠️ 警告：測試資料缺少 {len(missing_cols)} 個訓練欄位 (將自動補 NaN)。")
+        print(f"  [推論對齊] 警告：測試資料缺少 {len(missing_cols)} 個訓練欄位 (將自動補 NaN)。")
     if extra_cols:
-        print(f"  [推論對齊] 🔪 提示：測試資料多出 {len(extra_cols)} 個未知欄位 (已自動捨棄)。")
+        print(f"  [推論對齊] 提示：測試資料多出 {len(extra_cols)} 個未知欄位 (已自動捨棄)。")
         
     # 一行搞定補齊與捨棄，並確保順序與訓練時完全一致
     X_aligned = X_new.reindex(columns=training_features)
 
-    print(">>> 🟢 推論期 Phase 4: 執行純轉換 (Transform Only)")
+    print(">>> [推論 Phase 4] 執行純轉換 (Transform Only)")
     # 3. 絕對只能用 transform！
     X_clean_array = fitted_preprocessor.transform(X_aligned)
     

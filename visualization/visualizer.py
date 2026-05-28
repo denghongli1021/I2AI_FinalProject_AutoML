@@ -45,6 +45,13 @@ class AutoMLVisualizer:
             
             predict_fn = self.model.predict if hasattr(self.model, "predict") else self.model
             self.explainer = shap.PermutationExplainer(predict_fn, background)
+
+            # 取樣上限：視覺化用途 500 筆已足夠，避免對全量資料逐筆擾動（數小時）
+            _max_samples = 500
+            if len(self.X_test) > _max_samples:
+                print(f"  [SHAP] 取樣 {_max_samples}/{len(self.X_test)} 筆（視覺化不需要全量計算）...")
+                self.X_test = self.X_test.sample(n=_max_samples, random_state=42).reset_index(drop=True)
+
             self.shap_values = self.explainer(self.X_test)
             _elapsed = time.time() - _t0
             mins, secs = divmod(int(_elapsed), 60)
