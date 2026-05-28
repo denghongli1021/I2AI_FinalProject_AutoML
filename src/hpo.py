@@ -61,7 +61,7 @@ _SCOUT_DEFAULTS: dict = {
         "feature_set": "raw",
         "depth": 6,
         "learning_rate": 0.05,
-        "iterations": 500,
+        "iterations": 200,
         "l2_leaf_reg": 3.0,
         "bagging_temperature": 0.5,
     },
@@ -133,9 +133,9 @@ def _tabular_space(name: str, trial: optuna.Trial, feat_sets: list,
         })
     elif name == "catboost":
         params.update({
-            "depth": trial.suggest_int("depth", 4, 10),
+            "depth": trial.suggest_int("depth", 4, 8),
             "learning_rate": trial.suggest_float("learning_rate", 5e-3, 0.3, log=True),
-            "iterations": trial.suggest_int("iterations", 200, 1000),
+            "iterations": trial.suggest_int("iterations", 100, 500),
             "l2_leaf_reg": trial.suggest_float("l2_leaf_reg", 1e-8, 10.0, log=True),
             "bagging_temperature": trial.suggest_float("bagging_temperature", 0.0, 1.0),
         })
