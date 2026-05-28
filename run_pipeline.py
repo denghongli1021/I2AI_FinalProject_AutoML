@@ -31,8 +31,8 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
 from src.config import DEVICE, SEED, ARTIFACTS_DIR
-import pipeline as _pl
-import pipeline_time as _pt
+from src import pipeline as _pl
+from src import pipeline_time as _pt
 
 _RESULT_COLS = [
     "source", "dataset", "type", "task", "n_train", "n_test",
@@ -104,6 +104,72 @@ def _eval_regression(y_te, result, reg_metric: str):
     return rmse_b, rmse_s, r2_b, r2_s, best_rmse, best_r2, primary_score
 
 
+def _get_feature_names(df: pd.DataFrame, target_col: str) -> list:
+    """Return numeric column names that _prepare_X will use."""
+    feat_df = df.drop(columns=[target_col])
+    X_num = feat_df.select_dtypes(include=[np.number])
+    if X_num.shape[1] == 0:
+        return list(feat_df.select_dtypes(include=["object", "category"]).columns)
+    return list(X_num.columns)
+
+
+def _build_shap_col_names(feature_set: str, orig_names: list, n_transformed: int) -> list:
+    """Map transformed feature dimensions to human-readable names."""
+    n = len(orig_names)
+    if feature_set == "raw":
+        return orig_names[:n_transformed]
+    if feature_set == "signal":
+        base = orig_names[:n]
+        return (base + [f"{nm}_l2" for nm in base])[:n_transformed]
+    if feature_set in ("pca64", "svd64", "kpca32"):
+        return [f"PC{i}" for i in range(n_transformed)]
+    # raw_stat / raw_stat_fft / poly2 / ts_tabular — prefix with original names then numbered
+    if n_transformed >= n:
+        return orig_names + [f"feat_{i}" for i in range(n_transformed - n)]
+    return [f"feat_{i}" for i in range(n_transformed)]
+
+
+def _run_shap_visualization(artifacts_dir: str, X_test_raw: np.ndarray,
+                             feature_names: list, dataset_name: str = ""):
+    """Load best tabular model + FeatureBuilder from artifacts_dir and generate SHAP plots."""
+    try:
+        import sys as _sys
+        _viz_path = os.path.join(HERE, "visualization")
+        if _viz_path not in _sys.path:
+            _sys.path.insert(0, _viz_path)
+        from visualizer import AutoMLVisualizer
+        import joblib as _jl
+
+        model_path = os.path.join(artifacts_dir, "best_tabular_model.pkl")
+        fb_path    = os.path.join(artifacts_dir, "best_tabular_model_fb.pkl")
+
+        if not os.path.exists(model_path):
+            print("[Viz] best_tabular_model.pkl 不存在，跳過視覺化"); return
+        if not os.path.exists(fb_path):
+            print("[Viz] best_tabular_model_fb.pkl 不存在，跳過視覺化"); return
+
+        model = _jl.load(model_path)
+        fb    = _jl.load(fb_path)
+
+        X_transformed = fb.transform(X_test_raw)
+        col_names = _build_shap_col_names(fb.feature_set, feature_names, X_transformed.shape[1])
+
+        X_df = pd.DataFrame(X_transformed, columns=col_names)
+        viz_output = os.path.join(artifacts_dir, "shap_plots")
+        viz = AutoMLVisualizer(model=model, X_test=X_df, output_dir=viz_output)
+
+        shap_mat = viz._get_shap_matrix()
+        top_feat = col_names[int(np.abs(shap_mat).mean(0).argmax())]
+        viz.generate_all_plots(
+            sample_index=0,
+            target_feature=top_feat,
+            prefix=dataset_name or "pipeline",
+        )
+        print(f"\n[Viz] SHAP 圖表已輸出 → {viz_output}")
+    except Exception as _e:
+        print(f"\n[Viz] 視覺化跳過（{_e}）")
+
+
 # ── 批次評估模式 ──────────────────────────────────────────────────────────────
 
 def run_batch(args):
@@ -146,6 +212,7 @@ def run_batch(args):
             df = df.dropna(subset=[target_col]).reset_index(drop=True)
             y_raw = df[target_col]
             task = force_task if force_task else _auto_detect_task(y_raw)
+            feature_names = _get_feature_names(df, target_col)
             X_all = _prepare_X(df, target_col)
 
             if task == "classification":
@@ -160,6 +227,7 @@ def run_batch(args):
                         X_all, y_all, test_size=0.2, random_state=SEED)
                 print(f"  n_train={len(y_tr)}  n_test={len(y_te)}  n_classes={n_classes}  split=Random Stratified")
 
+                _batch_artifacts = os.path.join(ARTIFACTS_DIR, "batch", dataset_name)
                 budget = _pl.TimeBudget(limit_sec=args.time_limit, t_start=t_ds)
                 cfg = _pl.get_cfg(args.fast, n_samples=len(y_tr))
                 cfg["is_timeseries"] = False
@@ -169,7 +237,7 @@ def run_batch(args):
                     skip_dl=args.skip_dl,
                     no_nas=args.no_nas,
                     is_ts=False,
-                    artifacts_dir=os.path.join(ARTIFACTS_DIR, "batch", dataset_name),
+                    artifacts_dir=_batch_artifacts,
                     metric=args.metric,
                 )
                 from src.metrics import calculate_score, get_metric_name
@@ -183,6 +251,8 @@ def run_batch(args):
                 print(f"\n  [結果] Blend → {get_metric_name(args.metric)}={score_b:.4f}")
                 print(f"  [結果] Stack → {get_metric_name(args.metric)}={score_s:.4f}")
                 print(f"  [耗時] {elapsed}s")
+                if args.viz:
+                    _run_shap_visualization(_batch_artifacts, X_te, feature_names, dataset_name)
                 results.append({
                     "dataset": dataset_name, "type": "Tab", "task": task,
                     "n_train": len(y_tr), "n_test": len(y_te),
@@ -268,6 +338,7 @@ def run_single(args):
 
     y_raw = df[target_col]
     task = _auto_detect_task(y_raw)
+    feature_names = _get_feature_names(df, target_col)
     X_all = _prepare_X(df, target_col)
 
     if task == "classification":
@@ -282,6 +353,7 @@ def run_single(args):
                 X_all, y_all, test_size=0.2, random_state=SEED)
         print(f"  target={target_col}  n_train={len(y_tr)}  n_test={len(y_te)}  n_classes={n_classes}")
 
+        _single_artifacts = os.path.join(ARTIFACTS_DIR, "single", dataset_name)
         budget = _pl.TimeBudget(limit_sec=args.time_limit, t_start=t_ds)
         cfg = _pl.get_cfg(args.fast, n_samples=len(y_tr))
         cfg["is_timeseries"] = False
@@ -291,7 +363,7 @@ def run_single(args):
             skip_dl=args.skip_dl,
             no_nas=args.no_nas,
             is_ts=False,
-            artifacts_dir=os.path.join(ARTIFACTS_DIR, "single", dataset_name),
+            artifacts_dir=_single_artifacts,
             metric=args.metric,
         )
         from src.metrics import calculate_score, get_metric_name
@@ -301,6 +373,8 @@ def run_single(args):
         print(f"\n  [結果] Blend → {get_metric_name(args.metric)}={score_b:.4f}")
         print(f"  [結果] Stack → {get_metric_name(args.metric)}={score_s:.4f}")
         print(f"  [耗時] {elapsed}s")
+        if args.viz:
+            _run_shap_visualization(_single_artifacts, X_te, feature_names, dataset_name)
 
     else:  # regression
         y_all = np.asarray(y_raw.values, dtype=np.float32).ravel()
@@ -359,6 +433,7 @@ def run_presplit(args):
     y_tr_raw = train_df[target_col]
     y_te_raw = test_df[target_col]
     task = _auto_detect_task(y_tr_raw)
+    feature_names = _get_feature_names(train_df, target_col)
 
     X_tr = _prepare_X(train_df, target_col)
     X_te = _prepare_X(test_df, target_col)
@@ -378,6 +453,7 @@ def run_presplit(args):
         n_classes = len(le.classes_)
         print(f"  n_train={len(y_tr)}  n_test={len(y_te)}  n_classes={n_classes}  task=classification")
 
+        _presplit_artifacts = os.path.join(ARTIFACTS_DIR, "single", dataset_name)
         budget = _pl.TimeBudget(limit_sec=args.time_limit, t_start=t_ds)
         cfg = _pl.get_cfg(args.fast, n_samples=len(y_tr))
         cfg["is_timeseries"] = False
@@ -387,7 +463,7 @@ def run_presplit(args):
             skip_dl=args.skip_dl,
             no_nas=args.no_nas,
             is_ts=False,
-            artifacts_dir=os.path.join(ARTIFACTS_DIR, "single", dataset_name),
+            artifacts_dir=_presplit_artifacts,
             metric=args.metric,
         )
         from src.metrics import calculate_score, get_metric_name
@@ -397,6 +473,8 @@ def run_presplit(args):
         print(f"\n  [結果] Blend → {get_metric_name(args.metric)}={score_b:.4f}")
         print(f"  [結果] Stack → {get_metric_name(args.metric)}={score_s:.4f}")
         print(f"  [耗時] {elapsed}s")
+        if args.viz:
+            _run_shap_visualization(_presplit_artifacts, X_te, feature_names, dataset_name)
 
     else:  # regression
         y_tr = np.asarray(y_tr_raw.values, dtype=np.float32).ravel()
@@ -465,6 +543,8 @@ def main():
                         help="目標欄位名稱（--csv / --train/--test 模式必填）")
     parser.add_argument("--result-file",  default=None,
                         help="附加結果 CSV（含 source 欄，附加模式）")
+    parser.add_argument("--viz",          action="store_true",
+                        help="訓練完成後自動產生 SHAP 視覺化圖表（需要 shap + plotly + kaleido）")
 
     args = parser.parse_args()
 

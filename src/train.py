@@ -333,6 +333,7 @@ def run_tabular_cv(
 
     best_fold_score = -np.inf
     best_fold_model = None
+    best_fold_fb    = None
 
     for seed_idx in range(n_seeds):
         cur_seed = SEED + seed_idx * 100
@@ -367,6 +368,7 @@ def run_tabular_cv(
             if val_score > best_fold_score:
                 best_fold_score = val_score
                 best_fold_model = model
+                best_fold_fb    = fb
 
     oof /= np.maximum(oof_counts, 1.0)
     oof_score = calculate_score(y, oof.argmax(axis=1), metric=metric)
@@ -377,6 +379,8 @@ def run_tabular_cv(
         np.save(os.path.join(ARTIFACTS_DIR, f"{tag}_test.npy"), test_preds)
         if best_fold_model is not None:
             joblib.dump(best_fold_model, os.path.join(ARTIFACTS_DIR, f"{tag}_best_model.pkl"))
+        if best_fold_fb is not None:
+            joblib.dump(best_fold_fb, os.path.join(ARTIFACTS_DIR, f"{tag}_best_model_fb.pkl"))
 
     return oof, test_preds
 

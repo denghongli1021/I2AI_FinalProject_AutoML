@@ -38,8 +38,11 @@ python run_pipeline.py --batch --skip-dl --top-n 3
 # 跳過 NAS（表格模式用預設 MLP）
 python run_pipeline.py --batch --no-nas
 
-# 指定評估指標（預設 f1）
+# 指定分類評估指標（預設 f1）
 python run_pipeline.py --batch --metric accuracy
+
+# 指定回歸評估指標（預設 rmse）
+python run_pipeline.py --batch --reg-metric r2
 
 # 競賽模式（讀取 test/train.csv + test/test.csv，輸出提交 CSV）
 python test/run_submission.py
@@ -49,6 +52,13 @@ python run_pipeline.py --csv openml_cc18_data/37_diabetes.csv
 
 # 單一 CSV 評估（指定目標欄）
 python run_pipeline.py --csv data.csv --target label
+
+# 預切分模式（手動提供 TRAIN / TEST）
+python run_pipeline.py --train train.csv --test test.csv
+
+# 訓練完成後自動產生 SHAP 視覺化（需要 shap + plotly + kaleido）
+python run_pipeline.py --csv data.csv --target label --viz
+python run_pipeline.py --batch --top-n 5 --viz
 ```
 
 ### 時序專用 Pipeline（分類 + 回歸）
@@ -75,6 +85,21 @@ python run_pipeline_time.py --batch --cls-metric accuracy --reg-metric r2
 # 單一 CSV（_TRAIN.csv 格式，自動尋找對應 _TEST.csv）
 python run_pipeline_time.py --csv "ucr_ts_80_new(時序資料)/REG_VentilatorPressure_TRAIN.csv"
 ```
+
+### SHAP 視覺化（訓練後單獨執行）
+
+```cmd
+# 從現有 artifacts 直接產生 SHAP 圖（tabular 模型，不重新訓練）
+python generate_shap.py --dataset test/dataset.csv --target RiskPerformance
+
+# DL 模型（SignalTransformer）
+python generate_shap.py --dataset test/dataset.csv --target RiskPerformance --model dl
+
+# 同時產生 tabular + DL 兩種 SHAP 圖
+python generate_shap.py --dataset test/dataset.csv --target RiskPerformance --model both
+```
+
+每個輸出目錄包含三張 PNG：`*_global.png`（全局特徵重要性）、`*_waterfall.png`（單筆解釋）、`*_dependence.png`（特徵交互分析）。
 
 ### 合併批次結果
 
@@ -109,13 +134,13 @@ python run_baseline.py --batch --top-n 5 --time-budget 120 --presets medium_qual
 
 ```cmd
 # 下載 OpenML-CC18 表格資料集 → openml_cc18_data/
-python data_collect.py
+python scripts/data_collect.py
 
 # 下載 OpenML 回歸資料集 → openml_regression_data/
-python data_collect_reg.py
+python scripts/data_collect_reg.py
 
 # 下載 UCR 時序資料集 → ucr_ts_80_new(時序資料)/
-python data_collect_time.py
+python scripts/data_collect_time.py
 ```
 
 ---
@@ -197,16 +222,18 @@ python data_collect_time.py
 
 ```
 人工智慧project/
-├── pipeline.py             # 通用 Pipeline 引擎（分類；HPO/NAS/CV/Ensemble）
-├── pipeline_time.py        # 時序專用 Pipeline 引擎（分類 + 回歸）
 ├── run_pipeline.py         # 批次 + 單 CSV 執行入口（表格分類 + 表格回歸）
 ├── run_pipeline_time.py    # 時序專用執行入口（CLS + REG，支援 --new-ts-batch）
 ├── run_baseline.py         # AutoGluon 對照組（分類 + 回歸）
+├── generate_shap.py        # 從現有 artifacts 產生 SHAP 視覺化（不重新訓練）
 ├── merge_final_results.py  # 合併三份批次結果 CSV → pipeline_batch_results.csv
-├── data_collect.py         # 下載 OpenML-CC18 資料集
-├── data_collect_reg.py     # 下載 OpenML 回歸資料集
-├── data_collect_time.py    # 下載 UCR 時序資料集
+├── scripts/
+│   ├── data_collect.py     # 下載 OpenML-CC18 資料集
+│   ├── data_collect_reg.py # 下載 OpenML 回歸資料集
+│   └── data_collect_time.py# 下載 UCR 時序資料集
 ├── src/
+│   ├── pipeline.py         # 通用 Pipeline 引擎（分類；HPO/NAS/CV/Ensemble）
+│   ├── pipeline_time.py    # 時序專用 Pipeline 引擎（分類 + 回歸）
 │   ├── config.py           # 全域設定（SEED=42, DEVICE, ARTIFACTS_DIR）
 │   ├── preprocess.py       # FeatureBuilder（10 種特徵集）+ TSFeatureBuilder + robust_clean_dataframe
 │   ├── data.py             # get_folds(), get_ts_folds(), TabularDataset
@@ -222,11 +249,23 @@ python data_collect_time.py
 │       ├── cnn1d.py        # CNN1D, ResNet1D_18, TCN
 │       ├── transformer.py  # SignalTransformer（Sinusoidal PE, norm_first HPO）, PatchTST
 │       └── tabular.py      # build_tabular_model() 工廠函式
-├── result.csv    # 合併後的完整批次結果（pipeline + baseline + pipeline_time）
+├── visualization/
+│   └── visualizer.py       # AutoMLVisualizer：SHAP 視覺化（TreeExplainer / PermutationExplainer，輸出 PNG）
+├── test/
+│   ├── dataset.csv               # 測試用資料集
+│   ├── ground_truth.csv          # 測試標準答案
+│   ├── run_submission.py         # 競賽提交（v3 完整 pipeline）
+│   ├── run_baseline_submission.py # AutoGluon 競賽提交
+│   └── compare_submissions.py    # 比較三份提交 CSV
+├── logs/                   # 執行 log（pipeline_dataset_run.log、baseline_dataset_run.log）
+├── pipeline_batch_results.csv    # 合併後的完整批次結果（pipeline + baseline + pipeline_time）
+├── result.csv              # 時序批次結果（pipeline_time）
 ├── openml_cc18_data/       # OpenML-CC18 表格分類資料集（CSV）
 ├── openml_regression_data/ # OpenML 表格回歸資料集（CSV）
 ├── ucr_ts_80_new(時序資料)/ # UCR 時序資料集（預切分格式：*_TRAIN.csv + *_TEST.csv）
 ├── artifacts/              # OOF/test 預測快取（.npy，run_cv 自動建立）
+│   ├── single/{dataset}/   # 單一 CSV 執行的模型與 SHAP 輸出
+│   └── batch/{dataset}/    # 批次執行的模型與 SHAP 輸出
 ├── submissions/            # 最終提交 CSV
 └── autogluon_models/       # AutoGluon 模型快取
 ```
@@ -280,10 +319,10 @@ python data_collect_time.py
 ### get_cfg() 模式（依資料量）
 | 資料量 | 模式 |
 |--------|------|
-| `--fast` | 所有階段最小化（tabular_trials=5, nas_epochs=5） |
-| < 500 筆 | 小資料：n_repeats=2, n_seeds=3, kpca/kmeans 開啟 |
-| < 50,000 筆 | 標準：tabular_trials=20, meta_trials=15 |
-| ≥ 50,000 筆 | 大資料：縮減 trial 數，關閉 kpca/kmeans |
+| `--fast` | tabular_trials=5, nas_epochs=5, dl_trials=3；**transformer_trials 維持 15**（Transformer 需要更多 trial） |
+| < 500 筆 | 小資料：n_repeats=2, n_seeds=3, kpca/kmeans 開啟；transformer_trials=12 |
+| < 50,000 筆 | 標準：tabular_trials=20, meta_trials=15；transformer_trials=15 |
+| ≥ 50,000 筆 | 大資料：縮減 trial 數，關閉 kpca/kmeans；transformer_trials=10 |
 
 ### 時序模式特殊行為
 

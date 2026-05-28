@@ -33,6 +33,7 @@ warnings.filterwarnings("ignore")
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
+sys.path.insert(0, os.path.join(HERE, "visualization"))
 
 
 # ── 工具函式 ─────────────────────────────────────────────────────────────────
@@ -108,6 +109,45 @@ def _append_time_result(out_path: str, row: dict):
     """Append one result row to time_results.csv; write header only if file is new."""
     df = pd.DataFrame([{c: row.get(c) for c in _TIME_RESULT_COLS}])
     df.to_csv(out_path, mode="a", header=not os.path.exists(out_path), index=False)
+
+
+class _AGWrapper:
+    """Wrap AutoGluon predictor so predict() returns probabilities (classification) for SHAP."""
+    def __init__(self, predictor, feature_names, task="classification"):
+        self._predictor = predictor
+        self._feature_names = feature_names
+        self._task = task
+
+    def predict(self, X):
+        if not isinstance(X, pd.DataFrame):
+            X = pd.DataFrame(X, columns=self._feature_names)
+        if self._task == "classification":
+            proba = self._predictor.predict_proba(X)
+            return proba.values if hasattr(proba, "values") else np.asarray(proba)
+        preds = self._predictor.predict(X)
+        return preds.values if hasattr(preds, "values") else np.asarray(preds)
+
+
+def _run_ag_shap(predictor, X_test_df: pd.DataFrame, task: str,
+                 dataset_name: str, output_dir: str, max_samples: int = 200):
+    try:
+        from visualizer import AutoMLVisualizer
+        feature_names = list(X_test_df.columns)
+        X_df = X_test_df.copy().reset_index(drop=True)
+        if len(X_df) > max_samples:
+            rng = np.random.default_rng(42)
+            idx = rng.choice(len(X_df), size=max_samples, replace=False)
+            X_df = X_df.iloc[idx].reset_index(drop=True)
+            print(f"\n[Viz] X_test 已取樣 {max_samples}/{len(X_test_df)} 筆")
+        wrapper = _AGWrapper(predictor, feature_names, task)
+        viz = AutoMLVisualizer(model=wrapper, X_test=X_df, output_dir=output_dir)
+        shap_mat = viz._get_shap_matrix()
+        top_feat = feature_names[int(np.abs(shap_mat).mean(0).argmax())]
+        viz.generate_all_plots(sample_index=0, target_feature=top_feat,
+                               prefix=dataset_name or "ag")
+        print(f"[Viz] SHAP 圖表已輸出 → {output_dir}")
+    except Exception as _e:
+        print(f"\n[Viz] 視覺化跳過（{_e}）")
 
 
 def run_new_ts_batch(args):
@@ -203,6 +243,11 @@ def run_new_ts_batch(args):
             else:
                 print(f"  RMSE={metrics['rmse']:.4f}  "
                       f"R2={metrics['r2']:.4f}  ({elapsed}s)")
+
+            if args.viz:
+                _run_ag_shap(predictor, test_X, task, base_name,
+                             output_dir=os.path.join(ag_dir, "shap_plots"),
+                             max_samples=args.viz_samples)
 
         except Exception as exc:
             elapsed = round(time.time() - t0, 1)
@@ -372,6 +417,11 @@ def run_batch(args):
                 print(f"  RMSE={metrics.get('rmse', '?'):.4f}  "
                       f"R2={metrics.get('r2', '?'):.4f}  ({elapsed}s)")
 
+            if args.viz:
+                _run_ag_shap(predictor, test_df, task, dataset_name,
+                             output_dir=os.path.join(ag_dir, "shap_plots"),
+                             max_samples=args.viz_samples)
+
         except Exception as exc:
             elapsed = round(time.time() - t0, 1)
             print(f"  [ERROR] {exc}")
@@ -491,6 +541,11 @@ def run_presplit(args):
     print(leaderboard[["model", "score_test", "score_val", "fit_time"]].to_string(index=False))
     print(f"\n{'='*60}\n")
 
+    if args.viz:
+        _run_ag_shap(predictor, test_X, task, dataset_name,
+                     output_dir=os.path.join(ag_dir, "shap_plots"),
+                     max_samples=args.viz_samples)
+
     if args.result_file:
         metrics = get_metrics(task, y_te.values, y_pred)
         is_ts = base.endswith("_TRAIN")
@@ -534,6 +589,10 @@ def main():
     parser.add_argument("--output-dir",  default="autogluon_models", help="AutoGluon 模型儲存目錄（單一模式）")
     parser.add_argument("--result-file", default=None,
                         help="結果輸出 CSV（附加模式；格式同 pipeline_batch_results.csv）")
+    parser.add_argument("--viz", action="store_true",
+                        help="訓練完成後自動產生 SHAP 視覺化圖表（需要 shap + plotly + kaleido）")
+    parser.add_argument("--viz-samples", type=int, default=200,
+                        help="SHAP X_test 樣本數上限（預設 200，控制 PermutationExplainer 速度）")
 
     # ── 批次模式 ──────────────────────────────────────────────────────────────
     parser.add_argument("--batch",      action="store_true",
@@ -660,6 +719,12 @@ def main():
     print(leaderboard[["model", "score_test", "score_val", "fit_time"]].to_string(index=False))
 
     print(f"\n{'='*60}\n")
+
+    if args.viz:
+        _run_ag_shap(predictor, test_df, task,
+                     dataset_name=os.path.splitext(os.path.basename(csv_path))[0],
+                     output_dir=os.path.join(args.output_dir, "shap_plots"),
+                     max_samples=args.viz_samples)
 
     if args.result_file:
         metrics = get_metrics(task, y_test.values, y_pred_ag)

@@ -30,9 +30,10 @@ from sklearn.preprocessing import LabelEncoder
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
+sys.path.insert(0, os.path.join(HERE, "visualization"))
 
 from src.config import ARTIFACTS_DIR, DEVICE, SEED
-import pipeline_time as _pt
+from src import pipeline_time as _pt
 
 
 # ── 工具 ─────────────────────────────────────────────────────────────────────
@@ -61,6 +62,44 @@ def _auto_detect_task(filename: str, y: pd.Series) -> str:
         return "classification"
     n_unique = y.nunique()
     return "classification" if (n_unique <= 50 and n_unique / len(y) < 0.30) else "regression"
+
+
+def _build_shap_col_names(feature_set: str, orig_names: list, n_transformed: int) -> list:
+    n = len(orig_names)
+    if feature_set == "raw":
+        return orig_names[:n_transformed]
+    if feature_set == "signal":
+        base = orig_names[:n]
+        return (base + [f"{nm}_l2" for nm in base])[:n_transformed]
+    if feature_set in ("pca64", "svd64", "kpca32"):
+        return [f"PC{i}" for i in range(n_transformed)]
+    extra = [f"feat_{i}" for i in range(max(0, n_transformed - n))]
+    return (orig_names + extra)[:n_transformed]
+
+
+def _run_shap_visualization(artifacts_dir: str, X_test_raw: np.ndarray,
+                             feature_names: list, dataset_name: str = ""):
+    try:
+        from visualizer import AutoMLVisualizer
+        import joblib as _jl
+        model_path = os.path.join(artifacts_dir, "best_tabular_model.pkl")
+        fb_path    = os.path.join(artifacts_dir, "best_tabular_model_fb.pkl")
+        if not os.path.exists(model_path):
+            print(f"\n[Viz] 找不到 {model_path}，跳過"); return
+        model = _jl.load(model_path)
+        fb    = _jl.load(fb_path)
+        X_tf  = fb.transform(X_test_raw)
+        col_names = _build_shap_col_names(fb.feature_set, feature_names, X_tf.shape[1])
+        X_df  = pd.DataFrame(X_tf, columns=col_names)
+        out_dir = os.path.join(artifacts_dir, "shap_plots")
+        viz = AutoMLVisualizer(model=model, X_test=X_df, output_dir=out_dir)
+        shap_mat = viz._get_shap_matrix()
+        top_feat = col_names[int(np.abs(shap_mat).mean(0).argmax())]
+        viz.generate_all_plots(sample_index=0, target_feature=top_feat,
+                               prefix=dataset_name or "pipeline_time")
+        print(f"\n[Viz] SHAP 圖表已輸出 → {out_dir}")
+    except Exception as _e:
+        print(f"\n[Viz] 視覺化跳過（{_e}）")
 
 
 def _ts_datasets(ts_dir: str, top_n: int, last: bool) -> list:
@@ -98,8 +137,10 @@ def _process_one(csv_path: str, args, t_ds: float) -> dict:
     y_raw = df[target_col]
     task = _auto_detect_task(csv_path, y_raw)
     print(f"  [Task] {task}  target={target_col}")
+    _arts_dir = os.path.join(ARTIFACTS_DIR, "batch_time", dataset_name)
 
     # 特徵：僅取數值欄、填 0
+    feature_names = list(df.drop(columns=[target_col]).select_dtypes(include=[np.number]).columns)
     X_all = (df.drop(columns=[target_col])
                .select_dtypes(include=[np.number])
                .fillna(0).values.astype(np.float32))
@@ -146,6 +187,9 @@ def _process_one(csv_path: str, args, t_ds: float) -> dict:
         print(f"\n  [結果] Blend → {args.cls_metric}={score_b:.4f}")
         print(f"  [結果] Stack → {args.cls_metric}={score_s:.4f}")
         print(f"  [耗時] {elapsed}s")
+
+        if getattr(args, "viz", False):
+            _run_shap_visualization(_arts_dir, X_te, feature_names, dataset_name)
 
         return {
             "dataset": dataset_name,
@@ -203,6 +247,9 @@ def _process_one(csv_path: str, args, t_ds: float) -> dict:
     print(f"  [結果] Stack → RMSE={rmse_s:.4f}  R2={r2_s:.4f}")
     print(f"  [耗時] {elapsed}s")
 
+    if getattr(args, "viz", False):
+        _run_shap_visualization(_arts_dir, X_te, feature_names, dataset_name)
+
     return {
         "dataset": dataset_name,
         "type": "TS",
@@ -239,6 +286,7 @@ def _process_new_ts_one(base_name: str, train_df: pd.DataFrame,
     """Run pipeline on one pre-split TRAIN/TEST dataset pair."""
     task = "regression" if base_name.startswith("REG_") else "classification"
     target_col = _find_target_col(train_df)
+    _arts_dir = os.path.join(ARTIFACTS_DIR, "batch_new_ts", base_name)
 
     train_df = train_df.dropna(subset=[target_col]).reset_index(drop=True)
     test_df  = test_df.dropna(subset=[target_col]).reset_index(drop=True)
@@ -246,6 +294,8 @@ def _process_new_ts_one(base_name: str, train_df: pd.DataFrame,
     y_tr_raw = train_df[target_col]
     y_te_raw = test_df[target_col]
 
+    _feat_cols = list(train_df.drop(columns=[target_col])
+                      .select_dtypes(include=[np.number]).columns)
     X_tr = (train_df.drop(columns=[target_col])
               .select_dtypes(include=[np.number])
               .fillna(0).values.astype(np.float32))
@@ -260,6 +310,7 @@ def _process_new_ts_one(base_name: str, train_df: pd.DataFrame,
     min_cols = min(X_tr.shape[1], X_te.shape[1])
     X_tr = X_tr[:, :min_cols]
     X_te = X_te[:, :min_cols]
+    feature_names = _feat_cols[:min_cols]
 
     if task == "classification":
         from sklearn.preprocessing import LabelEncoder as _LE
@@ -296,6 +347,9 @@ def _process_new_ts_one(base_name: str, train_df: pd.DataFrame,
         f1  = round(calculate_score(y_te, best_preds, metric="f1"), 4)
         elapsed = round(time.time() - t_ds, 1)
         print(f"\n  [結果] Blend={score_b:.4f}  Stack={score_s:.4f}  ({elapsed}s)")
+
+        if getattr(args, "viz", False):
+            _run_shap_visualization(_arts_dir, X_te, feature_names, base_name)
 
         return {
             "source": "pipeline",
@@ -341,6 +395,9 @@ def _process_new_ts_one(base_name: str, train_df: pd.DataFrame,
     elapsed = round(time.time() - t_ds, 1)
     print(f"\n  [結果] Blend → RMSE={rmse_b:.4f}  R2={r2_b:.4f}")
     print(f"  [結果] Stack → RMSE={rmse_s:.4f}  R2={r2_s:.4f}  ({elapsed}s)")
+
+    if getattr(args, "viz", False):
+        _run_shap_visualization(_arts_dir, X_te, feature_names, base_name)
 
     return {
         "source": "pipeline",
@@ -595,6 +652,8 @@ def main():
                         help="--new-ts-batch 模式：REG 資料集起始偏移（預設 0，即從第 1 個開始）")
     parser.add_argument("--result-file", default=None,
                         help="附加結果 CSV（含 source 欄，附加模式）")
+    parser.add_argument("--viz", action="store_true",
+                        help="訓練完成後自動產生 SHAP 視覺化圖表（需要 shap + plotly + kaleido）")
 
     parser.add_argument("--csv",    default=None, help="單一 CSV 路徑（或 _TRAIN.csv 自動找 _TEST.csv）")
     parser.add_argument("--train",  default=None, help="訓練集 CSV 路徑（搭配 --test 使用預切分模式）")

@@ -54,7 +54,7 @@ from src.preprocess import (
 )
 
 # 重用 pipeline.py 的 TimeBudget
-from pipeline import TimeBudget
+from src.pipeline import TimeBudget
 
 optuna.logging.set_verbosity(optuna.logging.WARNING)
 warnings.filterwarnings("ignore")

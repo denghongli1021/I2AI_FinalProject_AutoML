@@ -30,7 +30,7 @@ from src.train import run_cv
 from src.ensemble import NelderMeadBlender, MetaLearnerStacker
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
-_DEFAULT_PRESETS = os.path.join(_HERE, "src", "best_presets.json")
+_DEFAULT_PRESETS = os.path.join(_HERE, "best_presets.json")
 
 _ALL_TABULAR_MODELS = ["lgbm", "xgb", "catboost", "rf", "logreg", "extra_trees", "knn"]
 _DEFAULT_MLP_ARCH = {
@@ -450,6 +450,24 @@ def run(
             print(f"  [Best Model] {best_tag} → {dst_name}")
         else:
             print(f"  [Best Model] 模型檔未找到（已跳過快取？）：{src}")
+
+    # Copy FeatureBuilder for the best tabular model (used by SHAP visualization)
+    if tab_candidates:
+        _, best_tab_tag = max(tab_candidates)
+        fb_src = os.path.join(ARTIFACTS_DIR, f"{best_tab_tag}_best_model_fb.pkl")
+        fb_dst = os.path.join(artifacts_dir, "best_tabular_model_fb.pkl")
+        if os.path.exists(fb_src):
+            shutil.copy2(fb_src, fb_dst)
+            print(f"  [Best Model] FeatureBuilder({best_tab_tag}) → best_tabular_model_fb.pkl")
+
+    # ── [7.6] 丟掉最差 DL 模型 ───────────────────────────────────────────────
+    if len(dl_candidates) > 1:
+        worst_score, worst_tag = min(dl_candidates)
+        worst_idx = model_tags.index(worst_tag)
+        all_oof.pop(worst_idx)
+        all_test.pop(worst_idx)
+        model_tags.pop(worst_idx)
+        print(f"\n[7.6] Prune 最差 DL 模型 {worst_tag}（OOF {metric}={worst_score:.4f}）")
 
     # ── [8] Ensemble A: Nelder-Mead Blending ──────────────────────────────────
     print("\n[8] Ensemble A — Nelder-Mead Weighted Blending ...")
