@@ -129,6 +129,36 @@ def _build_shap_col_names(feature_set: str, orig_names: list, n_transformed: int
     return [f"feat_{i}" for i in range(n_transformed)]
 
 
+def _smart_prepare(df: pd.DataFrame, target_col: str):
+    """
+    使用 preprocessing 模組進行智慧前處理。
+    AutoRouter 自動偵測 numeric / categorical / text / datetime 欄位，
+    建立雙軌管線（tree 軌道保留原始尺度供樹狀模型使用）。
+    回傳 (X_tr, X_te, y_tr_raw, y_te_raw, feature_names)，X 為 float32 numpy。
+    若 preprocessing 模組不可用，自動回退到基本的 _prepare_X() + train_test_split。
+    """
+    try:
+        from preprocessing.interface import preprocess_for_training
+        X_dict_tr, X_dict_te, y_tr_raw, y_te_raw, _ = preprocess_for_training(
+            data_source=df,
+            target_col=target_col,
+            test_size=0.2,
+        )
+        X_tr = X_dict_tr["tree"].values.astype(np.float32)
+        X_te = X_dict_te["tree"].values.astype(np.float32)
+        feature_names = list(X_dict_tr["tree"].columns)
+        return X_tr, X_te, y_tr_raw, y_te_raw, feature_names
+    except Exception as _e:
+        print(f"  [Preprocess] 智慧前處理失敗（{_e}），回退到基本前處理")
+        X_all = _prepare_X(df, target_col)
+        feat_names = _get_feature_names(df, target_col)
+        y_all_raw = df[target_col]
+        X_tr, X_te, y_tr_raw, y_te_raw = train_test_split(
+            X_all, y_all_raw, test_size=0.2, random_state=SEED
+        )
+        return X_tr, X_te, y_tr_raw, y_te_raw, feat_names
+
+
 def _run_shap_visualization(artifacts_dir: str, X_test_raw: np.ndarray,
                              feature_names: list, dataset_name: str = ""):
     """Load best tabular model + FeatureBuilder from artifacts_dir and generate SHAP plots."""
@@ -212,19 +242,14 @@ def run_batch(args):
             df = df.dropna(subset=[target_col]).reset_index(drop=True)
             y_raw = df[target_col]
             task = force_task if force_task else _auto_detect_task(y_raw)
-            feature_names = _get_feature_names(df, target_col)
-            X_all = _prepare_X(df, target_col)
+            X_tr, X_te, y_tr_raw, y_te_raw, feature_names = _smart_prepare(df, target_col)
 
             if task == "classification":
                 le = LabelEncoder()
-                y_all = le.fit_transform(y_raw.astype(str).values)
+                le.fit(y_raw.astype(str).values)
+                y_tr = le.transform(y_tr_raw.astype(str).values)
+                y_te = le.transform(y_te_raw.astype(str).values)
                 n_classes = len(le.classes_)
-                try:
-                    X_tr, X_te, y_tr, y_te = train_test_split(
-                        X_all, y_all, test_size=0.2, random_state=SEED, stratify=y_all)
-                except ValueError:
-                    X_tr, X_te, y_tr, y_te = train_test_split(
-                        X_all, y_all, test_size=0.2, random_state=SEED)
                 print(f"  n_train={len(y_tr)}  n_test={len(y_te)}  n_classes={n_classes}  split=Random Stratified")
 
                 _batch_artifacts = os.path.join(ARTIFACTS_DIR, "batch", dataset_name)
@@ -262,9 +287,8 @@ def run_batch(args):
                 })
 
             else:  # regression
-                y_all = np.asarray(y_raw.values, dtype=np.float32).ravel()
-                X_tr, X_te, y_tr, y_te = train_test_split(
-                    X_all, y_all, test_size=0.2, random_state=SEED)
+                y_tr = np.asarray(y_tr_raw.values, dtype=np.float32).ravel()
+                y_te = np.asarray(y_te_raw.values, dtype=np.float32).ravel()
                 print(f"  n_train={len(y_tr)}  n_test={len(y_te)}  task=regression  split=Random")
 
                 budget = _pl.TimeBudget(limit_sec=args.time_limit, t_start=t_ds)
@@ -338,19 +362,14 @@ def run_single(args):
 
     y_raw = df[target_col]
     task = _auto_detect_task(y_raw)
-    feature_names = _get_feature_names(df, target_col)
-    X_all = _prepare_X(df, target_col)
+    X_tr, X_te, y_tr_raw, y_te_raw, feature_names = _smart_prepare(df, target_col)
 
     if task == "classification":
         le = LabelEncoder()
-        y_all = le.fit_transform(y_raw.astype(str).values)
+        le.fit(y_raw.astype(str).values)
+        y_tr = le.transform(y_tr_raw.astype(str).values)
+        y_te = le.transform(y_te_raw.astype(str).values)
         n_classes = len(le.classes_)
-        try:
-            X_tr, X_te, y_tr, y_te = train_test_split(
-                X_all, y_all, test_size=0.2, random_state=SEED, stratify=y_all)
-        except ValueError:
-            X_tr, X_te, y_tr, y_te = train_test_split(
-                X_all, y_all, test_size=0.2, random_state=SEED)
         print(f"  target={target_col}  n_train={len(y_tr)}  n_test={len(y_te)}  n_classes={n_classes}")
 
         _single_artifacts = os.path.join(ARTIFACTS_DIR, "single", dataset_name)
@@ -377,9 +396,8 @@ def run_single(args):
             _run_shap_visualization(_single_artifacts, X_te, feature_names, dataset_name)
 
     else:  # regression
-        y_all = np.asarray(y_raw.values, dtype=np.float32).ravel()
-        X_tr, X_te, y_tr, y_te = train_test_split(
-            X_all, y_all, test_size=0.2, random_state=SEED)
+        y_tr = np.asarray(y_tr_raw.values, dtype=np.float32).ravel()
+        y_te = np.asarray(y_te_raw.values, dtype=np.float32).ravel()
         print(f"  target={target_col}  n_train={len(y_tr)}  n_test={len(y_te)}  task=regression")
 
         budget = _pl.TimeBudget(limit_sec=args.time_limit, t_start=t_ds)
