@@ -200,6 +200,97 @@ def _run_shap_visualization(artifacts_dir: str, X_test_raw: np.ndarray,
         print(f"\n[Viz] 視覺化跳過（{_e}）")
 
 
+def _run_dl_shap_visualization(artifacts_dir: str, X_train_raw: np.ndarray,
+                                X_test_raw: np.ndarray, feature_names: list,
+                                dataset_name: str = "", max_test_samples: int = 200):
+    """Load best DL model (.pt) from artifacts_dir and generate SHAP plots via PermutationExplainer."""
+    try:
+        import torch
+        import sys as _sys
+        _viz_path = os.path.join(HERE, "visualization")
+        if _viz_path not in _sys.path:
+            _sys.path.insert(0, _viz_path)
+        from visualizer import AutoMLVisualizer
+        from src.train import _build_dl_model
+        from src.preprocess import FeatureBuilder
+        from src.config import SEED as _SEED
+
+        pt_path = os.path.join(artifacts_dir, "best_dl_model.pt")
+        if not os.path.exists(pt_path):
+            print("[Viz-DL] best_dl_model.pt 不存在，跳過 DL 視覺化"); return
+
+        ckpt        = torch.load(pt_path, map_location="cpu")
+        config      = ckpt["config"]
+        in_features = ckpt["in_features"]
+        n_classes   = ckpt["n_classes"]
+        model_name  = config["model_name"]
+        feature_set = config["feature_set"]
+
+        _model_obj = _build_dl_model(model_name, config["arch_params"], in_features, n_classes)
+        _model_obj.load_state_dict(ckpt["state_dict"])
+        _model_obj.eval()
+        print(f"[Viz-DL] 載入 {model_name}  feature_set={feature_set}"
+              f"  in_features={in_features}  n_classes={n_classes}")
+
+        class _Predictor:
+            def __init__(self, m):
+                self._m = m
+            def predict_proba(self, X):
+                with torch.no_grad():
+                    if isinstance(X, pd.DataFrame):
+                        X = X.values
+                    return torch.softmax(self._m(torch.FloatTensor(X)), dim=1).numpy()
+            def predict(self, X):
+                return self.predict_proba(X).argmax(axis=1)
+
+        predictor = _Predictor(_model_obj)
+
+        # 自動偵測訓練時的 global_cfg，確保特徵維度與 checkpoint 吻合
+        _gcfg_candidates = [
+            {"use_kmeans": True,  "use_kpca": False},
+            {"use_kmeans": False, "use_kpca": False},
+            {"use_kmeans": True,  "use_kpca": True},
+            {"use_kmeans": False, "use_kpca": True},
+        ]
+        fb = None
+        for _gcfg in _gcfg_candidates:
+            _fb_try = FeatureBuilder(feature_set=feature_set, global_cfg=_gcfg).fit(X_train_raw)
+            if _fb_try.transform(X_train_raw[:1]).shape[1] == in_features:
+                fb = _fb_try
+                print(f"[Viz-DL] FeatureBuilder(feature_set={feature_set},"
+                      f" use_kmeans={_gcfg['use_kmeans']}) → {in_features} 維")
+                break
+        if fb is None:
+            print(f"[Viz-DL] 警告：無法自動匹配 in_features={in_features}，使用預設 global_cfg")
+            fb = FeatureBuilder(feature_set=feature_set).fit(X_train_raw)
+
+        X_tf = fb.transform(X_test_raw)
+        col_names = _build_shap_col_names(feature_set, feature_names, X_tf.shape[1])
+        X_df = pd.DataFrame(X_tf, columns=col_names)
+
+        if len(X_df) > max_test_samples:
+            rng = np.random.default_rng(_SEED)
+            idx = rng.choice(len(X_df), size=max_test_samples, replace=False)
+            X_df = X_df.iloc[idx].reset_index(drop=True)
+            print(f"[Viz-DL] X_test 取樣 {max_test_samples}/{X_tf.shape[0]} 筆"
+                  f"（可用 --dl-shap-samples 調整）")
+
+        viz_output = os.path.join(artifacts_dir, "shap_plots_dl")
+        print(f"[Viz-DL] 執行 SHAP（{X_df.shape[0]} 筆 × {X_df.shape[1]} 特徵）...")
+        viz = AutoMLVisualizer(model=predictor, X_test=X_df, output_dir=viz_output)
+
+        shap_mat = viz._get_shap_matrix()
+        top_feat = col_names[int(np.abs(shap_mat).mean(0).argmax())]
+        viz.generate_all_plots(
+            sample_index=0,
+            target_feature=top_feat,
+            prefix=f"{dataset_name}_dl",
+        )
+        print(f"\n[Viz-DL] SHAP 圖表已輸出 → {viz_output}")
+    except Exception as _e:
+        print(f"\n[Viz-DL] DL 視覺化跳過（{_e}）")
+
+
 # ── 批次評估模式 ──────────────────────────────────────────────────────────────
 
 def run_batch(args):
@@ -278,6 +369,7 @@ def run_batch(args):
                 print(f"  [耗時] {elapsed}s")
                 if args.viz:
                     _run_shap_visualization(_batch_artifacts, X_te, feature_names, dataset_name)
+                    _run_dl_shap_visualization(_batch_artifacts, X_tr, X_te, feature_names, dataset_name, args.dl_shap_samples)
                 results.append({
                     "dataset": dataset_name, "type": "Tab", "task": task,
                     "n_train": len(y_tr), "n_test": len(y_te),
@@ -394,6 +486,7 @@ def run_single(args):
         print(f"  [耗時] {elapsed}s")
         if args.viz:
             _run_shap_visualization(_single_artifacts, X_te, feature_names, dataset_name)
+            _run_dl_shap_visualization(_single_artifacts, X_tr, X_te, feature_names, dataset_name, args.dl_shap_samples)
 
     else:  # regression
         y_tr = np.asarray(y_tr_raw.values, dtype=np.float32).ravel()
@@ -493,6 +586,7 @@ def run_presplit(args):
         print(f"  [耗時] {elapsed}s")
         if args.viz:
             _run_shap_visualization(_presplit_artifacts, X_te, feature_names, dataset_name)
+            _run_dl_shap_visualization(_presplit_artifacts, X_tr, X_te, feature_names, dataset_name, args.dl_shap_samples)
 
     else:  # regression
         y_tr = np.asarray(y_tr_raw.values, dtype=np.float32).ravel()
@@ -563,6 +657,8 @@ def main():
                         help="附加結果 CSV（含 source 欄，附加模式）")
     parser.add_argument("--viz",          action="store_true",
                         help="訓練完成後自動產生 SHAP 視覺化圖表（需要 shap + plotly + kaleido）")
+    parser.add_argument("--dl-shap-samples", type=int, default=200,
+                        help="DL SHAP 使用的 X_test 樣本數上限（預設 200，控制 PermutationExplainer 耗時）")
 
     args = parser.parse_args()
 
