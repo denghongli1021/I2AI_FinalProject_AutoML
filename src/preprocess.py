@@ -178,17 +178,11 @@ class FeatureBuilder:
             self.reducer_ = None
 
         if self.global_cfg.get("use_kmeans", False) and self.feature_set in ["raw_stat", "raw_stat_fft"]:
-<<<<<<< HEAD
             n_samples = X_scaled.shape[0]
             valid_ks = sorted(set(min(k, n_samples) for k in [15, 30]))
             self.kmeans_ = [
                 MiniBatchKMeans(n_clusters=k, random_state=42, batch_size=1024, n_init="auto")
                 for k in valid_ks
-=======
-            self.kmeans_ = [
-                MiniBatchKMeans(n_clusters=k, random_state=42, batch_size=1024, n_init="auto")
-                for k in [15, 30]
->>>>>>> 9007facba9f5bf1a65643f4f95b4d6d67742c91e
             ]
             for km in self.kmeans_:
                 km.fit(X_scaled)

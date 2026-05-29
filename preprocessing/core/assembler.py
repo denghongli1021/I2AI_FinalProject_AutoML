@@ -16,14 +16,10 @@ from sklearn.feature_selection import (
 )
 
 from ..processors.numeric_processor import build_numeric_pipeline
-<<<<<<< HEAD
 from ..processors.category_processor import (
     build_category_pipeline,
     build_tree_category_pipeline,
 )
-=======
-from ..processors.category_processor import build_category_pipeline
->>>>>>> 9007facba9f5bf1a65643f4f95b4d6d67742c91e
 from ..processors.text_processor import build_text_pipeline
 from ..processors.time_processor import build_time_pipeline
 
@@ -82,7 +78,6 @@ def _build_text_column_pipeline() -> Pipeline:
     ])
 
 
-<<<<<<< HEAD
 # 🚀 引入防洩漏的 TargetEncoder (需要 scikit-learn >= 1.3)
 from sklearn.preprocessing import TargetEncoder
 
@@ -109,33 +104,6 @@ def _build_high_cardinality_pipeline() -> Pipeline:
             smooth="auto",       # 🤖 自動平滑化，防止少數極端值導致的 overfitting
             cv=5                 # 🛡️ 內建 5-Fold 交叉計算，防禦目標洩漏
         ))
-=======
-def _build_high_cardinality_pipeline() -> Pipeline:
-    """
-    建立高基數類別欄位的安全編碼管線。
-
-    為什麼用 OrdinalEncoder 而非 OneHotEncoder？
-    高基數類別（如 500 種郵遞區號）若用 OHE，一欄會展開成 500 欄，
-    1000 種產品代碼 → 1000 欄 → 記憶體爆炸（Memory OutOfBounds）。
-
-    OrdinalEncoder 將每個類別映射為一個整數，欄位數保持不變（仍然 1 欄）。
-    handle_unknown='use_encoded_value' + unknown_value=-1：
-        當測試集遇到訓練集未見過的新類別時，
-        用 -1 代替而不崩潰，確保推論時的健壯性。
-
-    為什麼不用 Target Encoding？
-    Target Encoding 需要在 fit 時用到目標欄 y，若直接在 Pipeline 中使用，
-    訓練集會被「洩漏」自身的標籤資訊，違反防洩漏原則。
-    OrdinalEncoder 不需要 y，安全且簡單。
-    """
-    return Pipeline([
-        ("imputer", SimpleImputer(strategy="most_frequent")),
-        ("encoder", OrdinalEncoder(
-            handle_unknown="use_encoded_value",
-            unknown_value=-1,
-            encoded_missing_value=-1,
-        )),
->>>>>>> 9007facba9f5bf1a65643f4f95b4d6d67742c91e
     ])
 
 
@@ -267,7 +235,6 @@ class PipelineAssembler:
             transformers.append(("num_pipeline", num_pipe, numeric_cols))
 
 
-<<<<<<< HEAD
         # ── 2. 低基數類別特徵 ────────────────────────────────────────
         # Tree 軌道：OrdinalEncoder（單欄整數，LGBM/XGB 原生支援，節省維度）
         # DL  軌道：OHE + RareCategoryGrouper（one-hot，合併低頻類別防稀疏爆維）
@@ -291,29 +258,12 @@ class PipelineAssembler:
             # 這裡我們先假設你在 assembler 的 init 或 build 時能知道 is_classification
             # 如果不確定，TargetEncoder 的 target_type="auto" 其實也很聰明！
             
-=======
-        # ── 2. 低基數類別特徵（OHE）─────────────────────────────────
-        categorical_cols = self.feature_groups.get("categorical", [])
-        if categorical_cols:
-            transformers.append((
-                "cat_pipeline", build_category_pipeline(), categorical_cols
-            ))
-            print(f"  [Assembler] 類別管線(OHE)  ← {len(categorical_cols):2d} 欄: {categorical_cols[:5]}...")
-
-        # ── 3. 高基數類別特徵（OrdinalEncoder，防 OHE 維度爆炸）────
-        high_card_cols = self.feature_groups.get("high_cardinality", [])
-        if high_card_cols:
->>>>>>> 9007facba9f5bf1a65643f4f95b4d6d67742c91e
             transformers.append((
                 "high_card_pipeline",
                 _build_high_cardinality_pipeline(),
                 high_card_cols,
             ))
-<<<<<<< HEAD
             print(f"  [Assembler] 高基數管線(Target) ← {len(high_card_cols):2d} 欄: {high_card_cols[:5]}...")
-=======
-            print(f"  [Assembler] 高基數管線     ← {len(high_card_cols):2d} 欄: {high_card_cols[:5]}...")
->>>>>>> 9007facba9f5bf1a65643f4f95b4d6d67742c91e
 
         # ── 4. 文字特徵（每欄獨立，修正 TF-IDF 維度問題）──────────
         text_cols = self.feature_groups.get("text", [])
@@ -359,11 +309,7 @@ class PipelineAssembler:
                 ),
                 list(set(potential_ids[:3] + potential_nums[:2])),
             ))
-<<<<<<< HEAD
             print(f"  [Assembler] 注入自動群組聚合統計分支 (ID: {potential_ids[:3]} | 數值: {potential_nums[:2]})")
-=======
-            print(f"  [Assembler] 🛡️ 注入自動群組聚合統計 分支！(ID: {potential_ids[:3]} | 數值: {potential_nums[:2]})")
->>>>>>> 9007facba9f5bf1a65643f4f95b4d6d67742c91e
 
         # (B) 自動多項式交互特徵 (Polynomial Interactions)
         # 挑選前 3 個最重要的數值特徵進行兩兩交叉乘除，避免維度過度爆炸
@@ -374,17 +320,12 @@ class PipelineAssembler:
                 PolynomialInteracter(target_cols=poly_targets, allow_division=True),
                 poly_targets,
             ))
-<<<<<<< HEAD
             print(f"  [Assembler] 注入多項式交叉乘除分支 (目標特徵: {poly_targets})")
-=======
-            print(f"  [Assembler] ⚔️ 注入多項式交叉乘除 分支！(目標特徵: {poly_targets})")
->>>>>>> 9007facba9f5bf1a65643f4f95b4d6d67742c91e
 
         # (C) 自動非線性縮放 (Non-linear Transformations)
         # 專門抓出金額類特徵進行常態化分位數轉換，矯正長尾偏態
         amt_cols = [c for c in numeric_cols if "amt" in c.lower() or "amount" in c.lower()]
         if amt_cols:
-<<<<<<< HEAD
             if track == 'dl': # 樹模型不需要縮放
                 transformers.append((
                     "feat_nonlinear_scale",
@@ -392,14 +333,6 @@ class PipelineAssembler:
                     amt_cols,
                 ))
                 print(f"  [Assembler] 注入非線性長尾偏態矯正分支 (目標特徵: {amt_cols})")
-=======
-            transformers.append((
-                "feat_nonlinear_scale",
-                NonLinearScaler(target_cols=amt_cols, strategy="quantile"),
-                amt_cols,
-            ))
-            print(f"  [Assembler] 🧪 注入非線性長尾偏態矯正 分支！(目標特徵: {amt_cols})")
->>>>>>> 9007facba9f5bf1a65643f4f95b4d6d67742c91e
 
         # ── 空管線早期錯誤 ────────────────────────────────────────
         if not transformers:
@@ -474,7 +407,6 @@ class PipelineAssembler:
         # 自動判斷分類 / 迴歸
         is_classification = y.nunique() <= 50
         mi_fn = mutual_info_classif if is_classification else mutual_info_regression
-<<<<<<< HEAD
 
         import scipy.sparse as sp
         X_arr = X_clean.toarray() if sp.issparse(X_clean) else np.asarray(X_clean)
@@ -484,8 +416,6 @@ class PipelineAssembler:
         # 自動判斷分類 / 迴歸
         is_classification = y.nunique() <= 50
         mi_fn = mutual_info_classif if is_classification else mutual_info_regression
-=======
->>>>>>> 9007facba9f5bf1a65643f4f95b4d6d67742c91e
         scores = mi_fn(X_arr, y, random_state=42)
 
         mi_df = pd.DataFrame({

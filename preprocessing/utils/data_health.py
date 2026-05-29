@@ -438,14 +438,11 @@ def _check_outliers_ensemble(
 
     # 填補 NaN（模型需要完整資料）
     X = numeric_df.fillna(numeric_df.median())
-<<<<<<< HEAD
 
     # 🚀 拆彈：如果資料大於 5萬筆，隨機抽樣，否則 LOF 會 OOM
     if len(X) > 50000:
         X = X.sample(n=50000, random_state=42)
     
-=======
->>>>>>> 9007facba9f5bf1a65643f4f95b4d6d67742c91e
     n   = len(X)
     votes = np.zeros(n, dtype=int)
     methods_per_row = [[] for _ in range(n)]
@@ -541,11 +538,9 @@ def _check_label_noise(
     X_check = numeric_df.loc[common_idx].fillna(numeric_df.median())
     y_check = y.loc[common_idx]
 
-<<<<<<< HEAD
     # 🚀 更高級的抽樣：分層抽樣 (確保每個類別都有被抽到)
     if len(X_check) > 50000:
         # 將特徵與標籤合併，以利 groupby 抽樣
-        temp_df = X_check.copy()
         temp_df['__target__'] = y_check
         
         # 依照 target 群組，等比例抽出 20000 筆
@@ -556,8 +551,6 @@ def _check_label_noise(
         X_check = sampled_df.drop(columns=['__target__'])
         y_check = sampled_df['__target__']
 
-=======
->>>>>>> 9007facba9f5bf1a65643f4f95b4d6d67742c91e
     try:
         le = LabelEncoder()
         y_enc = le.fit_transform(y_check)

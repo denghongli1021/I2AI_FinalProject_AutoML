@@ -51,11 +51,7 @@ class MIFeatureSelector(BaseEstimator, TransformerMixin):
             
         n_kept = self.selected_mask_.sum()
         n_dropped = len(self.selected_mask_) - n_kept
-<<<<<<< HEAD
         print(f"  [MI Selector] 保留 {n_kept} 個特徵，過濾 {n_dropped} 個冗餘特徵。")
-=======
-        print(f"  ✅ [MI Selector] 保留 {n_kept} 個特徵，過濾 {n_dropped} 個冗餘特徵！")
->>>>>>> 9007facba9f5bf1a65643f4f95b4d6d67742c91e
         
         return self
 

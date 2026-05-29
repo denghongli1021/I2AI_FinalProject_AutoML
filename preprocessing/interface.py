@@ -24,22 +24,16 @@ from sklearn.pipeline import Pipeline
 
 # 保留原版 import 方式，依賴 core/__init__.py 的 export 設定
 from .core import AutoRouter, PipelineAssembler
-<<<<<<< HEAD
 from .utils.data_health import (
     generate_health_report,
     export_report_json,
     export_report_html,
     print_health_report
 )
-=======
-from .utils.data_health import generate_health_report
-
->>>>>>> 9007facba9f5bf1a65643f4f95b4d6d67742c91e
 from .processors.feature_generator import MIFeatureSelector
 from .data_loader import load_and_merge_data
 from .processors.feature_generator import RobustDataCleaner
 
-<<<<<<< HEAD
 # 💡 新增功能: 對抗驗證
 try:
     from .utils.adversarial import (
@@ -50,8 +44,6 @@ try:
 except ImportError:
     pass # 如果沒有這個檔案，後續用 try-except 接住
 
-=======
->>>>>>> 9007facba9f5bf1a65643f4f95b4d6d67742c91e
 import warnings
 
 # 忽略預期中的 Imputer 幽靈警告，保持 Log 乾淨
@@ -69,18 +61,12 @@ warnings.filterwarnings(
 def _clean_raw_data(df: pd.DataFrame) -> pd.DataFrame:
     """
     進場前清理（在進入 sklearn 管線之前完成）。
-<<<<<<< HEAD
-
-=======
-    
->>>>>>> 9007facba9f5bf1a65643f4f95b4d6d67742c91e
     ⚙️ 記憶體優化版：
     移除 cleaned = df.copy() 這種完全複製行為（記憶體翻倍的元兇）。
     改用覆蓋賦值（Reassignment），利用 Pandas 內部的區塊共享機制（Block Sharing），
     既能省下 90% 的複製記憶體，又能 100% 避免修改到外部原始資料的副作用！
     """
     # ❌ 移除這行：cleaned = df.copy()
-<<<<<<< HEAD
 
     # ── 1. inf → NaN ──────────────────────────────────────────────
     numeric_cols = df.select_dtypes(include=[np.number]).columns
@@ -88,22 +74,12 @@ def _clean_raw_data(df: pd.DataFrame) -> pd.DataFrame:
     # 用原本的 df 來計算統計量，不佔額外空間
     n_inf = np.isinf(df[numeric_cols]).sum().sum()
 
-=======
-    
-    # ── 1. inf → NaN ──────────────────────────────────────────────
-    numeric_cols = df.select_dtypes(include=[np.number]).columns
-    
-    # 用原本的 df 來計算統計量，不佔額外空間
-    n_inf = np.isinf(df[numeric_cols]).sum().sum()
-    
->>>>>>> 9007facba9f5bf1a65643f4f95b4d6d67742c91e
     if n_inf > 0:
         # ✅ 安全無副作用：不開 inplace=True。
         # 當執行賦值給局部變數 df 時，Python 會自動打破與外部大表的直接引用綁定
         df = df.replace([np.inf, -np.inf], np.nan)
         print(f"   [前處理] 替換了 {n_inf:,} 個 inf / -inf 值為 NaN")
 
-<<<<<<< HEAD
     # ── 1.5. 字串型缺失標記 → NaN ──────────────────────────────────
     # 許多真實資料集（如 adult/census）用 '?'、'NA'、'none' 等字串標記缺失值，
     # 若不替換則 OHE 會為這些「假類別」建立獨立欄位，對模型毫無幫助。
@@ -138,8 +114,6 @@ def _clean_raw_data(df: pd.DataFrame) -> pd.DataFrame:
         print(f"   [前處理] 已將 {sanitized_count} 個 Pandas 特規壓縮欄位轉回 Float，以相容 Scikit-learn (消滅 pd.NA)")
     # 🚀🚀🚀 新增結束 🚀🚀🚀
 
-=======
->>>>>>> 9007facba9f5bf1a65643f4f95b4d6d67742c91e
     # ── 2. 刪除完全重複列 ──────────────────────────────────────────
     n_before = len(df)
     
@@ -155,13 +129,8 @@ def _clean_raw_data(df: pd.DataFrame) -> pd.DataFrame:
     # ── 3. 👻 刪除幽靈欄位 (100% 缺失值) ───────────────────────────
     ghost_cols = df.columns[df.isnull().all()].tolist()
     if ghost_cols:
-<<<<<<< HEAD
         print(f"   [前處理] 警告：偵測到 {len(ghost_cols)} 個欄位缺失率高達 100%！")
         print(f"   [前處理] 已自動刪除無效欄位 (範例: {ghost_cols[:5]}...)")
-=======
-        print(f"   [前處理] ⚠️ 警告：偵測到 {len(ghost_cols)} 個欄位缺失率高達 100%！")
-        print(f"   [前處理] 🔪 已自動刪除無效欄位 (範例: {ghost_cols[:5]}...)")
->>>>>>> 9007facba9f5bf1a65643f4f95b4d6d67742c91e
         # ✅ 安全無副作用：直接回傳排除幽靈欄位後的矩陣
         df = df.drop(columns=ghost_cols)
 
@@ -191,11 +160,8 @@ def _array_to_dataframe(
 def run_data_audit(
     raw_df: pd.DataFrame,
     target_col: str,
-<<<<<<< HEAD
     export_html_path: Optional[str] = None, # 🆕 新增參數
     export_json_path: Optional[str] = None  # 🆕 新增參數
-=======
->>>>>>> 9007facba9f5bf1a65643f4f95b4d6d67742c91e
 ) -> Dict[str, Any]:
     """
     [提供給 UI 組] 產生預處理審查報告 (Preprocessing Audit Report)。
@@ -208,7 +174,6 @@ def run_data_audit(
     Parameters
     ----------
     raw_df : pd.DataFrame
-<<<<<<< HEAD
         待診斷的原始資料（必須包含目標欄位）。
     target_col : str
         預測目標的欄位名稱。
@@ -216,25 +181,15 @@ def run_data_audit(
         匯出 HTML 視覺化報告的檔案路徑（例如："audit_report.html"）。若未提供則不產出 HTML。
     export_json_path : str, optional
         匯出 JSON 格式報告的檔案路徑（例如："audit_report.json"）。供自動化腳本讀取，若未提供則不產出。
-=======
-        原始資料（完整，包含 target 欄）
-    target_col : str
-        目標欄位名稱
->>>>>>> 9007facba9f5bf1a65643f4f95b4d6d67742c91e
 
     Returns
     -------
     dict
-<<<<<<< HEAD
         JSON 友善的資料健康診斷報告字典（包含 summary, warnings, info 等鍵值），可直接序列化後傳遞給前端 UI 渲染。
-=======
-        JSON 友善的健康報告，可直接序列化後傳給前端。
->>>>>>> 9007facba9f5bf1a65643f4f95b4d6d67742c91e
     """
     print(f"\n[健檢中心] 正在針對 {raw_df.shape[0]} 筆資料進行全身健康檢查...")
     report = generate_health_report(raw_df, target_col)
 
-<<<<<<< HEAD
     # 2. 在終端機印出漂亮摘要 (呼叫你剛寫的 print_health_report)
     print_health_report(report)
 
@@ -248,12 +203,6 @@ def run_data_audit(
         print(f"[警告] 發現 {len(report['warnings'])} 個潛在問題！")
     else:
         print("[OK] 資料健康狀況良好！")
-=======
-    if report["warnings"]:
-        print(f"⚠️ 發現 {len(report['warnings'])} 個潛在問題！")
-    else:
-        print("✅ 資料健康狀況良好！")
->>>>>>> 9007facba9f5bf1a65643f4f95b4d6d67742c91e
 
     return report
 
@@ -261,17 +210,11 @@ def run_data_audit(
 def preprocess_for_training(
     data_source: Union[pd.DataFrame, str, List[str]],  
     target_col: str,
-<<<<<<< HEAD
     test_data_source: Optional[Union[pd.DataFrame, str, List[str]]] = None, # 🆕 新增：獨立測試集
     test_size: float = 0.2,
     schema_override: Optional[Dict[str, str]] = None,
     main_file_index: int = 0, 
     enable_adv_val: bool = True # 🆕 新增：對抗驗證開關
-=======
-    test_size: float = 0.2,
-    schema_override: Optional[Dict[str, str]] = None,
-    main_file_index: int = 0, 
->>>>>>> 9007facba9f5bf1a65643f4f95b4d6d67742c91e
 ) -> Tuple[pd.DataFrame, pd.DataFrame, pd.Series, pd.Series, Any]:
     """
     [提供給 模型組] 執行端對端的預處理管線。
@@ -285,7 +228,6 @@ def preprocess_for_training(
         3. 多個 CSV 檔案路徑清單 (將自動執行 Join)
     target_col : str
         目標欄位名稱
-<<<<<<< HEAD
     test_data_source : Union[pd.DataFrame, str, List[str]], optional
         獨立的測試集資料來源（格式同 data_source）。
         若提供此參數，系統將能執行對抗驗證 (Adversarial Validation) 防護機制。
@@ -299,32 +241,16 @@ def preprocess_for_training(
     enable_adv_val : bool
         是否啟用對抗驗證防護盾，預設 True。
         用以自動偵測並剔除導致 Train/Test 分佈漂移的間諜特徵（僅在提供 test_data_source 時生效）。
-=======
-    test_size : float
-        測試集比例，預設 0.2
-    schema_override : dict, optional
-
-        手動覆蓋 Router 的自動判斷。
-    main_file_index : int
-        當傳入多個檔案時，指定哪一個是主表 (預設 0)。
->>>>>>> 9007facba9f5bf1a65643f4f95b4d6d67742c91e
 
     Returns
     -------
     (X_train_clean, X_test_clean, y_train, y_test, fitted_preprocessor)
 
     """
-<<<<<<< HEAD
     print(">>> [Phase 1] 資料載入與整合 (Data Ingestion)")
     raw_df = load_and_merge_data(data_source, main_file_index=main_file_index)
 
     print(">>> [Phase 2] 特徵預處理管線 (Feature Engineering)")
-=======
-    print(">>> 🔵 Phase 1: 資料載入與整合 (Data Ingestion)")
-    raw_df = load_and_merge_data(data_source, main_file_index=main_file_index)
-
-    print(">>> 🔵 Phase 2: 特徵預處理管線 (Feature Engineering)")
->>>>>>> 9007facba9f5bf1a65643f4f95b4d6d67742c91e
 
     if target_col not in raw_df.columns:
         raise ValueError(f"找不到目標欄位 '{target_col}'，現有欄位：{list(raw_df.columns)}")
@@ -355,7 +281,6 @@ def preprocess_for_training(
     del raw_df, clean_df, X, y
     import gc; gc.collect()
 
-<<<<<<< HEAD
     # 3. 🛡️ 測試集處理與切割邏輯
     print(">>> [Phase 1] 訓練資料載入與整合 (Train Ingestion)")
     raw_df = load_and_merge_data(data_source, main_file_index=main_file_index)
@@ -432,9 +357,6 @@ def preprocess_for_training(
     import gc; gc.collect()
 
     print(f"\n[預處理模組] 正在針對 {len(X_train_raw):,} 筆訓練資料進行分析...")
-=======
-    print(f"[預處理模組] 正在針對 {len(X_train_raw):,} 筆訓練資料進行分析...")
->>>>>>> 9007facba9f5bf1a65643f4f95b4d6d67742c91e
 
     # ---------------------------------------------------------
     # 🛡️ 修改核心 1: 讓盾牌先幫 Router 探路 (⚡ 記憶體極限優化版)
@@ -476,35 +398,21 @@ def preprocess_for_training(
 
     # ==========================================
     # 🌳 第一軌：樹狀模型專用 (Tree Track - 生肉)
-<<<<<<< HEAD
     # 不補值、不縮放。直接交給 XGBoost 自己挖寶，不需經過 MI 篩選！
     # ==========================================
     tree_preprocessor = Pipeline([
         ('phase0', RobustDataCleaner()),
         ('phase1', assembler.build(track="tree"))
         # 🚨 刪除 phase2_mi_selector！讓生肉原汁原味進入模型。
-=======
-    # 不補值、不縮放，保留 800 個特徵給 XGBoost 自己挖寶
-    # ==========================================
-    tree_preprocessor = Pipeline([
-        ('phase0', RobustDataCleaner()),
-        ('phase1', assembler.build(track="tree")), 
-        ('phase2_mi_selector', MIFeatureSelector(top_k=800, is_classification=is_classification))
->>>>>>> 9007facba9f5bf1a65643f4f95b4d6d67742c91e
     ])
 
     # ==========================================
     # 🧠 第二軌：深度學習/線性模型專用 (DL Track - 熟肉)
-<<<<<<< HEAD
     # 精緻補值、標準化，嚴格壓在 300 個特徵防 NAS/DL 梯度爆炸與 OOM
-=======
-    # 精緻補值、標準化，嚴格壓在 300 個特徵防 NAS 當機
->>>>>>> 9007facba9f5bf1a65643f4f95b4d6d67742c91e
     # ==========================================
     dl_preprocessor = Pipeline([
         ('phase0', RobustDataCleaner()),
         ('phase1', assembler.build(track="dl")),
-<<<<<<< HEAD
         # ✅ DL 軌道非常需要 MI 篩選，因為神經網路對無用特徵（雜訊）非常敏感！
         ('phase2_mi_selector', MIFeatureSelector(top_k=300, is_classification=is_classification))
     ])
@@ -537,24 +445,6 @@ def preprocess_for_training(
         pass
     import gc; gc.collect()
 
-=======
-        ('phase2_mi_selector', MIFeatureSelector(top_k=300, is_classification=is_classification))
-    ])
-
-    # 5. 正式擬合 (Fit) 與轉換 (Transform) 訓練集
-    print("[預處理模組] 正在處理 Tree 軌道資料 (Phase 0 -> Phase 2)...")
-    X_train_tree_array = tree_preprocessor.fit_transform(X_train_raw, y_train)
-    # 清理 Tree 軌道的特徵名稱
-    tree_feat_names = [name.split('__')[-1] for name in tree_preprocessor.get_feature_names_out()]
-    X_train_tree = _array_to_dataframe(X_train_tree_array, tree_feat_names)
-
-    print("[預處理模組] 正在處理 DL 軌道資料 (Phase 0 -> Phase 2)...")
-    X_train_dl_array = dl_preprocessor.fit_transform(X_train_raw, y_train)
-    # 清理 DL 軌道的特徵名稱
-    dl_feat_names = [name.split('__')[-1] for name in dl_preprocessor.get_feature_names_out()]
-    X_train_dl = _array_to_dataframe(X_train_dl_array, dl_feat_names)
-
->>>>>>> 9007facba9f5bf1a65643f4f95b4d6d67742c91e
     # 6. 僅轉換 (Transform) 測試集
     print("[預處理模組] 正在轉換測試集資料...")
     X_test_tree = _array_to_dataframe(tree_preprocessor.transform(X_test_raw), tree_feat_names)
@@ -565,11 +455,7 @@ def preprocess_for_training(
     X_test_dict = {"tree": X_test_tree, "dl": X_test_dl}
     preprocessors = {"tree": tree_preprocessor, "dl": dl_preprocessor}
 
-<<<<<<< HEAD
     print("[預處理模組] 雙軌處理完成！")
-=======
-    print("[預處理模組] 雙軌處理完成！🚀")
->>>>>>> 9007facba9f5bf1a65643f4f95b4d6d67742c91e
     return X_train_dict, X_test_dict, y_train, y_test, preprocessors
 
 def preprocess_for_inference(
@@ -608,19 +494,11 @@ def preprocess_for_inference(
             "再傳入此函式。"
         )
 
-<<<<<<< HEAD
     print(">>> [推論 Phase 1] 測試資料載入與整合")
     # 1. 智慧載入器 (支援多表 Join 與 記憶體壓縮)
     raw_df = load_and_merge_data(data_source, main_file_index=main_file_index)
 
     print(">>> [推論 Phase 2] 基礎清理 (不刪除任何資料列)")
-=======
-    print(">>> 🟢 推論期 Phase 1: 測試資料載入與整合")
-    # 1. 智慧載入器 (支援多表 Join 與 記憶體壓縮)
-    raw_df = load_and_merge_data(data_source, main_file_index=main_file_index)
-    
-    print(">>> 🟢 推論期 Phase 2: 基礎清理 (不刪除任何資料列)")
->>>>>>> 9007facba9f5bf1a65643f4f95b4d6d67742c91e
     # ⚠️ 注意：這裡不能呼叫 _clean_raw_data，因為推論階段絕對不能刪除重複列！
     # 我們只手動替換 inf -> NaN
     clean_df = raw_df.copy()
@@ -632,34 +510,20 @@ def preprocess_for_inference(
     
     X_new = clean_df
 
-<<<<<<< HEAD
     print(">>> [推論 Phase 3] 特徵強制對齊")
-=======
-    print(">>> 🟢 推論期 Phase 3: 特徵強制對齊")
->>>>>>> 9007facba9f5bf1a65643f4f95b4d6d67742c91e
     # 2. 特徵對齊裝甲 (Feature Alignment)
     missing_cols = set(training_features) - set(X_new.columns)
     extra_cols = set(X_new.columns) - set(training_features)
     
     if missing_cols:
-<<<<<<< HEAD
         print(f"  [推論對齊] 警告：測試資料缺少 {len(missing_cols)} 個訓練欄位 (將自動補 NaN)。")
     if extra_cols:
         print(f"  [推論對齊] 提示：測試資料多出 {len(extra_cols)} 個未知欄位 (已自動捨棄)。")
-=======
-        print(f"  [推論對齊] ⚠️ 警告：測試資料缺少 {len(missing_cols)} 個訓練欄位 (將自動補 NaN)。")
-    if extra_cols:
-        print(f"  [推論對齊] 🔪 提示：測試資料多出 {len(extra_cols)} 個未知欄位 (已自動捨棄)。")
->>>>>>> 9007facba9f5bf1a65643f4f95b4d6d67742c91e
         
     # 一行搞定補齊與捨棄，並確保順序與訓練時完全一致
     X_aligned = X_new.reindex(columns=training_features)
 
-<<<<<<< HEAD
     print(">>> [推論 Phase 4] 執行純轉換 (Transform Only)")
-=======
-    print(">>> 🟢 推論期 Phase 4: 執行純轉換 (Transform Only)")
->>>>>>> 9007facba9f5bf1a65643f4f95b4d6d67742c91e
     # 3. 絕對只能用 transform！
     X_clean_array = fitted_preprocessor.transform(X_aligned)
     
