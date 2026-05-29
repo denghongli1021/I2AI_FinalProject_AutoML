@@ -1,0 +1,54 @@
+# 資料集（大型，使用者自行下載）
+openml_cc18_data/
+ucr_ts_80*/
+
+# 模型快取
+autogluon_models/
+artifacts/
+catboost_info/
+
+# 本地測試與內部文件
+test/
+doc/
+LOG/
+improve.txt
+improve.md
+
+# Claude Code 工作區
+.claude/
+github_readme.md
+CLAUDE.md
+
+# 中間結果 CSV（不上傳）
+baseline_batch_results.csv
+baseline_batch_results.prev.csv
+pipeline_time_batch_results.csv
+
+# 文件
+*.pdf
+
+# Python 編譯產物
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# 虛擬環境
+.venv/
+venv/
+env/
+
+# 套件安裝紀錄
+*.log
+0.64.0
+
+# 機敏資訊
+.env
+*.key
+
+# IDE
+.vscode/
+.idea/
+
+*.csv

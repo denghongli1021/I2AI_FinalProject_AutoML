@@ -1,0 +1,635 @@
+{
+  "generated_at": "2026-05-29T16:23:33.645332",
+  "report": {
+    "total_rows": 1460,
+    "total_columns": 81,
+    "perfect_columns": 62,
+    "missing_summary": {
+      "LotFrontage": {
+        "count": 259,
+        "ratio": 0.1774
+      },
+      "Alley": {
+        "count": 1369,
+        "ratio": 0.9377
+      },
+      "MasVnrType": {
+        "count": 872,
+        "ratio": 0.5973
+      },
+      "MasVnrArea": {
+        "count": 8,
+        "ratio": 0.0055
+      },
+      "BsmtQual": {
+        "count": 37,
+        "ratio": 0.0253
+      },
+      "BsmtCond": {
+        "count": 37,
+        "ratio": 0.0253
+      },
+      "BsmtExposure": {
+        "count": 38,
+        "ratio": 0.026
+      },
+      "BsmtFinType1": {
+        "count": 37,
+        "ratio": 0.0253
+      },
+      "BsmtFinType2": {
+        "count": 38,
+        "ratio": 0.026
+      },
+      "Electrical": {
+        "count": 1,
+        "ratio": 0.0007
+      },
+      "FireplaceQu": {
+        "count": 690,
+        "ratio": 0.4726
+      },
+      "GarageType": {
+        "count": 81,
+        "ratio": 0.0555
+      },
+      "GarageYrBlt": {
+        "count": 81,
+        "ratio": 0.0555
+      },
+      "GarageFinish": {
+        "count": 81,
+        "ratio": 0.0555
+      },
+      "GarageQual": {
+        "count": 81,
+        "ratio": 0.0555
+      },
+      "GarageCond": {
+        "count": 81,
+        "ratio": 0.0555
+      },
+      "PoolQC": {
+        "count": 1453,
+        "ratio": 0.9952
+      },
+      "Fence": {
+        "count": 1179,
+        "ratio": 0.8075
+      },
+      "MiscFeature": {
+        "count": 1406,
+        "ratio": 0.963
+      }
+    },
+    "duplicate_rows": 0,
+    "constant_columns": [],
+    "suspected_id_columns": [
+      "Id"
+    ],
+    "inf_columns": [],
+    "outlier_summary": [
+      {
+        "column": "LotArea",
+        "outlier_count": 34,
+        "outlier_ratio": 0.0233,
+        "q1": 7553.5,
+        "q3": 11601.5,
+        "iqr": 4048.0,
+        "lower_bound": -4590.5,
+        "upper_bound": 23745.5
+      }
+    ],
+    "ensemble_outlier_summary": [
+      {
+        "row_index": 53,
+        "votes": 4,
+        "methods": [
+          "IQR",
+          "IQR",
+          "IsolationForest",
+          "LOF"
+        ]
+      },
+      {
+        "row_index": 93,
+        "votes": 2,
+        "methods": [
+          "IsolationForest",
+          "LOF"
+        ]
+      },
+      {
+        "row_index": 171,
+        "votes": 3,
+        "methods": [
+          "IQR",
+          "IQR",
+          "LOF"
+        ]
+      },
+      {
+        "row_index": 197,
+        "votes": 3,
+        "methods": [
+          "IQR",
+          "IQR",
+          "IsolationForest"
+        ]
+      },
+      {
+        "row_index": 224,
+        "votes": 3,
+        "methods": [
+          "IQR",
+          "IsolationForest",
+          "LOF"
+        ]
+      },
+      {
+        "row_index": 231,
+        "votes": 2,
+        "methods": [
+          "IQR",
+          "IsolationForest"
+        ]
+      },
+      {
+        "row_index": 249,
+        "votes": 3,
+        "methods": [
+          "IQR",
+          "IsolationForest",
+          "LOF"
+        ]
+      },
+      {
+        "row_index": 271,
+        "votes": 2,
+        "methods": [
+          "IQR",
+          "LOF"
+        ]
+      },
+      {
+        "row_index": 297,
+        "votes": 2,
+        "methods": [
+          "IQR",
+          "LOF"
+        ]
+      },
+      {
+        "row_index": 304,
+        "votes": 2,
+        "methods": [
+          "IsolationForest",
+          "LOF"
+        ]
+      },
+      {
+        "row_index": 313,
+        "votes": 4,
+        "methods": [
+          "IQR",
+          "IQR",
+          "IsolationForest",
+          "LOF"
+        ]
+      },
+      {
+        "row_index": 332,
+        "votes": 2,
+        "methods": [
+          "IQR",
+          "LOF"
+        ]
+      },
+      {
+        "row_index": 335,
+        "votes": 3,
+        "methods": [
+          "IQR",
+          "IsolationForest",
+          "LOF"
+        ]
+      },
+      {
+        "row_index": 384,
+        "votes": 2,
+        "methods": [
+          "IQR",
+          "LOF"
+        ]
+      },
+      {
+        "row_index": 411,
+        "votes": 2,
+        "methods": [
+          "IQR",
+          "LOF"
+        ]
+      },
+      {
+        "row_index": 440,
+        "votes": 3,
+        "methods": [
+          "IQR",
+          "IsolationForest",
+          "LOF"
+        ]
+      },
+      {
+        "row_index": 451,
+        "votes": 2,
+        "methods": [
+          "IQR",
+          "LOF"
+        ]
+      },
+      {
+        "row_index": 457,
+        "votes": 2,
+        "methods": [
+          "IQR",
+          "LOF"
+        ]
+      },
+      {
+        "row_index": 477,
+        "votes": 2,
+        "methods": [
+          "IQR",
+          "IsolationForest"
+        ]
+      },
+      {
+        "row_index": 496,
+        "votes": 4,
+        "methods": [
+          "IQR",
+          "IQR",
+          "IsolationForest",
+          "LOF"
+        ]
+      },
+      {
+        "row_index": 523,
+        "votes": 8,
+        "methods": [
+          "IQR",
+          "IQR",
+          "IQR",
+          "IQR",
+          "IQR",
+          "IQR",
+          "IsolationForest",
+          "LOF"
+        ]
+      },
+      {
+        "row_index": 529,
+        "votes": 3,
+        "methods": [
+          "IQR",
+          "IsolationForest",
+          "LOF"
+        ]
+      },
+      {
+        "row_index": 583,
+        "votes": 2,
+        "methods": [
+          "IQR",
+          "IsolationForest"
+        ]
+      },
+      {
+        "row_index": 635,
+        "votes": 4,
+        "methods": [
+          "IQR",
+          "IQR",
+          "IsolationForest",
+          "LOF"
+        ]
+      },
+      {
+        "row_index": 661,
+        "votes": 2,
+        "methods": [
+          "IQR",
+          "LOF"
+        ]
+      },
+      {
+        "row_index": 691,
+        "votes": 3,
+        "methods": [
+          "IQR",
+          "IQR",
+          "IsolationForest"
+        ]
+      },
+      {
+        "row_index": 705,
+        "votes": 2,
+        "methods": [
+          "IsolationForest",
+          "LOF"
+        ]
+      },
+      {
+        "row_index": 706,
+        "votes": 2,
+        "methods": [
+          "IQR",
+          "LOF"
+        ]
+      },
+      {
+        "row_index": 769,
+        "votes": 3,
+        "methods": [
+          "IQR",
+          "IsolationForest",
+          "LOF"
+        ]
+      },
+      {
+        "row_index": 798,
+        "votes": 2,
+        "methods": [
+          "IQR",
+          "IsolationForest"
+        ]
+      },
+      {
+        "row_index": 807,
+        "votes": 3,
+        "methods": [
+          "IQR",
+          "IQR",
+          "IsolationForest"
+        ]
+      },
+      {
+        "row_index": 828,
+        "votes": 2,
+        "methods": [
+          "IQR",
+          "IsolationForest"
+        ]
+      },
+      {
+        "row_index": 848,
+        "votes": 3,
+        "methods": [
+          "IQR",
+          "IsolationForest",
+          "LOF"
+        ]
+      },
+      {
+        "row_index": 854,
+        "votes": 2,
+        "methods": [
+          "IQR",
+          "IsolationForest"
+        ]
+      },
+      {
+        "row_index": 898,
+        "votes": 3,
+        "methods": [
+          "IQR",
+          "IsolationForest",
+          "LOF"
+        ]
+      },
+      {
+        "row_index": 934,
+        "votes": 2,
+        "methods": [
+          "IQR",
+          "IQR"
+        ]
+      },
+      {
+        "row_index": 942,
+        "votes": 2,
+        "methods": [
+          "IsolationForest",
+          "LOF"
+        ]
+      },
+      {
+        "row_index": 1057,
+        "votes": 2,
+        "methods": [
+          "IQR",
+          "LOF"
+        ]
+      },
+      {
+        "row_index": 1068,
+        "votes": 2,
+        "methods": [
+          "IQR",
+          "LOF"
+        ]
+      },
+      {
+        "row_index": 1169,
+        "votes": 4,
+        "methods": [
+          "IQR",
+          "IQR",
+          "IsolationForest",
+          "LOF"
+        ]
+      },
+      {
+        "row_index": 1173,
+        "votes": 2,
+        "methods": [
+          "IQR",
+          "IsolationForest"
+        ]
+      },
+      {
+        "row_index": 1182,
+        "votes": 4,
+        "methods": [
+          "IQR",
+          "IQR",
+          "IsolationForest",
+          "LOF"
+        ]
+      },
+      {
+        "row_index": 1184,
+        "votes": 3,
+        "methods": [
+          "IQR",
+          "IsolationForest",
+          "LOF"
+        ]
+      },
+      {
+        "row_index": 1190,
+        "votes": 3,
+        "methods": [
+          "IQR",
+          "IQR",
+          "LOF"
+        ]
+      },
+      {
+        "row_index": 1228,
+        "votes": 3,
+        "methods": [
+          "IQR",
+          "IsolationForest",
+          "LOF"
+        ]
+      },
+      {
+        "row_index": 1230,
+        "votes": 2,
+        "methods": [
+          "IsolationForest",
+          "LOF"
+        ]
+      },
+      {
+        "row_index": 1287,
+        "votes": 2,
+        "methods": [
+          "IQR",
+          "LOF"
+        ]
+      },
+      {
+        "row_index": 1292,
+        "votes": 2,
+        "methods": [
+          "IQR",
+          "IsolationForest"
+        ]
+      },
+      {
+        "row_index": 1298,
+        "votes": 11,
+        "methods": [
+          "IQR",
+          "IQR",
+          "IQR",
+          "IQR",
+          "IQR",
+          "IQR",
+          "IQR",
+          "IQR",
+          "IQR",
+          "IsolationForest",
+          "LOF"
+        ]
+      },
+      {
+        "row_index": 1328,
+        "votes": 3,
+        "methods": [
+          "IQR",
+          "IsolationForest",
+          "LOF"
+        ]
+      },
+      {
+        "row_index": 1349,
+        "votes": 2,
+        "methods": [
+          "IsolationForest",
+          "LOF"
+        ]
+      },
+      {
+        "row_index": 1373,
+        "votes": 3,
+        "methods": [
+          "IQR",
+          "IsolationForest",
+          "LOF"
+        ]
+      },
+      {
+        "row_index": 1386,
+        "votes": 2,
+        "methods": [
+          "IsolationForest",
+          "LOF"
+        ]
+      },
+      {
+        "row_index": 1396,
+        "votes": 2,
+        "methods": [
+          "IQR",
+          "LOF"
+        ]
+      },
+      {
+        "row_index": 1457,
+        "votes": 2,
+        "methods": [
+          "IsolationForest",
+          "LOF"
+        ]
+      }
+    ],
+    "label_noise_candidates": [],
+    "target_info": {
+      "column": "SalePrice",
+      "dtype": "int64",
+      "unique_values": 663,
+      "missing_count": 0,
+      "task_type": "regression",
+      "numeric_stats": {
+        "min": 34900.0,
+        "max": 755000.0,
+        "mean": 180921.1959,
+        "median": 163000.0,
+        "std": 79442.5029
+      }
+    },
+    "leakage_candidates": [],
+    "info": [
+      "ℹ️  欄位 'LotFrontage' 有 259 筆缺失（17.7%），系統自動填補。",
+      "ℹ️  欄位 'MasVnrArea' 有 8 筆缺失（0.5%），系統自動填補。",
+      "ℹ️  欄位 'BsmtQual' 有 37 筆缺失（2.5%），系統自動填補。",
+      "ℹ️  欄位 'BsmtCond' 有 37 筆缺失（2.5%），系統自動填補。",
+      "ℹ️  欄位 'BsmtExposure' 有 38 筆缺失（2.6%），系統自動填補。",
+      "ℹ️  欄位 'BsmtFinType1' 有 37 筆缺失（2.5%），系統自動填補。",
+      "ℹ️  欄位 'BsmtFinType2' 有 38 筆缺失（2.6%），系統自動填補。",
+      "ℹ️  欄位 'Electrical' 有 1 筆缺失（0.1%），系統自動填補。",
+      "ℹ️  欄位 'GarageType' 有 81 筆缺失（5.5%），系統自動填補。",
+      "ℹ️  欄位 'GarageYrBlt' 有 81 筆缺失（5.5%），系統自動填補。",
+      "ℹ️  欄位 'GarageFinish' 有 81 筆缺失（5.5%），系統自動填補。",
+      "ℹ️  欄位 'GarageQual' 有 81 筆缺失（5.5%），系統自動填補。",
+      "ℹ️  欄位 'GarageCond' 有 81 筆缺失（5.5%），系統自動填補。",
+      "ℹ️  共 19 個欄位有缺失值，系統將自動處理。",
+      "✅ 無重複列。",
+      "ℹ️  目標欄 'SalePrice' 判定為迴歸任務（唯一值 663 種）。"
+    ],
+    "warnings": [
+      "⚠️  欄位 'Alley' 缺失率高達 93.8%，系統將自動整欄刪除。",
+      "⚠️  欄位 'MasVnrType' 缺失率 59.7%，系統將自動填補，請確認填補結果合理。",
+      "⚠️  欄位 'FireplaceQu' 缺失率 47.3%，系統將自動填補，請確認填補結果合理。",
+      "⚠️  欄位 'PoolQC' 缺失率高達 99.5%，系統將自動整欄刪除。",
+      "⚠️  欄位 'Fence' 缺失率高達 80.8%，系統將自動整欄刪除。",
+      "⚠️  欄位 'MiscFeature' 缺失率高達 96.3%，系統將自動整欄刪除。",
+      "⚠️  疑似整數 ID 欄位，將自動剔除：['Id']",
+      "⚠️  欄位 'LotArea' 有 34 個離群值（2.3%），StandardScaler 可能被扭曲，建議評估是否改用 RobustScaler。",
+      "⚠️  集成異常偵測（IQR+IsolationForest+LOF）發現 55 筆高信心離群樣本（≥2 種方法同時標記）。"
+    ]
+  }
+}
