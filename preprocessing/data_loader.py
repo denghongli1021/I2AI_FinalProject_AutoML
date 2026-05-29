@@ -33,29 +33,50 @@ def load_and_merge_data(data_source: Union[pd.DataFrame, str, List[str]], main_f
 
         main_df = dfs[main_file_index]
 
+        # (已修復: 移除了原本不小心重複貼上的第二層 for 迴圈)
         for i, df in enumerate(dfs):
             if i == main_file_index: continue
 
-            for i, df in enumerate(dfs):
-                if i == main_file_index: continue
+            # 1. 尋找所有共同欄位
+            all_common = list(set(main_df.columns) & set(df.columns))
+            
+            # 2. 🚀 智慧篩選：只挑選含有 'id', 'key', 'no' 的欄位作為 Join Key
+            # 如果沒有明顯的 ID，才退而求其次使用第一個共同欄位
+            join_keys = [c for c in all_common if any(k in c.lower() for k in ['id', 'key', 'no'])]
+            
+            if not join_keys and all_common:
+                join_keys = [all_common[0]] # 最差情況：拿第一個共同欄位硬上
+                print(f"[DataLoader] ⚠️ 找不到明確的 ID 欄位，退而使用 '{join_keys[0]}' 嘗試合併")
 
-                # 1. 尋找所有共同欄位
-                all_common = list(set(main_df.columns) & set(df.columns))
+            if join_keys:
+                print(f"[DataLoader] 偵測到 Join Key {join_keys}，準備執行合併...")
                 
-                # 2. 🚀 智慧篩選：只挑選含有 'id', 'key', 'no' 的欄位作為 Join Key
-                # 如果沒有明顯的 ID，才退而求其次使用第一個共同欄位
-                join_keys = [c for c in all_common if any(k in c.lower() for k in ['id', 'key', 'no'])]
+                # 🚀 核心防禦：對副表進行聚合 (Aggregation)，防止一對多導致資料爆炸
+                agg_funcs = {}
+                for col in df.columns:
+                    if col not in join_keys:
+                        if pd.api.types.is_numeric_dtype(df[col]):
+                            agg_funcs[col] = 'mean'
+                        else:
+                            agg_funcs[col] = lambda x: ' '.join(x.astype(str).unique())
                 
-                if not join_keys and all_common:
-                    join_keys = [all_common[0]] # 最差情況：拿第一個共同欄位硬上
-                    print(f"[DataLoader] ⚠️ 找不到明確的 ID 欄位，退而使用 '{join_keys[0]}' 嘗試合併")
+                if agg_funcs:
+                    df = df.groupby(join_keys).agg(agg_funcs).reset_index()
 
-                if join_keys:
-                    print(f"[DataLoader] 偵測到 Join Key {join_keys}，執行 Left Join...")
-                    # 🚀 加入 suffixes：防止非 Join Key 的共同欄位衝突 (例如兩邊都有 status -> status_main, status_ext)
-                    main_df = main_df.merge(df, on=join_keys, how='left', suffixes=('', f'_ext{i}'))
-                else:
-                    print(f"[DataLoader] ❌ 警告：無法在檔案 {i} 找到與主表的共同欄位，已跳過合併。")
+                # 🛡️ 解決 Suffixes 導致的 MergeError：手動重命名副表的重疊欄位
+                suffix = f'_ext{i}'
+                rename_dict = {
+                    col: f"{col}{suffix}" 
+                    for col in df.columns 
+                    if col in main_df.columns and col not in join_keys
+                }
+                if rename_dict:
+                    df = df.rename(columns=rename_dict)
+
+                # 🚀 執行 Left Join (因為已經手動改名，不需要再依賴 suffixes 參數)
+                main_df = main_df.merge(df, on=join_keys, how='left')
+            else:
+                print(f"[DataLoader] ❌ 警告：無法在檔案 {i} 找到與主表的共同欄位，已跳過合併。")
 
         del dfs
         collected = gc.collect()

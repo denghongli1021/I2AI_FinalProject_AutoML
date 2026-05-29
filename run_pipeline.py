@@ -177,6 +177,44 @@ def _smart_prepare(
     print("\n" + "="*50)
     print("🚀 [Pipeline] 啟動智慧前處理 (Smart Prepare)...")
     print("="*50)
+
+    # 🛡️ 防禦 1: 強制關閉 Pandas 輸出模式
+    # 避免 OrdinalEncoder 輸出 DataFrame 導致 Cython 無法讀取而當機
+    import sklearn
+    sklearn.set_config(transform_output="default")
+
+    # 🛡️ 防禦 2: 深度淨化資料型態 (Deep Sanitize)
+    # 剝除所有會讓 Cython 崩潰的 PyArrow 與 Pandas Extension Types (Int8, UInt8 等)
+    def _sanitize_df(df):
+        if df is None: return None
+        df = df.copy()
+        for col in df.columns:
+            dtype_str = str(df[col].dtype).lower()
+            
+            # 1. 處理字串與類別 (Category, string[pyarrow], string) -> 轉回標準 Python object
+            if isinstance(df[col].dtype, pd.CategoricalDtype) or "string" in dtype_str:
+                df[col] = df[col].astype(object)
+                
+            # 2. 處理 Pandas Nullable 數值 (Int8, UInt8, Float32 等) -> 轉為 Float64
+            elif pd.api.types.is_extension_array_dtype(df[col]):
+                # 再次確認它真的是數值，避免把奇怪的擴充型態誤轉
+                if pd.api.types.is_numeric_dtype(df[col]):
+                    df[col] = df[col].astype(np.float64)
+                else:
+                    df[col] = df[col].astype(object)
+                    
+        return df
+
+    print("[防爆裝甲] 正在淨化訓練集資料型態，保護 Scikit-Learn 底層引擎...")
+    train_df = _sanitize_df(train_df)
+    if test_df is not None:
+        test_df = _sanitize_df(test_df)
+    
+    # 🛡️ 防禦 3: 確保 Target 是最乾淨的 Numpy 型態
+    if pd.api.types.is_numeric_dtype(train_df[target_col]):
+        train_df[target_col] = train_df[target_col].astype(np.float64)
+    else:
+        train_df[target_col] = train_df[target_col].astype(str)
     
     try:
         from preprocessing.interface import preprocess_for_training
@@ -307,13 +345,15 @@ def _run_shap_visualization(artifacts_dir: str, X_test_raw: np.ndarray,
 
 # ── 批次評估模式 ──────────────────────────────────────────────────────────────
 from preprocessing.data_loader import load_and_merge_data
+# ── 批次評估模式 ──────────────────────────────────────────────────────────────
+from preprocessing.data_loader import load_and_merge_data
+
 def run_batch(args, datasets_override=None):
     """
     [共用核心] 執行資料集前處理與模型訓練。
     - 如果沒有 datasets_override，就是正常的 Batch 模式 (去掃描資料夾)。
     - 如果有 datasets_override，就是 Single 模式 (只跑指定的那一個檔案)。
     """
-    # 判斷當前是單檔模式還是批次模式
     is_single_mode = datasets_override is not None
     datasets = []
 
@@ -355,7 +395,7 @@ def run_batch(args, datasets_override=None):
         t_ds = time.time()
         task = "?"
         try:
-            # 🚀 統一使用 DataLoader 進行記憶體壓縮
+            # 🚀 統一使用 DataLoader 進行記憶體壓縮 (支援字串或列表)
             df = load_and_merge_data(csv_path)
             
             # 🚀 動態決定 target_col：單檔模式吃 args.target，批次模式自動偵測
@@ -374,7 +414,6 @@ def run_batch(args, datasets_override=None):
             # 呼叫你新版的智慧前處理
             X_dict_tr, X_dict_te, y_tr_raw, y_te_raw, feature_names_dict, preprocessors = _smart_prepare(df, target_col)
             
-            # 區分單檔或批次的存放路徑
             artifacts_dir = os.path.join(ARTIFACTS_DIR, "single" if is_single_mode else "batch", dataset_name)
 
             if task == "classification":
@@ -389,14 +428,11 @@ def run_batch(args, datasets_override=None):
                 cfg = _pl.get_cfg(args.fast, n_samples=len(y_tr))
                 cfg["is_timeseries"] = False
                 
+                # 分類引擎有 Router，可以直接傳字典
                 result = _pl.run(
                     X_dict_tr, y_tr, X_dict_te, n_classes, cfg, budget,
-                    skip_tabular=args.skip_tabular,
-                    skip_dl=args.skip_dl,
-                    no_nas=args.no_nas,
-                    is_ts=False,
-                    artifacts_dir=artifacts_dir,
-                    metric=args.metric,
+                    skip_tabular=args.skip_tabular, skip_dl=args.skip_dl,
+                    no_nas=args.no_nas, is_ts=False, artifacts_dir=artifacts_dir, metric=args.metric,
                 )
                 from src.metrics import calculate_score, get_metric_name
                 score_b = calculate_score(y_te, result.test_blend, metric=args.metric)
@@ -412,13 +448,13 @@ def run_batch(args, datasets_override=None):
                 print(f"  [耗時] {elapsed}s")
                 
                 if args.viz:
-                    _run_shap_visualization(artifacts_dir, X_dict_te["tree"], feature_names_dict["tree"], dataset_name)
+                    # SHAP 統一使用 tree 軌道畫圖
+                    _run_shap_visualization(artifacts_dir, X_dict_te.get("tree", X_dict_te), feature_names_dict.get("tree", []), dataset_name)
                     
                 results.append({
                     "dataset": dataset_name, "type": "Tab", "task": task,
                     "n_train": len(y_tr), "n_test": len(y_te),
-                    "accuracy": acc, "f1_macro": f1,
-                    "rmse": None, "r2": None,
+                    "accuracy": acc, "f1_macro": f1, "rmse": None, "r2": None,
                     "score": best_score, "elapsed_s": elapsed,
                 })
 
@@ -430,15 +466,21 @@ def run_batch(args, datasets_override=None):
                 budget = _pl.TimeBudget(limit_sec=args.time_limit, t_start=t_ds)
                 cfg = _pt.get_cfg_time(args.fast, n_samples=len(y_tr))
                 
+                # 🛡️ 迴歸引擎專用防呆：因為 pipeline_time 可能沒有 router，我們把 tree 拆出來傳
+                X_tr_pass = X_dict_tr["tree"] if isinstance(X_dict_tr, dict) else X_dict_tr
+                X_te_pass = X_dict_te["tree"] if isinstance(X_dict_te, dict) else X_dict_te
+                
+                # 將神經網路需要的資料藏在 cfg 裡面帶進去
+                if isinstance(X_dict_tr, dict):
+                    cfg["X_train_dl"] = X_dict_tr.get("dl", X_tr_pass)
+                    cfg["X_test_dl"]  = X_dict_te.get("dl", X_te_pass)
+                
                 result = _pt.run_regression(
-                    X_dict_tr, y_tr, X_dict_te, cfg, budget,
-                    skip_tabular=args.skip_tabular,
-                    skip_dl=args.skip_dl,
-                    artifacts_dir=artifacts_dir,
-                    metric=args.reg_metric,
+                    X_tr_pass, y_tr, X_te_pass, cfg, budget,
+                    skip_tabular=args.skip_tabular, skip_dl=args.skip_dl,
+                    artifacts_dir=artifacts_dir, metric=args.reg_metric,
                 )
-                rmse_b, rmse_s, r2_b, r2_s, best_rmse, best_r2, primary_score = \
-                    _eval_regression(y_te, result, args.reg_metric)
+                rmse_b, rmse_s, r2_b, r2_s, best_rmse, best_r2, primary_score = _eval_regression(y_te, result, args.reg_metric)
                 elapsed = round(time.time() - t_ds, 1)
                 
                 print(f"\n  [結果] Blend → RMSE={rmse_b:.4f}  R2={r2_b:.4f}")
@@ -460,8 +502,7 @@ def run_batch(args, datasets_override=None):
             results.append({
                 "dataset": dataset_name, "type": "Tab", "task": task,
                 "n_train": None, "n_test": None,
-                "accuracy": None, "f1_macro": None,
-                "rmse": None, "r2": None,
+                "accuracy": None, "f1_macro": None, "rmse": None, "r2": None,
                 "score": None, "elapsed_s": round(time.time() - t_ds, 1),
             })
             _flush()
@@ -491,79 +532,78 @@ def run_single(args):
         sys.exit(1)
 
     dataset_name = os.path.splitext(os.path.basename(csv_path))[0]
-    
-    # 🚀 將單一資料集包裝成 batch 引擎看得懂的格式 [(name, path, force_task)]
-    # force_task 設為 None，讓引擎自己去判斷
     single_dataset_list = [(dataset_name, csv_path, None)]
-    
-    # 🚀 直接轉接！
     run_batch(args, datasets_override=single_dataset_list)
 
-# ── 預切分模式 ────────────────────────────────────────────────────────────────
+# ── 預切分模式 (支援多檔列表 + 雙軌前處理) ────────────────────────────────────────────────
 
 def run_presplit(args):
-    """用戶手動提供 TRAIN / TEST 兩個 CSV，直接使用不再自行切分。"""
-    train_path = os.path.abspath(args.train)
-    test_path  = os.path.abspath(args.test)
-    for p, label in [(train_path, "TRAIN"), (test_path, "TEST")]:
-        if not os.path.isfile(p):
-            print(f"[錯誤] 找不到{label}檔案：{p}"); sys.exit(1)
+    """用戶手動提供 TRAIN / TEST 檔案 (支援清單)，直接進入雙軌前處理並訓練。"""
+    
+    # 1. 處理訓練集與測試集路徑 (支援 args.train 為列表)
+    train_paths = [os.path.abspath(p) for p in args.train] if isinstance(args.train, list) else [os.path.abspath(args.train)]
+    test_path = os.path.abspath(args.test) if args.test else None
+    
+    # 2. 檢查檔案是否存在
+    for p in train_paths + ([test_path] if test_path else []):
+        if not p or not os.path.isfile(p):
+            print(f"[錯誤] 找不到檔案：{p}"); sys.exit(1)
 
-    base = os.path.splitext(os.path.basename(train_path))[0]
+    base = os.path.splitext(os.path.basename(train_paths[0]))[0]
     dataset_name = base[:-6] if base.endswith("_TRAIN") else base
 
     print(f"\n{'='*65}")
     print(f"  Pipeline 預切分模式（非時序）  ─  {dataset_name}  |  device={DEVICE}")
     print(f"{'='*65}")
 
-    train_df = pd.read_csv(train_path)
-    test_df  = pd.read_csv(test_path)
-    if not args.target:
-        print(f"[錯誤] --train/--test 模式需以 --target 明確指定目標欄位名稱。可用欄位：{list(train_df.columns)}")
+    # 3. 使用 DataLoader 自動壓縮與合併
+    train_df = load_and_merge_data(train_paths)
+
+    if test_path:
+        # 將 test.csv 當主表，並把 train_paths 裡的 4 個副表接在後面一起送去合併
+        test_paths = [test_path] + train_paths[1:]
+        test_df = load_and_merge_data(test_paths)
+
+    if not getattr(args, "target", None) or args.target not in train_df.columns:
+        print(f"[錯誤] --train/--test 模式需明確指定 --target，可用欄位：{list(train_df.columns)}")
         sys.exit(1)
     target_col = args.target
-    if target_col not in train_df.columns:
-        print(f"[錯誤] 找不到目標欄位 '{target_col}'，可用欄位：{list(train_df.columns)}")
-        sys.exit(1)
 
     train_df = train_df.dropna(subset=[target_col]).reset_index(drop=True)
-    test_df  = test_df.dropna(subset=[target_col]).reset_index(drop=True)
-
+    if test_df is not None and target_col in test_df.columns:
+        test_df = test_df.dropna(subset=[target_col]).reset_index(drop=True)
+    
     y_tr_raw = train_df[target_col]
-    y_te_raw = test_df[target_col]
     task = _auto_detect_task(y_tr_raw)
-    feature_names = _get_feature_names(train_df, target_col)
 
-    X_tr = _prepare_X(train_df, target_col)
-    X_te = _prepare_X(test_df, target_col)
-    min_cols = min(X_tr.shape[1], X_te.shape[1])
-    X_tr = X_tr[:, :min_cols]
-    X_te = X_te[:, :min_cols]
+    # 🚀 4. 呼叫新版雙軌智慧前處理！(傳入 test_df 會自動啟動對抗驗證)
+    X_dict_tr, X_dict_te, y_tr_raw, y_te_raw, feature_names_dict, _ = _smart_prepare(
+        train_df, target_col, test_df=test_df
+    )
 
     t_ds = time.time()
+    artifacts_dir = os.path.join(ARTIFACTS_DIR, "single", dataset_name)
 
+    # 5. 分類或迴歸任務分流
     if task == "classification":
         le = LabelEncoder()
-        y_tr = le.fit_transform(y_tr_raw.astype(str).values)
+        le.fit(y_tr_raw.astype(str).values)
+        y_tr = le.transform(y_tr_raw.astype(str).values)
+        
+        # 安全轉換測試集標籤
         classes_set = set(le.classes_)
-        y_te = np.array(
-            [le.transform([str(v)])[0] if str(v) in classes_set else 0
-             for v in y_te_raw], dtype=np.int64)
+        y_te = np.array([le.transform([str(v)])[0] if str(v) in classes_set else 0 for v in y_te_raw], dtype=np.int64)
         n_classes = len(le.classes_)
         print(f"  n_train={len(y_tr)}  n_test={len(y_te)}  n_classes={n_classes}  task=classification")
 
-        _presplit_artifacts = os.path.join(ARTIFACTS_DIR, "single", dataset_name)
         budget = _pl.TimeBudget(limit_sec=args.time_limit, t_start=t_ds)
         cfg = _pl.get_cfg(args.fast, n_samples=len(y_tr))
         cfg["is_timeseries"] = False
+        
         result = _pl.run(
-            X_tr, y_tr, X_te, n_classes, cfg, budget,
-            skip_tabular=args.skip_tabular,
-            skip_dl=args.skip_dl,
-            no_nas=args.no_nas,
-            is_ts=False,
-            artifacts_dir=_presplit_artifacts,
-            metric=args.metric,
+            X_dict_tr, y_tr, X_dict_te, n_classes, cfg, budget,
+            skip_tabular=args.skip_tabular, skip_dl=args.skip_dl,
+            no_nas=args.no_nas, is_ts=False, artifacts_dir=artifacts_dir, metric=args.metric,
         )
         from src.metrics import calculate_score, get_metric_name
         score_b = calculate_score(y_te, result.test_blend, metric=args.metric)
@@ -573,7 +613,7 @@ def run_presplit(args):
         print(f"  [結果] Stack → {get_metric_name(args.metric)}={score_s:.4f}")
         print(f"  [耗時] {elapsed}s")
         if args.viz:
-            _run_shap_visualization(_presplit_artifacts, X_te, feature_names, dataset_name)
+            _run_shap_visualization(artifacts_dir, X_dict_te.get("tree", X_dict_te), feature_names_dict.get("tree", []), dataset_name)
 
     else:  # regression
         y_tr = np.asarray(y_tr_raw.values, dtype=np.float32).ravel()
@@ -582,12 +622,18 @@ def run_presplit(args):
 
         budget = _pl.TimeBudget(limit_sec=args.time_limit, t_start=t_ds)
         cfg = _pt.get_cfg_time(args.fast, n_samples=len(y_tr))
+        
+        # 🛡️ 迴歸防呆處理
+        X_tr_pass = X_dict_tr["tree"] if isinstance(X_dict_tr, dict) else X_dict_tr
+        X_te_pass = X_dict_te["tree"] if isinstance(X_dict_te, dict) else X_dict_te
+        if isinstance(X_dict_tr, dict):
+            cfg["X_train_dl"] = X_dict_tr.get("dl", X_tr_pass)
+            cfg["X_test_dl"]  = X_dict_te.get("dl", X_te_pass)
+
         result = _pt.run_regression(
-            X_tr, y_tr, X_te, cfg, budget,
-            skip_tabular=args.skip_tabular,
-            skip_dl=args.skip_dl,
-            artifacts_dir=os.path.join(ARTIFACTS_DIR, "single", dataset_name),
-            metric=args.reg_metric,
+            X_tr_pass, y_tr, X_te_pass, cfg, budget,
+            skip_tabular=args.skip_tabular, skip_dl=args.skip_dl,
+            artifacts_dir=artifacts_dir, metric=args.reg_metric,
         )
         rmse_b, rmse_s, r2_b, r2_s, _, _, _ = _eval_regression(y_te, result, args.reg_metric)
         elapsed = round(time.time() - t_ds, 1)
@@ -634,8 +680,11 @@ def main():
     # 單一 CSV / 預切分模式旗標
     parser.add_argument("--csv",          type=str, default=None,
                         help="單一 CSV 檔案路徑（80/20 random split）")
-    parser.add_argument("--train",        type=str, default=None,
-                        help="訓練集 CSV 路徑（搭配 --test 使用預切分模式）")
+    
+    # 🚀 這裡加上了 nargs='+'，讓 --train 可以接收多個檔案變成 List
+    parser.add_argument("--train",        nargs='+', default=None,
+                        help="訓練集 CSV 路徑清單（支援多檔，搭配 --test 使用預切分模式）")
+    
     parser.add_argument("--test",         type=str, default=None,
                         help="測試集 CSV 路徑（搭配 --train 使用預切分模式）")
     parser.add_argument("--target",       type=str, default=None,
@@ -657,7 +706,6 @@ def main():
         parser.print_help()
         print("\n[提示] 請指定 --csv <path>、--train/--test 或 --batch 來執行 Pipeline。")
         print("[提示] 時序資料（UCR）請改用 run_pipeline_time.py")
-
 
 if __name__ == "__main__":
     main()
