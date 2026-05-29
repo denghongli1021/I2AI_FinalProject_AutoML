@@ -176,8 +176,13 @@ class MLPNASSearcher:
         )
         criterion = nn.CrossEntropyLoss()
 
-        X_t = torch.tensor(X, dtype=torch.float32, device=self.device)
-        y_t = torch.tensor(y, dtype=torch.long, device=self.device)
+        # 🛡️ 安全轉換：如果是 Pandas DataFrame/Series，就取出底層的 Numpy Array
+        X_array = X.values if hasattr(X, "values") else X
+        y_array = y.values if hasattr(y, "values") else y
+        
+        X_t = torch.tensor(X_array, dtype=torch.float32, device=self.device)
+        y_t = torch.tensor(y_array, dtype=torch.long, device=self.device)
+
         ds = torch.utils.data.TensorDataset(X_t, y_t)
         loader = torch.utils.data.DataLoader(ds, batch_size=256, shuffle=True)
 
@@ -210,8 +215,10 @@ class MLPNASSearcher:
         supernet.eval()
         hidden_dim = max(self.hidden_dim_choices)
         # 若搜尋架構的 hidden_dim 比 supernet 小，截取前幾個神經元
-        # （簡化處理：直接用 supernet 的 hidden_dim，不做截取）
-        X_t = torch.tensor(X, dtype=torch.float32, device=self.device)
+        # （簡化處理：直接用 supernet 的 hidden_dim，不做截取)
+        # 🛡️ 安全轉換：如果是 Pandas DataFrame/Series，就取出底層的 Numpy Array
+        X_array = X.values if hasattr(X, "values") else X
+        X_t = torch.tensor(X_array, dtype=torch.float32, device=self.device)
         with torch.no_grad():
             logits = supernet(X_t, arch, dropout_rate=0.0)
         preds = logits.argmax(dim=1).cpu().numpy()
@@ -394,7 +401,8 @@ class TSNetSupernet(nn.Module):
 
         if isinstance(x, np.ndarray):
             device = next(self.parameters()).device
-            x = torch.tensor(x, dtype=torch.float32, device=device)
+            x_array = x.values if hasattr(x, "values") else x
+            x = torch.tensor(x_array, dtype=torch.float32, device=device)
 
         if x.ndim == 2:
             x = x.unsqueeze(1)
@@ -512,12 +520,18 @@ class TSNASSearcher:
         is_regression = (n_classes == 1)
         if is_regression:
             criterion = nn.MSELoss()
-            X_t = torch.tensor(X, dtype=torch.float32, device=self.device)
-            y_t = torch.tensor(y, dtype=torch.float32, device=self.device).view(-1, 1)
+            # 🛡️ 安全轉換：如果是 Pandas DataFrame/Series，就取出底層的 Numpy Array
+            X_array = X.values if hasattr(X, "values") else X
+            y_array = y.values if hasattr(y, "values") else y
+            X_t = torch.tensor(X_array, dtype=torch.float32, device=self.device)
+            y_t = torch.tensor(y_array, dtype=torch.float32, device=self.device).view(-1, 1)
         else:
             criterion = nn.CrossEntropyLoss()
-            X_t = torch.tensor(X, dtype=torch.float32, device=self.device)
-            y_t = torch.tensor(y, dtype=torch.long, device=self.device)
+            # 🛡️ 安全轉換：如果是 Pandas DataFrame/Series，就取出底層的 Numpy Array
+            X_array = X.values if hasattr(X, "values") else X
+            y_array = y.values if hasattr(y, "values") else y
+            X_t = torch.tensor(X_array, dtype=torch.float32, device=self.device)
+            y_t = torch.tensor(y_array, dtype=torch.long, device=self.device)
         ds = torch.utils.data.TensorDataset(X_t, y_t)
         loader = torch.utils.data.DataLoader(ds, batch_size=256, shuffle=True, drop_last=False)
 
@@ -584,12 +598,16 @@ class TSNASSearcher:
 
         # 進迴圈前一次性轉換 tensor，避免重複轉換拖慢速度
         is_regression = (self.n_classes == 1)
-        X_tensor = torch.tensor(X, dtype=torch.float32, device=self.device)
+        # 🛡️ 安全轉換：如果是 Pandas DataFrame/Series，就取出底層的 Numpy Array
+        X_array = X.values if hasattr(X, "values") else X
+        X_tensor = torch.tensor(X_array, dtype=torch.float32, device=self.device)
         if is_regression:
-            y_tensor = torch.tensor(y, dtype=torch.float32, device=self.device).view(-1, 1)
+            y_array = y.values if hasattr(y, "values") else y
+            y_tensor = torch.tensor(y_array, dtype=torch.float32, device=self.device).view(-1, 1)
             raw_y = None
         else:
-            y_tensor = torch.tensor(y, dtype=torch.long, device=self.device)
+            y_array = y.values if hasattr(y, "values") else y
+            y_tensor = torch.tensor(y_array, dtype=torch.long, device=self.device)
             raw_y = y
 
         try:
