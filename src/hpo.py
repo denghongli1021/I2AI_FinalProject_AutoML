@@ -359,7 +359,11 @@ class TabularHPO:
         for _fs in sorted(_all_fs):
             for _fi, (_tr, _vl) in enumerate(folds):
                 _fb = FeatureBuilder(feature_set=_fs, global_cfg=global_cfg)
-                _feat_cache[(_fs, _fi)] = (_fb.fit_transform(X[_tr]), _fb.transform(X[_vl]))
+                # 🛡️ 安全切片：如果是 DataFrame 就用 .iloc 抓取 Row，否則直接切片
+                X_tr_fold = X.iloc[_tr] if hasattr(X, "iloc") else X[_tr]
+                X_vl_fold = X.iloc[_vl] if hasattr(X, "iloc") else X[_vl]
+                
+                _feat_cache[(_fs, _fi)] = (_fb.fit_transform(X_tr_fold), _fb.transform(X_vl_fold))
 
         all_configs = []
 
