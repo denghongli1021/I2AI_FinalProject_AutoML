@@ -99,20 +99,32 @@ _SCOUT_DEFAULTS: dict = {
 
 # ── 各模型的超參數搜尋空間 ─────────────────────────────────────────────────────
 
+<<<<<<< HEAD
 def _tabular_space(name: str, trial: optuna.Trial, feat_sets: list,
                    global_cfg: dict = None) -> dict:
     """傳統 Tabular 模型搜尋空間（所有邊界不人為固定於 train.py）。"""
     global_cfg = global_cfg or {}
     is_fast = global_cfg.get("is_fast", False)
+=======
+def _tabular_space(name: str, trial: optuna.Trial, feat_sets: list) -> dict:
+    """傳統 Tabular 模型搜尋空間（所有邊界不人為固定於 train.py）。"""
+>>>>>>> 9007facba9f5bf1a65643f4f95b4d6d67742c91e
     feature_set = trial.suggest_categorical("feature_set", feat_sets)
     params = {"feature_set": feature_set}
 
     if name == "lgbm":
+<<<<<<< HEAD
         n_est_max = 500 if is_fast else 2000
         params.update({
             "num_leaves": trial.suggest_int("num_leaves", 16, 512, log=True),
             "learning_rate": trial.suggest_float("learning_rate", 1e-3, 0.3, log=True),
             "n_estimators": trial.suggest_int("n_estimators", 100, n_est_max),
+=======
+        params.update({
+            "num_leaves": trial.suggest_int("num_leaves", 16, 512, log=True),
+            "learning_rate": trial.suggest_float("learning_rate", 1e-3, 0.3, log=True),
+            "n_estimators": trial.suggest_int("n_estimators", 200, 2000),
+>>>>>>> 9007facba9f5bf1a65643f4f95b4d6d67742c91e
             "min_child_samples": trial.suggest_int("min_child_samples", 5, 100),
             "subsample": trial.suggest_float("subsample", 0.5, 1.0),
             "colsample_bytree": trial.suggest_float("colsample_bytree", 0.5, 1.0),
@@ -120,11 +132,18 @@ def _tabular_space(name: str, trial: optuna.Trial, feat_sets: list,
             "reg_lambda": trial.suggest_float("reg_lambda", 1e-8, 10.0, log=True),
         })
     elif name == "xgb":
+<<<<<<< HEAD
         n_est_max = 500 if is_fast else 2000
         params.update({
             "max_depth": trial.suggest_int("max_depth", 3, 10 if is_fast else 12),
             "learning_rate": trial.suggest_float("learning_rate", 1e-3, 0.3, log=True),
             "n_estimators": trial.suggest_int("n_estimators", 100, n_est_max),
+=======
+        params.update({
+            "max_depth": trial.suggest_int("max_depth", 3, 12),
+            "learning_rate": trial.suggest_float("learning_rate", 1e-3, 0.3, log=True),
+            "n_estimators": trial.suggest_int("n_estimators", 200, 2000),
+>>>>>>> 9007facba9f5bf1a65643f4f95b4d6d67742c91e
             "subsample": trial.suggest_float("subsample", 0.5, 1.0),
             "colsample_bytree": trial.suggest_float("colsample_bytree", 0.5, 1.0),
             "min_child_weight": trial.suggest_int("min_child_weight", 1, 30),
@@ -184,7 +203,11 @@ def _tabular_space(name: str, trial: optuna.Trial, feat_sets: list,
 
 
 def _dl_train_space(trial: optuna.Trial) -> dict:
+<<<<<<< HEAD
     """DL 訓練超參數搜尋空間（CNN / MLP 用）。"""
+=======
+    """DL 訓練超參數搜尋空間（所有值由 HPO 決定）。"""
+>>>>>>> 9007facba9f5bf1a65643f4f95b4d6d67742c91e
     return {
         "lr": trial.suggest_float("lr", 1e-5, 1e-2, log=True),
         "weight_decay": trial.suggest_float("weight_decay", 1e-6, 1e-2, log=True),
@@ -198,6 +221,7 @@ def _dl_train_space(trial: optuna.Trial) -> dict:
     }
 
 
+<<<<<<< HEAD
 def _transformer_train_space(trial: optuna.Trial) -> dict:
     """Transformer / PatchTST 專用訓練超參數（更多 epoch、更低 lr）。"""
     return {
@@ -213,6 +237,8 @@ def _transformer_train_space(trial: optuna.Trial) -> dict:
     }
 
 
+=======
+>>>>>>> 9007facba9f5bf1a65643f4f95b4d6d67742c91e
 def _cnn_arch_space(trial: optuna.Trial) -> dict:
     """CNN1D 架構搜尋空間。"""
     return {
@@ -225,20 +251,34 @@ def _cnn_arch_space(trial: optuna.Trial) -> dict:
 
 def _transformer_arch_space(trial: optuna.Trial, in_features: int) -> dict:
     """SignalTransformer 架構搜尋空間。"""
+<<<<<<< HEAD
     # d_model 從 128 起，確保對大特徵維度有足夠容量；n_heads 移除 2（太小）
     d_model    = trial.suggest_categorical("d_model", [128, 256, 512])
     n_heads    = trial.suggest_categorical("n_heads", [4, 8])
     patch_size = trial.suggest_categorical("patch_size", [8, 16, 32, 64])
     # norm_first: True=Pre-Norm（深層/大資料穩定），False=Post-Norm（淺層精度高），HPO 自動選擇
     norm_first = trial.suggest_categorical("norm_first", [True, False])
+=======
+    # 固定候選集：d_model∈{64,128,256} 永遠整除 [2,4,8]，無需動態過濾
+    # patch_size 固定候選集，事後 clamp 到 in_features，避免動態 value space 錯誤
+    d_model    = trial.suggest_categorical("d_model", [64, 128, 256])
+    n_heads    = trial.suggest_categorical("n_heads", [2, 4, 8])
+    patch_size = trial.suggest_categorical("patch_size", [8, 16, 32, 64])
+>>>>>>> 9007facba9f5bf1a65643f4f95b4d6d67742c91e
     return {
         "patch_size": min(patch_size, max(1, in_features)),
         "d_model": d_model,
         "n_heads": n_heads,
+<<<<<<< HEAD
         "depth": trial.suggest_int("depth", 2, 6),
         "ff_dim": trial.suggest_categorical("ff_dim", [256, 512, 1024, 2048]),
         "dropout": trial.suggest_float("dropout", 0.0, 0.3),
         "norm_first": norm_first,
+=======
+        "depth": trial.suggest_int("depth", 1, 8),
+        "ff_dim": trial.suggest_categorical("ff_dim", [64, 128, 256, 512]),
+        "dropout": trial.suggest_float("dropout", 0.0, 0.5),
+>>>>>>> 9007facba9f5bf1a65643f4f95b4d6d67742c91e
     }
 
 
@@ -367,6 +407,7 @@ class TabularHPO:
             _locked_fs = locked_feature_sets.get(name)
 
             _cw = "balanced" if self.metric != "accuracy" else None
+<<<<<<< HEAD
             _min_train = min(len(tr) for tr, _ in folds)
 
             def objective(trial, _name=name, _fs=fs_candidates, _device=self.device,
@@ -382,6 +423,18 @@ class TabularHPO:
                 # KNN 防呆：n_neighbors 不得超過最小 fold 訓練樣本數
                 if _name == "knn" and "n_neighbors" in model_params:
                     model_params["n_neighbors"] = max(1, min(model_params["n_neighbors"], _min_train - 1))
+=======
+
+            def objective(trial, _name=name, _fs=fs_candidates, _device=self.device,
+                          _locked=_locked_fs, _cw=_cw):
+                if _locked:
+                    # 固定 feature_set，讓 TPE 專注在超參數空間
+                    merged = _tabular_space(_name, trial, [_locked])
+                else:
+                    merged = _tabular_space(_name, trial, _fs)
+                fs = merged.pop("feature_set")
+                model_params = merged
+>>>>>>> 9007facba9f5bf1a65643f4f95b4d6d67742c91e
 
                 scores = []
                 for _fi, (tr_idx, val_idx) in enumerate(folds):
@@ -509,9 +562,14 @@ class TabularHPO:
 
             _scout_cw = "balanced" if self.metric != "accuracy" else None
 
+<<<<<<< HEAD
             def objective(trial, _name=name, _fs=fs_candidates, _scout_cw=_scout_cw,
                          _gcfg=global_cfg):
                 merged = _tabular_space(_name, trial, _fs, global_cfg=_gcfg)
+=======
+            def objective(trial, _name=name, _fs=fs_candidates, _scout_cw=_scout_cw):
+                merged = _tabular_space(_name, trial, _fs)
+>>>>>>> 9007facba9f5bf1a65643f4f95b4d6d67742c91e
                 fs = merged.pop("feature_set")
                 fold_scores = []
                 for _fi, (tr_idx, val_idx) in enumerate(scout_folds):
@@ -580,7 +638,11 @@ class TabularHPO:
 class DLHPO:
     """
     對 CNN1D 或 Transformer 同時搜尋架構參數 + 訓練參數 + feature_set。
+<<<<<<< HEAD
     使用前 n_hpo_folds 個 fold 平均評分，減少 selection bias（預設 2 fold）。
+=======
+    為加速評估，使用單一 fold（fold 0）做快速篩選。
+>>>>>>> 9007facba9f5bf1a65643f4f95b4d6d67742c91e
     """
 
     def __init__(
@@ -620,19 +682,28 @@ class DLHPO:
         else:
             fs_candidates = TRANSFORMER_FEATURE_SETS
 
+<<<<<<< HEAD
         # HPO 評估：使用前 n_hpo_folds 個 fold 平均分數，降低 selection bias
+=======
+        # 快速 HPO 評估：使用第一個 fold（時序模式則用時序切割）
+>>>>>>> 9007facba9f5bf1a65643f4f95b4d6d67742c91e
         if is_ts:
             fold_splits = get_ts_folds(len(X), n_splits=5)
         else:
             cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=SEED)
             fold_splits = list(cv.split(X, y))
+<<<<<<< HEAD
         n_hpo_folds = 2
         hpo_folds = fold_splits[:n_hpo_folds]
+=======
+        tr_idx, val_idx = fold_splits[0]
+>>>>>>> 9007facba9f5bf1a65643f4f95b4d6d67742c91e
 
         trial_records = []
 
         def objective(trial):
             fs = trial.suggest_categorical("feature_set", fs_candidates)
+<<<<<<< HEAD
             if self.model_name in ("transformer", "patchtst"):
                 train_p = _transformer_train_space(trial)
             else:
@@ -676,6 +747,40 @@ class DLHPO:
             trial.set_user_attr("arch_params", arch_p)
             trial.set_user_attr("train_params", train_p)
             return mean_score
+=======
+            fb = FeatureBuilder(feature_set=fs, global_cfg=global_cfg)
+            X_tr = fb.fit_transform(X[tr_idx])
+            X_val = fb.transform(X[val_idx])
+            cur_in = X_tr.shape[1]
+
+            train_p = _dl_train_space(trial)
+
+            if self.model_name in ("cnn1d", "resnet1d"):
+                arch_p = _cnn_arch_space(trial)
+            elif self.model_name == "tcn":
+                arch_p = _tcn_arch_space(trial)
+            elif self.model_name == "patchtst":
+                arch_p = _patchtst_arch_space(trial, cur_in)
+            else:
+                arch_p = _transformer_arch_space(trial, cur_in)
+
+            score = train_dl_single_fold(
+                model_name=self.model_name,
+                arch_params=arch_p,
+                train_params=train_p,
+                X_tr=X_tr,
+                y_tr=y[tr_idx],
+                X_val=X_val,
+                y_val=y[val_idx],
+                n_classes=n_classes,
+                device=device,
+                global_cfg=global_cfg,
+            )
+            trial.set_user_attr("feature_set", fs)
+            trial.set_user_attr("arch_params", arch_p)
+            trial.set_user_attr("train_params", train_p)
+            return score
+>>>>>>> 9007facba9f5bf1a65643f4f95b4d6d67742c91e
 
         sampler = optuna.samplers.TPESampler(seed=SEED)
         pruner = optuna.pruners.MedianPruner(n_warmup_steps=3)

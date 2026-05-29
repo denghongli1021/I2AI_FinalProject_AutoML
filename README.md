@@ -38,12 +38,18 @@ python run_pipeline.py --batch --skip-dl --top-n 3
 # 跳過 NAS（表格模式用預設 MLP）
 python run_pipeline.py --batch --no-nas
 
+<<<<<<< HEAD
 # 指定分類評估指標（預設 f1）
 python run_pipeline.py --batch --metric accuracy
 
 # 指定回歸評估指標（預設 rmse）
 python run_pipeline.py --batch --reg-metric r2
 
+=======
+# 指定評估指標（預設 f1）
+python run_pipeline.py --batch --metric accuracy
+
+>>>>>>> 9007facba9f5bf1a65643f4f95b4d6d67742c91e
 # 競賽模式（讀取 test/train.csv + test/test.csv，輸出提交 CSV）
 python test/run_submission.py
 
@@ -52,6 +58,7 @@ python run_pipeline.py --csv openml_cc18_data/37_diabetes.csv
 
 # 單一 CSV 評估（指定目標欄）
 python run_pipeline.py --csv data.csv --target label
+<<<<<<< HEAD
 
 # 預切分模式（手動提供 TRAIN / TEST）
 python run_pipeline.py --train train.csv --test test.csv
@@ -59,6 +66,8 @@ python run_pipeline.py --train train.csv --test test.csv
 # 訓練完成後自動產生 SHAP 視覺化（需要 shap + plotly + kaleido）
 python run_pipeline.py --csv data.csv --target label --viz
 python run_pipeline.py --batch --top-n 5 --viz
+=======
+>>>>>>> 9007facba9f5bf1a65643f4f95b4d6d67742c91e
 ```
 
 ### 時序專用 Pipeline（分類 + 回歸）
@@ -86,6 +95,7 @@ python run_pipeline_time.py --batch --cls-metric accuracy --reg-metric r2
 python run_pipeline_time.py --csv "ucr_ts_80_new(時序資料)/REG_VentilatorPressure_TRAIN.csv"
 ```
 
+<<<<<<< HEAD
 ### SHAP 視覺化（訓練後單獨執行）
 
 ```cmd
@@ -101,6 +111,8 @@ python generate_shap.py --dataset test/dataset.csv --target RiskPerformance --mo
 
 每個輸出目錄包含三張 PNG：`*_global.png`（全局特徵重要性）、`*_waterfall.png`（單筆解釋）、`*_dependence.png`（特徵交互分析）。
 
+=======
+>>>>>>> 9007facba9f5bf1a65643f4f95b4d6d67742c91e
 ### 合併批次結果
 
 ```cmd
@@ -134,6 +146,7 @@ python run_baseline.py --batch --top-n 5 --time-budget 120 --presets medium_qual
 
 ```cmd
 # 下載 OpenML-CC18 表格資料集 → openml_cc18_data/
+<<<<<<< HEAD
 python scripts/data_collect.py
 
 # 下載 OpenML 回歸資料集 → openml_regression_data/
@@ -141,6 +154,15 @@ python scripts/data_collect_reg.py
 
 # 下載 UCR 時序資料集 → ucr_ts_80_new(時序資料)/
 python scripts/data_collect_time.py
+=======
+python data_collect.py
+
+# 下載 OpenML 回歸資料集 → openml_regression_data/
+python data_collect_reg.py
+
+# 下載 UCR 時序資料集 → ucr_ts_80_new(時序資料)/
+python data_collect_time.py
+>>>>>>> 9007facba9f5bf1a65643f4f95b4d6d67742c91e
 ```
 
 ---
@@ -197,9 +219,14 @@ python scripts/data_collect_time.py
   │
   ▼
 [6] Transformer / PatchTST HPO（DLHPO）
+<<<<<<< HEAD
       表格模式：SignalTransformer（CLS token + 固定 Sinusoidal PE + norm_first HPO 搜尋）
       時序模式：PatchTST（Patch Embedding + Mean Pooling）
       獨立搜尋空間：大 n_epochs（80–200）、低 lr；HPO 評分 2-fold 平均；AMP 加速
+=======
+      表格模式：SignalTransformer（CLS token）
+      時序模式：PatchTST（patch 嵌入 + mean pooling）
+>>>>>>> 9007facba9f5bf1a65643f4f95b4d6d67742c91e
   │
   ▼
 [7] 5-Fold CV → OOF + Test 預測（run_cv）
@@ -222,6 +249,7 @@ python scripts/data_collect_time.py
 
 ```
 人工智慧project/
+<<<<<<< HEAD
 ├── run_pipeline.py         # 批次 + 單 CSV 執行入口（表格分類 + 表格回歸）
 ├── run_pipeline_time.py    # 時序專用執行入口（CLS + REG，支援 --new-ts-batch）
 ├── run_baseline.py         # AutoGluon 對照組（分類 + 回歸）
@@ -234,19 +262,38 @@ python scripts/data_collect_time.py
 ├── src/
 │   ├── pipeline.py         # 通用 Pipeline 引擎（分類；HPO/NAS/CV/Ensemble）
 │   ├── pipeline_time.py    # 時序專用 Pipeline 引擎（分類 + 回歸）
+=======
+├── pipeline.py             # 通用 Pipeline 引擎（分類；HPO/NAS/CV/Ensemble）
+├── pipeline_time.py        # 時序專用 Pipeline 引擎（分類 + 回歸）
+├── run_pipeline.py         # 批次 + 單 CSV 執行入口（表格分類 + 表格回歸）
+├── run_pipeline_time.py    # 時序專用執行入口（CLS + REG，支援 --new-ts-batch）
+├── run_baseline.py         # AutoGluon 對照組（分類 + 回歸）
+├── merge_final_results.py  # 合併三份批次結果 CSV → pipeline_batch_results.csv
+├── data_collect.py         # 下載 OpenML-CC18 資料集
+├── data_collect_reg.py     # 下載 OpenML 回歸資料集
+├── data_collect_time.py    # 下載 UCR 時序資料集
+├── src/
+>>>>>>> 9007facba9f5bf1a65643f4f95b4d6d67742c91e
 │   ├── config.py           # 全域設定（SEED=42, DEVICE, ARTIFACTS_DIR）
 │   ├── preprocess.py       # FeatureBuilder（10 種特徵集）+ TSFeatureBuilder + robust_clean_dataframe
 │   ├── data.py             # get_folds(), get_ts_folds(), TabularDataset
 │   ├── metrics.py          # calculate_score(), get_metric_name()
+<<<<<<< HEAD
 │   ├── hpo.py              # TabularHPO, DLHPO（2-fold）, _transformer_arch/train_space, MLPTrainHPO, TSNetTrainHPO
 │   ├── nas.py              # MLPNASSearcher, TSNASSearcher（TSNet + CausalConv1d）
 │   ├── train.py            # run_cv, run_tabular_cv, run_dl_cv（AMP Mixed Precision）
+=======
+│   ├── hpo.py              # TabularHPO, DLHPO, MLPTrainHPO, TSNetTrainHPO
+│   ├── nas.py              # MLPNASSearcher, TSNASSearcher（TSNet + CausalConv1d）
+│   ├── train.py            # run_cv, run_tabular_cv, run_dl_cv
+>>>>>>> 9007facba9f5bf1a65643f4f95b4d6d67742c91e
 │   ├── ensemble.py         # NelderMeadBlender, MetaLearnerStacker
 │   ├── make_submission.py  # generate_submission()
 │   ├── best_presets.json   # 黃金預設超參數（各模型最佳設定）
 │   └── models/
 │       ├── mlp.py          # 可配置 MLP（depth/hidden_dim/activations/skip）
 │       ├── cnn1d.py        # CNN1D, ResNet1D_18, TCN
+<<<<<<< HEAD
 │       ├── transformer.py  # SignalTransformer（Sinusoidal PE, norm_first HPO）, PatchTST
 │       └── tabular.py      # build_tabular_model() 工廠函式
 ├── preprocessing/          # 雙軌前處理模組（樹模型軌 + 深度學習軌）
@@ -268,12 +315,20 @@ python scripts/data_collect_time.py
 ├── logs/                   # 執行 log（pipeline_dataset_run.log、baseline_dataset_run.log）
 ├── pipeline_batch_results.csv    # 合併後的完整批次結果（pipeline + baseline + pipeline_time）
 ├── result.csv              # 時序批次結果（pipeline_time）
+=======
+│       ├── transformer.py  # SignalTransformer, PatchTST
+│       └── tabular.py      # build_tabular_model() 工廠函式
+├── result.csv    # 合併後的完整批次結果（pipeline + baseline + pipeline_time）
+>>>>>>> 9007facba9f5bf1a65643f4f95b4d6d67742c91e
 ├── openml_cc18_data/       # OpenML-CC18 表格分類資料集（CSV）
 ├── openml_regression_data/ # OpenML 表格回歸資料集（CSV）
 ├── ucr_ts_80_new(時序資料)/ # UCR 時序資料集（預切分格式：*_TRAIN.csv + *_TEST.csv）
 ├── artifacts/              # OOF/test 預測快取（.npy，run_cv 自動建立）
+<<<<<<< HEAD
 │   ├── single/{dataset}/   # 單一 CSV 執行的模型與 SHAP 輸出
 │   └── batch/{dataset}/    # 批次執行的模型與 SHAP 輸出
+=======
+>>>>>>> 9007facba9f5bf1a65643f4f95b4d6d67742c91e
 ├── submissions/            # 最終提交 CSV
 └── autogluon_models/       # AutoGluon 模型快取
 ```
@@ -327,10 +382,17 @@ python scripts/data_collect_time.py
 ### get_cfg() 模式（依資料量）
 | 資料量 | 模式 |
 |--------|------|
+<<<<<<< HEAD
 | `--fast` | tabular_trials=5, nas_epochs=5, dl_trials=3；**transformer_trials 維持 15**（Transformer 需要更多 trial） |
 | < 500 筆 | 小資料：n_repeats=2, n_seeds=3, kpca/kmeans 開啟；transformer_trials=12 |
 | < 50,000 筆 | 標準：tabular_trials=20, meta_trials=15；transformer_trials=15 |
 | ≥ 50,000 筆 | 大資料：縮減 trial 數，關閉 kpca/kmeans；transformer_trials=10 |
+=======
+| `--fast` | 所有階段最小化（tabular_trials=5, nas_epochs=5） |
+| < 500 筆 | 小資料：n_repeats=2, n_seeds=3, kpca/kmeans 開啟 |
+| < 50,000 筆 | 標準：tabular_trials=20, meta_trials=15 |
+| ≥ 50,000 筆 | 大資料：縮減 trial 數，關閉 kpca/kmeans |
+>>>>>>> 9007facba9f5bf1a65643f4f95b4d6d67742c91e
 
 ### 時序模式特殊行為
 

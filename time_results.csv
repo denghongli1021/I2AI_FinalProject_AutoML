@@ -1,0 +1,13 @@
+source,dataset,type,task,n_train,n_test,accuracy,f1_macro,rmse,r2,score,elapsed_s
+baseline,CLS_ACSF1,TS,classification,100,100,0.77,0.7667,,,0.7667,79.0
+baseline,CLS_Adiac,TS,classification,390,391,0.6061,0.5954,,,0.5954,301.0
+baseline,CLS_AllGestureWiimoteX,TS,classification,300,700,0.44,0.4439,,,0.4439,218.3
+baseline,REG_AcousticContaminationMadrid_nmv,TS,regression,166,72,,,5.329,0.3022,0.3022,25.6
+baseline,REG_AluminiumConcentration,TS,regression,440,189,,,300.1953,0.5971,0.5971,301.6
+baseline,REG_AppliancesEnergy,TS,regression,95,42,,,3.5158,-0.0455,-0.0455,56.7
+pipeline,CLS_ACSF1,TS,classification,100,100,0.79,0.786,,,0.786,2599.5
+pipeline,CLS_Adiac,TS,classification,390,391,0.7519,0.7271,,,0.7271,2038.2
+pipeline,CLS_AllGestureWiimoteX,TS,classification,300,700,0.5629,0.5662,,,0.5662,4119.0
+pipeline,REG_AcousticContaminationMadrid_nmv,TS,regression,166,72,,,3.668,0.6694,3.668,1501.0
+pipeline,REG_AluminiumConcentration,TS,regression,440,189,,,232.9117,0.7575,232.9117,7865.0
+pipeline,REG_AppliancesEnergy,TS,regression,95,42,,,3.5276,-0.0526,3.5276,1338.5

@@ -40,9 +40,15 @@ class SignalTransformer(nn.Module):
         ff_dim: int,
         dropout: float,
         n_classes: int,
+<<<<<<< HEAD
         norm_first: bool = True,
     ):
         super().__init__()
+=======
+    ):
+        super().__init__()
+        # 若不能整除則補零，確保切 patch 正確
+>>>>>>> 9007facba9f5bf1a65643f4f95b4d6d67742c91e
         self.patch_size = patch_size
         n_patches = math.ceil(in_features / patch_size)
         self.n_patches = n_patches
@@ -51,6 +57,7 @@ class SignalTransformer(nn.Module):
         # Patch Embedding
         self.patch_embed = nn.Linear(patch_size, d_model)
 
+<<<<<<< HEAD
         # CLS token
         self.cls_token = nn.Parameter(torch.zeros(1, 1, d_model))
         nn.init.trunc_normal_(self.cls_token, std=0.02)
@@ -64,6 +71,15 @@ class SignalTransformer(nn.Module):
         self.register_buffer("pos_embed", pe.unsqueeze(0))  # [1, n_patches+1, d_model]
 
         # norm_first 由 HPO 搜尋：Pre-Norm（True）適合深層/大資料，Post-Norm（False）適合淺層
+=======
+        # CLS token + 位置嵌入
+        self.cls_token = nn.Parameter(torch.zeros(1, 1, d_model))
+        self.pos_embed = nn.Parameter(torch.zeros(1, n_patches + 1, d_model))
+        nn.init.trunc_normal_(self.pos_embed, std=0.02)
+        nn.init.trunc_normal_(self.cls_token, std=0.02)
+
+        # Transformer Encoder
+>>>>>>> 9007facba9f5bf1a65643f4f95b4d6d67742c91e
         enc_layer = nn.TransformerEncoderLayer(
             d_model=d_model,
             nhead=n_heads,
@@ -71,6 +87,7 @@ class SignalTransformer(nn.Module):
             dropout=dropout,
             activation="gelu",
             batch_first=True,
+<<<<<<< HEAD
             norm_first=norm_first,
         )
         self.transformer = nn.TransformerEncoder(enc_layer, num_layers=depth)
@@ -78,12 +95,23 @@ class SignalTransformer(nn.Module):
         # 分類頭：LayerNorm → Linear（encoder dropout 已足夠，移除冗餘 head dropout）
         self.head = nn.Sequential(
             nn.LayerNorm(d_model),
+=======
+            norm_first=True,
+        )
+        self.transformer = nn.TransformerEncoder(enc_layer, num_layers=depth)
+
+        # 分類頭：取 CLS token
+        self.head = nn.Sequential(
+            nn.LayerNorm(d_model),
+            nn.Dropout(dropout),
+>>>>>>> 9007facba9f5bf1a65643f4f95b4d6d67742c91e
             nn.Linear(d_model, n_classes),
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         B = x.shape[0]
 
+<<<<<<< HEAD
         if self.pad_len > 0:
             x = torch.cat([x, torch.zeros(B, self.pad_len, device=x.device)], dim=1)
 
@@ -95,6 +123,25 @@ class SignalTransformer(nn.Module):
         x = x + self.pos_embed
 
         x = self.transformer(x)
+=======
+        # 補零（若 in_features 不整除 patch_size）
+        if self.pad_len > 0:
+            x = torch.cat([x, torch.zeros(B, self.pad_len, device=x.device)], dim=1)
+
+        # 切 patch：[B, n_patches, patch_size]
+        x = x.reshape(B, self.n_patches, self.patch_size)
+        x = self.patch_embed(x)  # [B, n_patches, d_model]
+
+        # 拼接 CLS token
+        cls = self.cls_token.expand(B, -1, -1)
+        x = torch.cat([cls, x], dim=1)          # [B, n_patches+1, d_model]
+        x = x + self.pos_embed
+
+        # Transformer 編碼
+        x = self.transformer(x)
+
+        # 以 CLS token 做分類
+>>>>>>> 9007facba9f5bf1a65643f4f95b4d6d67742c91e
         return self.head(x[:, 0])
 
 
