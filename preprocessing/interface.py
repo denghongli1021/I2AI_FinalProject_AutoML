@@ -422,6 +422,21 @@ def preprocess_for_training(
     # 5. 正式擬合 (Fit) 與轉換 (Transform) 訓練集
     # ── 1. 生產線啟動：先產生兩個大型陣列 (Numpy Array) ──
     print("[預處理模組] 正在處理 Tree 軌道資料 (Phase 0 -> Phase 2)...")
+    # =========================================================
+    # 🛡️ 終極防線：確保 Scikit-Learn 引擎絕對不會吃到 pd.NA 或 Int64
+    # =========================================================
+    if isinstance(X_train_raw, pd.DataFrame):
+        X_train_raw = X_train_raw.copy() # 避免 SettingWithCopyWarning
+        for col in X_train_raw.columns:
+            # 只要是 Pandas 的擴充型態 (Int64, Float32 等)
+            if pd.api.types.is_extension_array_dtype(X_train_raw[col]):
+                if pd.api.types.is_numeric_dtype(X_train_raw[col]):
+                    X_train_raw[col] = X_train_raw[col].astype(np.float64)
+                else:
+                    X_train_raw[col] = X_train_raw[col].astype(object)
+        # 把所有殘存的 pd.NA 徹底抹殺成 np.nan
+        X_train_raw = X_train_raw.replace({pd.NA: np.nan})
+    # =========================================================
     X_train_tree_array = tree_preprocessor.fit_transform(X_train_raw, y_train)
 
     print("[預處理模組] 正在處理 DL 軌道資料 (Phase 0 -> Phase 2)...")
@@ -524,6 +539,23 @@ def preprocess_for_inference(
     X_aligned = X_new.reindex(columns=training_features)
 
     print(">>> [推論 Phase 4] 執行純轉換 (Transform Only)")
+    # =========================================================
+    # 🛡️ 終極防線 (推論專用版)：確保 Scikit-Learn 引擎絕對不會吃到 pd.NA
+    # =========================================================
+    import pandas as pd
+    import numpy as np
+    if isinstance(X_aligned, pd.DataFrame):
+        X_aligned = X_aligned.copy() # 避免 SettingWithCopyWarning
+        for col in X_aligned.columns:
+            # 只要是 Pandas 的擴充型態 (Int64, Float32 等)
+            if pd.api.types.is_extension_array_dtype(X_aligned[col]):
+                if pd.api.types.is_numeric_dtype(X_aligned[col]):
+                    X_aligned[col] = X_aligned[col].astype(np.float64)
+                else:
+                    X_aligned[col] = X_aligned[col].astype(object)
+        # 把所有殘存的 pd.NA 徹底抹殺成 np.nan
+        X_aligned = X_aligned.replace({pd.NA: np.nan})
+    # =========================================================
     # 3. 絕對只能用 transform！
     X_clean_array = fitted_preprocessor.transform(X_aligned)
     
