@@ -27,6 +27,12 @@ from .preprocess import FeatureBuilder
 from .models.tabular import build_tabular_model
 from .metrics import calculate_score, get_metric_name
 
+def safe_iloc(data, indices):
+    """確保無論輸入是 DataFrame 還是 Numpy Array，都能正確取列"""
+    if hasattr(data, 'iloc'):  # 是 Pandas DataFrame 或 Series
+        return data.iloc[indices]
+    else:                      # 是 Numpy Array
+        return data[indices]
 
 # ── Mixup ────────────────────────────────────────────────────────────────────
 
@@ -348,10 +354,12 @@ def run_tabular_cv(
         )
         for fold_idx, (tr_idx, val_idx) in fold_pbar:
             fb = FeatureBuilder(feature_set=config["feature_set"], global_cfg=global_cfg)
-            # 🛡️ 加入安全索引防呆機制
-            # 如果 X 是 DataFrame，就用 .iloc 切「列」；如果是 Numpy Array，就維持原本的切法
-            X_tr_fold = X.iloc[tr_idx] if hasattr(X, 'iloc') else X[tr_idx]
-            X_val_fold = X.iloc[val_idx] if hasattr(X, 'iloc') else X[val_idx]
+            # 使用我們剛寫的安全函數，徹底解決 KeyError
+            # 使用我們剛寫的安全函數，徹底解決 KeyError
+            X_tr_fold = safe_iloc(X, tr_idx)
+            X_val_fold = safe_iloc(X, val_idx)
+            y_tr_fold = safe_iloc(y, tr_idx)
+            y_val_fold = safe_iloc(y, val_idx)
             
             X_tr = fb.fit_transform(X_tr_fold)
             X_val = fb.transform(X_val_fold)
@@ -359,14 +367,14 @@ def run_tabular_cv(
 
             _cw = "balanced" if metric != "accuracy" else None
             model = build_tabular_model(config["model_name"], config["params"], device=device, class_weight=_cw)
-            _fit_tabular_with_early_stop(model, config["model_name"], X_tr, y[tr_idx], X_val, y[val_idx])
+            _fit_tabular_with_early_stop(model, config["model_name"], X_tr, y_tr_fold, X_val, y_val_fold)
 
             oof[val_idx] += model.predict_proba(X_val)
             oof_counts[val_idx] += 1
             test_preds += model.predict_proba(X_te) / (len(folds) * n_seeds)
 
             val_score = calculate_score(
-                y[val_idx], model.predict_proba(X_val).argmax(axis=1), metric=metric
+                y_val_fold, model.predict_proba(X_val).argmax(axis=1), metric=metric
             )
             fold_pbar.set_postfix({f"fold_{metric}": f"{val_score:.4f}"})
 
@@ -455,10 +463,11 @@ def run_dl_cv(
             torch.manual_seed(cur_seed + fold_idx)
 
             fb = FeatureBuilder(feature_set=config["feature_set"], global_cfg=global_cfg)
-            # 🛡️ 加入安全索引防呆機制
-            # 如果 X 是 DataFrame，就用 .iloc 切「列」；如果是 Numpy Array，就維持原本的切法
-            X_tr_fold = X.iloc[tr_idx] if hasattr(X, 'iloc') else X[tr_idx]
-            X_val_fold = X.iloc[val_idx] if hasattr(X, 'iloc') else X[val_idx]
+            # 使用我們剛寫的安全函數，徹底解決 KeyError
+            X_tr_fold = safe_iloc(X, tr_idx)
+            X_val_fold = safe_iloc(X, val_idx)
+            y_tr_fold = safe_iloc(y, tr_idx)
+            y_val_fold = safe_iloc(y, val_idx)
             
             X_tr = fb.fit_transform(X_tr_fold)
             X_val = fb.transform(X_val_fold)
@@ -477,7 +486,7 @@ def run_dl_cv(
             scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=t_max)
             criterion = nn.CrossEntropyLoss(label_smoothing=ls)
 
-            train_loader = make_loader(X_tr, y[tr_idx], batch_size=bs, shuffle=True)
+            train_loader = make_loader(X_tr, y_tr_fold, batch_size=bs, shuffle=True)
             X_val_t = torch.tensor(X_val, dtype=torch.float32, device=device)
             X_te_t = torch.tensor(X_te, dtype=torch.float32, device=device)
 
@@ -516,7 +525,7 @@ def run_dl_cv(
 
                 with torch.no_grad():
                     preds = model(X_val_t).argmax(dim=1).cpu().numpy()
-                val_score = calculate_score(y[val_idx], preds, metric=metric)
+                val_score = calculate_score(y_val_fold, preds, metric=metric)
                 epoch_pbar.set_postfix({f"val_{metric}": f"{val_score:.4f}", "lr": f"{scheduler.get_last_lr()[0]:.2e}"})
 
                 if val_score > best_f1:
