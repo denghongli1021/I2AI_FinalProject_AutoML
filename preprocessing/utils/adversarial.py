@@ -328,17 +328,19 @@ def _encode_categoricals(
     X_test  = X_test.copy()
 
     for col in cat_cols:
+        # 🛡️ 安全解鎖：先轉成 object 脫離 Category 限制，再 fillna，最後統一轉 str
+        train_col_safe = X_train[col].astype(object).fillna("__NaN__").astype(str)
+        test_col_safe = X_test[col].astype(object).fillna("__NaN__").astype(str)
+
         # 合併 unique 值來 fit encoder
-        combined_vals = pd.concat([
-            X_train[col].fillna("__NaN__").astype(str),
-            X_test[col].fillna("__NaN__").astype(str),
-        ], ignore_index=True)
+        combined_vals = pd.concat([train_col_safe, test_col_safe], ignore_index=True)
 
         le = LabelEncoder()
         le.fit(combined_vals)
 
         def _safe_transform(series: pd.Series) -> np.ndarray:
-            filled = series.fillna("__NaN__").astype(str)
+            # 🛡️ 推論時也要使用相同的安全解鎖順序
+            filled = series.astype(object).fillna("__NaN__").astype(str)
             # 處理 unseen label（理論上不會發生，因為已合併 fit）
             known = set(le.classes_)
             filled = filled.apply(lambda x: x if x in known else "__NaN__")
