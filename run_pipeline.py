@@ -647,9 +647,6 @@ def run_presplit(args):
     # 🚀 在 run_presplit 的最後，加入 Kaggle 提交檔強制輸出模組
     # ==========================================
     print("\n🚀 正在生成 Kaggle 專用提交檔 (submission.csv)...")
-    import pandas as pd
-    import numpy as np
-    
     try:
         # 1. 讀取原始 test.csv 拿 ID
         test_raw = pd.read_csv(args.test) 
