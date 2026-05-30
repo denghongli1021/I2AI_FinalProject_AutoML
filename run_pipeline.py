@@ -648,21 +648,33 @@ def run_presplit(args):
     # ==========================================
     print("\n🚀 正在生成 Kaggle 專用提交檔 (submission.csv)...")
     import pandas as pd
+    import numpy as np
     
     try:
-        # 1. 讀取原始 test.csv 拿 ID (自動相容 .zip 檔)
+        # 1. 讀取原始 test.csv 拿 ID
         test_raw = pd.read_csv(args.test) 
         
-        # 2. 獲取機率預測結果
-        # 如果模型有提供 predict_proba 介面則直接調用，否則從 Blend 提取預測機率
+        # 2. 獲取預測結果
         if hasattr(_pl, "predict_proba"):
             test_proba = _pl.predict_proba(X_dict_te)
         elif hasattr(result, "predict_proba"):
             test_proba = result.predict_proba(X_dict_te)
         else:
-            test_proba = result.test_blend  # 備案：直接拿剛算出來的 Blend 結果 (通常為機率分布)
+            # 備案：如果沒有提供機率介面，直接拿 Blend 的預測結果
+            test_proba = getattr(result, "test_blend_proba", result.test_blend)
         
-        # 3. 如果是分類任務，將機率組裝成 Telstra 比賽格式
+        # 🛡️ 關鍵防呆裝甲：如果 test_proba 只有 1 維（代表拿到的是類別 0, 1, 2）
+        if len(test_proba.shape) == 1:
+            print("  ⚠️ 提示：捕捉到 1D 硬標籤，自動轉換為格式要求的 One-Hot 機率矩陣。")
+            n_samples = len(test_proba)
+            # 建立一個形狀為 (N, 3) 的全零矩陣
+            one_hot_proba = np.zeros((n_samples, 3))
+            # 將預測類別對應的位置設為 1.0
+            for i, p_class in enumerate(test_proba):
+                one_hot_proba[i, int(p_class)] = 1.0
+            test_proba = one_hot_proba  # 成功升級為 2D 機率矩陣！
+        
+        # 3. 如果是分類任務，組裝成 Telstra 比賽格式
         if task == "classification":
             sub = pd.DataFrame({
                 'id': test_raw['id'],
@@ -671,11 +683,7 @@ def run_presplit(args):
                 'predict_2': test_proba[:, 2]
             })
         else:
-            # 迴歸任務防呆處理 (如果之後拿來跑其他比賽)
-            sub = pd.DataFrame({
-                'id': test_raw['id'],
-                'predict': test_proba
-            })
+            sub = pd.DataFrame({'id': test_raw['id'], 'predict': test_proba.flatten()})
         
         # 4. 存檔到 Kaggle 的工作區
         out_csv_path = "submission.csv"
