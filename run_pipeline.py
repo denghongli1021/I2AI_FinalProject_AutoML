@@ -232,37 +232,18 @@ def _smart_prepare(
             enable_adv_val=enable_adv_val
         )
         
-        # ==========================================
-        # ✂️ 為下游 HPO (超參數優化) 準備 80/20 驗證集
-        # ==========================================
-        if test_df is not None:
-            # 情況 A：有給 test_df，interface 回傳的是 [100% Train] 與 [100% Test]
-            # 為了讓 HPO 能調參，我們要把 100% Train (X_out_1) 自己切成 80/20
-            print("[Pipeline] 正在為 HPO 訓練切分 80/20 驗證集...")
-            
-            X_dict_tr, X_dict_val = {}, {}
-            stratify = y_1 if (y_1.nunique() <= 20 and y_1.nunique() >= 2) else None
-            
-            # 使用索引切割，確保 tree 和 dl 兩個軌道的資料是對齊的
-            idx_tr, idx_val, y_tr_raw, y_val_raw = train_test_split(
-                X_out_1["tree"].index, y_1, test_size=0.2, random_state=42, stratify=stratify
-            )
-            
-            for track in ["tree", "dl"]:
-                X_dict_tr[track] = X_out_1[track].loc[idx_tr].reset_index(drop=True)
-                X_dict_val[track] = X_out_1[track].loc[idx_val].reset_index(drop=True)
-                
-            y_tr_raw = y_tr_raw.reset_index(drop=True)
-            y_val_raw = y_val_raw.reset_index(drop=True)
-            
-            # 💡 X_out_2 這裡就是已經處理好的 kaggle test_df (雙軌字典)，
-            # 如果你的 Pipeline 最後會直接預測，其實可以直接把它存起來備用！
 
-        else:
-            # 情況 B：沒有給 test_df，interface 已經幫我們切好 80/20 了
-            X_dict_tr, X_dict_val = X_out_1, X_out_2
-            y_tr_raw, y_val_raw = y_1, y_2
-
+        # ==========================================
+        # ✂️ HPO 與測試集分配
+        # ==========================================
+        # 不論是否有外部 test_df，interface 都已經將目標測試集處理並放在 X_out_2 了！
+        # 如果有 test_df，X_out_2 就是 11171 筆 Kaggle 測試集。
+        # 如果沒有 test_df，X_out_2 就是 interface 自動切出的 20% 驗證集。
+        # 所以我們直接「無腦直通」即可！
+        
+        X_dict_tr, X_dict_val = X_out_1, X_out_2
+        y_tr_raw, y_val_raw = y_1, y_2
+        
         # ==========================================
         # 📦 封裝與回傳
         # ==========================================
