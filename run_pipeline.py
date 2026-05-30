@@ -457,6 +457,7 @@ def run_batch(args, datasets_override=None):
                     "accuracy": acc, "f1_macro": f1, "rmse": None, "r2": None,
                     "score": best_score, "elapsed_s": elapsed,
                 })
+                
 
             else:  # regression
                 y_tr = np.asarray(y_tr_raw.values, dtype=np.float32).ravel()
@@ -640,6 +641,51 @@ def run_presplit(args):
         print(f"\n  [結果] Blend → RMSE={rmse_b:.4f}  R2={r2_b:.4f}")
         print(f"  [結果] Stack → RMSE={rmse_s:.4f}  R2={r2_s:.4f}")
         print(f"  [耗時] {elapsed}s")
+
+
+    # ==========================================
+    # 🚀 在 run_presplit 的最後，加入 Kaggle 提交檔強制輸出模組
+    # ==========================================
+    print("\n🚀 正在生成 Kaggle 專用提交檔 (submission.csv)...")
+    import pandas as pd
+    
+    try:
+        # 1. 讀取原始 test.csv 拿 ID (自動相容 .zip 檔)
+        test_raw = pd.read_csv(args.test) 
+        
+        # 2. 獲取機率預測結果
+        # 如果模型有提供 predict_proba 介面則直接調用，否則從 Blend 提取預測機率
+        if hasattr(_pl, "predict_proba"):
+            test_proba = _pl.predict_proba(X_dict_te)
+        elif hasattr(result, "predict_proba"):
+            test_proba = result.predict_proba(X_dict_te)
+        else:
+            test_proba = result.test_blend  # 備案：直接拿剛算出來的 Blend 結果 (通常為機率分布)
+        
+        # 3. 如果是分類任務，將機率組裝成 Telstra 比賽格式
+        if task == "classification":
+            sub = pd.DataFrame({
+                'id': test_raw['id'],
+                'predict_0': test_proba[:, 0],
+                'predict_1': test_proba[:, 1],
+                'predict_2': test_proba[:, 2]
+            })
+        else:
+            # 迴歸任務防呆處理 (如果之後拿來跑其他比賽)
+            sub = pd.DataFrame({
+                'id': test_raw['id'],
+                'predict': test_proba
+            })
+        
+        # 4. 存檔到 Kaggle 的工作區
+        out_csv_path = "submission.csv"
+        sub.to_csv(out_csv_path, index=False)
+        print(f"✅ 成功！已儲存至 /kaggle/working/I2AI_FinalProject_AutoML/{out_csv_path}")
+        
+    except Exception as e:
+        print(f"⚠️ 生成提交檔失敗，錯誤原因: {e}")
+        import traceback
+        traceback.print_exc()
 
     print(f"{'='*65}\n")
 
