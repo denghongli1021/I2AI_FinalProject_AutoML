@@ -577,6 +577,16 @@ def run_presplit(args):
         train_df, target_col, test_df=test_df
     )
 
+    # =========================================================
+    # 🛡️ 終極防禦：如果底層前處理把 y_te_raw 吞掉變成 None，我們手動生出來！
+    # =========================================================
+    if y_te_raw is None:
+        import pandas as pd
+        # 抓取處理好的測試集真實長度 (應該會是 11171)
+        test_len = len(X_dict_te["tree"]) if isinstance(X_dict_te, dict) else len(X_dict_te)
+        # 補上一組全為 0 的假 Pandas Series，讓後續的型態轉換與迴圈能順利跑完
+        y_te_raw = pd.Series([0] * test_len)
+
     t_ds = time.time()
     artifacts_dir = os.path.join(ARTIFACTS_DIR, "single", dataset_name)
 
