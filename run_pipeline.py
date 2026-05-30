@@ -540,7 +540,12 @@ def run_single(args):
 
 def run_presplit(args):
     """用戶手動提供 TRAIN / TEST 檔案 (支援清單)，直接進入雙軌前處理並訓練。"""
-    
+    import numpy as np
+    import pandas as pd
+    import os
+    import sys
+    import time
+
     # 1. 處理訓練集與測試集路徑 (支援 args.train 為列表)
     train_paths = [os.path.abspath(p) for p in args.train] if isinstance(args.train, list) else [os.path.abspath(args.train)]
     test_path = os.path.abspath(args.test) if args.test else None
@@ -559,9 +564,8 @@ def run_presplit(args):
 
     # 3. 使用 DataLoader 自動壓縮與合併
     train_df = load_and_merge_data(train_paths)
-
+    test_df = None
     if test_path:
-        # 將 test.csv 當主表，並把 train_paths 裡的 4 個副表接在後面一起送去合併
         test_paths = [test_path] + train_paths[1:]
         test_df = load_and_merge_data(test_paths)
 
@@ -571,13 +575,23 @@ def run_presplit(args):
     target_col = args.target
 
     train_df = train_df.dropna(subset=[target_col]).reset_index(drop=True)
+
+    # =========================================================
+    # 🌟 核心防護：Kaggle 盲測集「假標籤」注入魔法 🌟
+    # 欺騙前處理模組，讓它把 11171 筆盲測集當作正規驗證集處理
+    # =========================================================
+    is_blind_test = False
+    if test_df is not None and target_col not in test_df.columns:
+        test_df[target_col] = 0  # 塞入假標籤
+        is_blind_test = True
+
     if test_df is not None and target_col in test_df.columns:
         test_df = test_df.dropna(subset=[target_col]).reset_index(drop=True)
     
     y_tr_raw = train_df[target_col]
     task = _auto_detect_task(y_tr_raw)
 
-    # 🚀 4. 呼叫新版雙軌智慧前處理！(傳入 test_df 會自動啟動對抗驗證)
+    # 🚀 4. 呼叫新版雙軌智慧前處理
     X_dict_tr, X_dict_te, y_tr_raw, y_te_raw, feature_names_dict, _ = _smart_prepare(
         train_df, target_col, test_df=test_df
     )
@@ -591,7 +605,6 @@ def run_presplit(args):
         le.fit(y_tr_raw.astype(str).values)
         y_tr = le.transform(y_tr_raw.astype(str).values)
         
-        # 安全轉換測試集標籤
         classes_set = set(le.classes_)
         y_te = np.array([le.transform([str(v)])[0] if str(v) in classes_set else 0 for v in y_te_raw], dtype=np.int64)
         n_classes = len(le.classes_)
@@ -606,13 +619,21 @@ def run_presplit(args):
             skip_tabular=args.skip_tabular, skip_dl=args.skip_dl,
             no_nas=args.no_nas, is_ts=False, artifacts_dir=artifacts_dir, metric=args.metric,
         )
-        from src.metrics import calculate_score, get_metric_name
-        score_b = calculate_score(y_te, result.test_blend, metric=args.metric)
-        score_s = calculate_score(y_te, result.test_stack, metric=args.metric)
+        
         elapsed = round(time.time() - t_ds, 1)
-        print(f"\n  [結果] Blend → {get_metric_name(args.metric)}={score_b:.4f}")
-        print(f"  [結果] Stack → {get_metric_name(args.metric)}={score_s:.4f}")
-        print(f"  [耗時] {elapsed}s")
+        
+        # 如果是盲測集，不印出對抗假標籤計算的無意義分數
+        if is_blind_test:
+            print(f"\n  [提示] 偵測到 Kaggle 盲測集。已完成 {len(y_te)} 筆推論。")
+            print(f"  [耗時] {elapsed}s")
+        else:
+            from src.metrics import calculate_score, get_metric_name
+            score_b = calculate_score(y_te, result.test_blend, metric=args.metric)
+            score_s = calculate_score(y_te, result.test_stack, metric=args.metric)
+            print(f"\n  [結果] Blend → {get_metric_name(args.metric)}={score_b:.4f}")
+            print(f"  [結果] Stack → {get_metric_name(args.metric)}={score_s:.4f}")
+            print(f"  [耗時] {elapsed}s")
+
         if args.viz:
             _run_shap_visualization(artifacts_dir, X_dict_te.get("tree", X_dict_te), feature_names_dict.get("tree", []), dataset_name)
 
@@ -624,7 +645,6 @@ def run_presplit(args):
         budget = _pl.TimeBudget(limit_sec=args.time_limit, t_start=t_ds)
         cfg = _pt.get_cfg_time(args.fast, n_samples=len(y_tr))
         
-        # 🛡️ 迴歸防呆處理
         X_tr_pass = X_dict_tr["tree"] if isinstance(X_dict_tr, dict) else X_dict_tr
         X_te_pass = X_dict_te["tree"] if isinstance(X_dict_te, dict) else X_dict_te
         if isinstance(X_dict_tr, dict):
@@ -636,61 +656,59 @@ def run_presplit(args):
             skip_tabular=args.skip_tabular, skip_dl=args.skip_dl,
             artifacts_dir=artifacts_dir, metric=args.reg_metric,
         )
-        rmse_b, rmse_s, r2_b, r2_s, _, _, _ = _eval_regression(y_te, result, args.reg_metric)
         elapsed = round(time.time() - t_ds, 1)
-        print(f"\n  [結果] Blend → RMSE={rmse_b:.4f}  R2={r2_b:.4f}")
-        print(f"  [結果] Stack → RMSE={rmse_s:.4f}  R2={r2_s:.4f}")
-        print(f"  [耗時] {elapsed}s")
 
+        if is_blind_test:
+            print(f"\n  [提示] 偵測到 Kaggle 盲測集。已完成 {len(y_te)} 筆推論。")
+            print(f"  [耗時] {elapsed}s")
+        else:
+            rmse_b, rmse_s, r2_b, r2_s, _, _, _ = _eval_regression(y_te, result, args.reg_metric)
+            print(f"\n  [結果] Blend → RMSE={rmse_b:.4f}  R2={r2_b:.4f}")
+            print(f"  [結果] Stack → RMSE={rmse_s:.4f}  R2={r2_s:.4f}")
+            print(f"  [耗時] {elapsed}s")
 
     # ==========================================
-    # 🚀 在 run_presplit 的最後，加入 Kaggle 提交檔強制輸出模組
+    # 🚀 Kaggle 提交檔強制輸出模組
     # ==========================================
-    print("\n🚀 正在生成 Kaggle 專用提交檔 (submission.csv)...")
-    try:
-        # 1. 讀取原始 test.csv 拿 ID
-        test_raw = pd.read_csv(args.test) 
-        
-        # 2. 獲取預測結果
-        if hasattr(_pl, "predict_proba"):
-            test_proba = _pl.predict_proba(X_dict_te)
-        elif hasattr(result, "predict_proba"):
-            test_proba = result.predict_proba(X_dict_te)
-        else:
-            # 備案：如果沒有提供機率介面，直接拿 Blend 的預測結果
-            test_proba = getattr(result, "test_blend_proba", result.test_blend)
-        
-        # 🛡️ 關鍵防呆裝甲：如果 test_proba 只有 1 維（代表拿到的是類別 0, 1, 2）
-        if len(test_proba.shape) == 1:
-            print("  ⚠️ 提示：捕捉到 1D 硬標籤，自動轉換為格式要求的 One-Hot 機率矩陣。")
-            n_samples = len(test_proba)
-            # 建立一個形狀為 (N, 3) 的全零矩陣
-            one_hot_proba = np.zeros((n_samples, 3))
-            # 將預測類別對應的位置設為 1.0
-            for i, p_class in enumerate(test_proba):
-                one_hot_proba[i, int(p_class)] = 1.0
-            test_proba = one_hot_proba  # 成功升級為 2D 機率矩陣！
-        
-        # 3. 如果是分類任務，組裝成 Telstra 比賽格式
-        if task == "classification":
-            sub = pd.DataFrame({
-                'id': test_raw['id'],
-                'predict_0': test_proba[:, 0],
-                'predict_1': test_proba[:, 1],
-                'predict_2': test_proba[:, 2]
-            })
-        else:
-            sub = pd.DataFrame({'id': test_raw['id'], 'predict': test_proba.flatten()})
-        
-        # 4. 存檔到 Kaggle 的工作區
-        out_csv_path = "submission.csv"
-        sub.to_csv(out_csv_path, index=False)
-        print(f"✅ 成功！已儲存至 /kaggle/working/I2AI_FinalProject_AutoML/{out_csv_path}")
-        
-    except Exception as e:
-        print(f"⚠️ 生成提交檔失敗，錯誤原因: {e}")
-        import traceback
-        traceback.print_exc()
+    if is_blind_test:
+        print("\n🚀 正在生成 Kaggle 專用提交檔 (submission.csv)...")
+        try:
+            test_raw = pd.read_csv(args.test) 
+            
+            if hasattr(_pl, "predict_proba"):
+                test_proba = _pl.predict_proba(X_dict_te)
+            elif hasattr(result, "predict_proba"):
+                test_proba = result.predict_proba(X_dict_te)
+            else:
+                test_proba = getattr(result, "test_blend_proba", result.test_blend)
+            
+            # 防呆裝甲：1D 轉 One-Hot
+            if len(test_proba.shape) == 1:
+                print("  ⚠️ 提示：捕捉到 1D 硬標籤，自動轉換為格式要求的 One-Hot 機率矩陣。")
+                n_samples = len(test_proba)
+                one_hot_proba = np.zeros((n_samples, 3))
+                for i, p_class in enumerate(test_proba):
+                    one_hot_proba[i, int(p_class)] = 1.0
+                test_proba = one_hot_proba
+            
+            if task == "classification":
+                sub = pd.DataFrame({
+                    'id': test_raw['id'],
+                    'predict_0': test_proba[:, 0],
+                    'predict_1': test_proba[:, 1],
+                    'predict_2': test_proba[:, 2]
+                })
+            else:
+                sub = pd.DataFrame({'id': test_raw['id'], 'predict': test_proba.flatten()})
+            
+            out_csv_path = "submission.csv"
+            sub.to_csv(out_csv_path, index=False)
+            print(f"✅ 成功！已儲存至 /kaggle/working/I2AI_FinalProject_AutoML/{out_csv_path}")
+            
+        except Exception as e:
+            print(f"⚠️ 生成提交檔失敗，錯誤原因: {e}")
+            import traceback
+            traceback.print_exc()
 
     print(f"{'='*65}\n")
 
