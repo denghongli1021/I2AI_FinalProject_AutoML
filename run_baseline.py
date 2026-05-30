@@ -33,10 +33,7 @@ warnings.filterwarnings("ignore")
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
-<<<<<<< HEAD
 sys.path.insert(0, os.path.join(HERE, "visualization"))
-=======
->>>>>>> 9007facba9f5bf1a65643f4f95b4d6d67742c91e
 
 
 # ── 工具函式 ─────────────────────────────────────────────────────────────────
@@ -49,7 +46,6 @@ def auto_detect_task(y: pd.Series) -> str:
 
 
 def find_target_col(df: pd.DataFrame) -> str:
-<<<<<<< HEAD
     """批次模式專用：只做精確名稱比對，找不到則報錯。"""
     for cand in ("target", "label", "class", "y", "c"):
         if cand in df.columns:
@@ -59,12 +55,6 @@ def find_target_col(df: pd.DataFrame) -> str:
         f"可用欄位：{list(df.columns)}。"
         f"請以 --target 明確指定目標欄位名稱。"
     )
-=======
-    for cand in ("target", "label", "class", "y", "c"):
-        if cand in df.columns:
-            return cand
-    return df.columns[-1]
->>>>>>> 9007facba9f5bf1a65643f4f95b4d6d67742c91e
 
 
 def print_metrics(task: str, y_true, y_pred, label: str = ""):
@@ -121,7 +111,6 @@ def _append_time_result(out_path: str, row: dict):
     df.to_csv(out_path, mode="a", header=not os.path.exists(out_path), index=False)
 
 
-<<<<<<< HEAD
 class _AGWrapper:
     """Wrap AutoGluon predictor so predict() returns probabilities (classification) for SHAP."""
     def __init__(self, predictor, feature_names, task="classification"):
@@ -161,8 +150,6 @@ def _run_ag_shap(predictor, X_test_df: pd.DataFrame, task: str,
         print(f"\n[Viz] 視覺化跳過（{_e}）")
 
 
-=======
->>>>>>> 9007facba9f5bf1a65643f4f95b4d6d67742c91e
 def run_new_ts_batch(args):
     """AutoGluon baseline on 3 CLS + 3 REG datasets from ucr_ts_80_new(時序資料)."""
     new_ts_dir = os.path.join(HERE, "ucr_ts_80_new(時序資料)")
@@ -257,14 +244,11 @@ def run_new_ts_batch(args):
                 print(f"  RMSE={metrics['rmse']:.4f}  "
                       f"R2={metrics['r2']:.4f}  ({elapsed}s)")
 
-<<<<<<< HEAD
             if args.viz:
                 _run_ag_shap(predictor, test_X, task, base_name,
                              output_dir=os.path.join(ag_dir, "shap_plots"),
                              max_samples=args.viz_samples)
 
-=======
->>>>>>> 9007facba9f5bf1a65643f4f95b4d6d67742c91e
         except Exception as exc:
             elapsed = round(time.time() - t0, 1)
             print(f"  [ERROR] {exc}")
@@ -433,14 +417,11 @@ def run_batch(args):
                 print(f"  RMSE={metrics.get('rmse', '?'):.4f}  "
                       f"R2={metrics.get('r2', '?'):.4f}  ({elapsed}s)")
 
-<<<<<<< HEAD
             if args.viz:
                 _run_ag_shap(predictor, test_df, task, dataset_name,
                              output_dir=os.path.join(ag_dir, "shap_plots"),
                              max_samples=args.viz_samples)
 
-=======
->>>>>>> 9007facba9f5bf1a65643f4f95b4d6d67742c91e
         except Exception as exc:
             elapsed = round(time.time() - t0, 1)
             print(f"  [ERROR] {exc}")
@@ -483,14 +464,10 @@ def run_presplit(args):
 
     train_df = pd.read_csv(train_path)
     test_df  = pd.read_csv(test_path)
-<<<<<<< HEAD
     if not args.target:
         print(f"[錯誤] --train/--test 模式需以 --target 明確指定目標欄位名稱。可用欄位：{train_df.columns.tolist()}")
         sys.exit(1)
     target_col = args.target
-=======
-    target_col = args.target if args.target else find_target_col(train_df)
->>>>>>> 9007facba9f5bf1a65643f4f95b4d6d67742c91e
     if target_col not in train_df.columns:
         print(f"[錯誤] 找不到欄位 '{target_col}'，可用：{train_df.columns.tolist()}")
         sys.exit(1)
@@ -564,14 +541,11 @@ def run_presplit(args):
     print(leaderboard[["model", "score_test", "score_val", "fit_time"]].to_string(index=False))
     print(f"\n{'='*60}\n")
 
-<<<<<<< HEAD
     if args.viz:
         _run_ag_shap(predictor, test_X, task, dataset_name,
                      output_dir=os.path.join(ag_dir, "shap_plots"),
                      max_samples=args.viz_samples)
 
-=======
->>>>>>> 9007facba9f5bf1a65643f4f95b4d6d67742c91e
     if args.result_file:
         metrics = get_metrics(task, y_te.values, y_pred)
         is_ts = base.endswith("_TRAIN")
@@ -602,11 +576,7 @@ def main():
     parser.add_argument("--csv",         default=None,   help="CSV 檔案路徑（單一 CSV 模式）")
     parser.add_argument("--train",       default=None,   help="訓練集 CSV 路徑（搭配 --test 使用預切分模式）")
     parser.add_argument("--test",        default=None,   help="測試集 CSV 路徑（搭配 --train 使用預切分模式）")
-<<<<<<< HEAD
     parser.add_argument("--target",      default=None,   help="目標欄位名稱（--csv / --train/--test 模式必填）")
-=======
-    parser.add_argument("--target",      default=None,   help="目標欄位名稱（預設自動偵測）")
->>>>>>> 9007facba9f5bf1a65643f4f95b4d6d67742c91e
     parser.add_argument("--task",        default=None,   choices=["classification", "regression"])
     parser.add_argument("--ts",          action="store_true",
                         help="標記為時序資料（單一 CSV 模式下，回歸改用 chronological split）")
@@ -619,13 +589,10 @@ def main():
     parser.add_argument("--output-dir",  default="autogluon_models", help="AutoGluon 模型儲存目錄（單一模式）")
     parser.add_argument("--result-file", default=None,
                         help="結果輸出 CSV（附加模式；格式同 pipeline_batch_results.csv）")
-<<<<<<< HEAD
     parser.add_argument("--viz", action="store_true",
                         help="訓練完成後自動產生 SHAP 視覺化圖表（需要 shap + plotly + kaleido）")
     parser.add_argument("--viz-samples", type=int, default=200,
                         help="SHAP X_test 樣本數上限（預設 200，控制 PermutationExplainer 速度）")
-=======
->>>>>>> 9007facba9f5bf1a65643f4f95b4d6d67742c91e
 
     # ── 批次模式 ──────────────────────────────────────────────────────────────
     parser.add_argument("--batch",      action="store_true",
@@ -672,14 +639,10 @@ def main():
         sys.exit(1)
 
     df = pd.read_csv(csv_path)
-<<<<<<< HEAD
     if not args.target:
         print(f"[錯誤] --csv 模式需以 --target 明確指定目標欄位名稱。可用欄位：{df.columns.tolist()}")
         sys.exit(1)
     target_col = args.target
-=======
-    target_col = args.target if args.target else find_target_col(df)
->>>>>>> 9007facba9f5bf1a65643f4f95b4d6d67742c91e
     if target_col not in df.columns:
         print(f"[錯誤] 找不到欄位 '{target_col}'，可用：{df.columns.tolist()}")
         sys.exit(1)
@@ -757,15 +720,12 @@ def main():
 
     print(f"\n{'='*60}\n")
 
-<<<<<<< HEAD
     if args.viz:
         _run_ag_shap(predictor, test_df, task,
                      dataset_name=os.path.splitext(os.path.basename(csv_path))[0],
                      output_dir=os.path.join(args.output_dir, "shap_plots"),
                      max_samples=args.viz_samples)
 
-=======
->>>>>>> 9007facba9f5bf1a65643f4f95b4d6d67742c91e
     if args.result_file:
         metrics = get_metrics(task, y_test.values, y_pred_ag)
         ds_name = os.path.splitext(os.path.basename(csv_path))[0]
