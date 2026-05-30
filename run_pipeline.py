@@ -184,38 +184,48 @@ def _smart_prepare(
     sklearn.set_config(transform_output="default")
 
     # 🛡️ 防禦 2: 深度淨化資料型態 (Deep Sanitize)
-    # 剝除所有會讓 Cython 崩潰的 PyArrow 與 Pandas Extension Types (Int8, UInt8 等)
+    # 剝除所有會讓 Cython 崩潰的 PyArrow 與 Pandas Extension Types
     def _sanitize_df(df):
         if df is None: return None
         df = df.copy()
+        
         for col in df.columns:
             dtype_str = str(df[col].dtype).lower()
             
-            # 1. 處理字串與類別 (Category, string[pyarrow], string) -> 轉回標準 Python object
+            # 1. 處理字串與類別 -> 轉回標準 Python object
             if isinstance(df[col].dtype, pd.CategoricalDtype) or "string" in dtype_str:
                 df[col] = df[col].astype(object)
                 
-            # 2. 處理 Pandas Nullable 數值 (Int8, UInt8, Float32 等) -> 轉為 Float64
+            # 2. 處理 Pandas Nullable 數值 (Int8, Float32, boolean 等) -> 轉為 Float64
             elif pd.api.types.is_extension_array_dtype(df[col]):
-                # 再次確認它真的是數值，避免把奇怪的擴充型態誤轉
                 if pd.api.types.is_numeric_dtype(df[col]):
                     df[col] = df[col].astype(np.float64)
                 else:
                     df[col] = df[col].astype(object)
                     
+        # ⚠️ 關鍵修補：徹底將殘留在 object 欄位中的 pd.NA 替換為 Scikit-Learn 看得懂的 np.nan
+        # 使用 pd.NA 比較安全，避免遺漏
+        df = df.replace({pd.NA: np.nan})
+    
         return df
 
     print("[防爆裝甲] 正在淨化訓練集資料型態，保護 Scikit-Learn 底層引擎...")
     train_df = _sanitize_df(train_df)
     if test_df is not None:
         test_df = _sanitize_df(test_df)
-    
-    # 🛡️ 防禦 3: 確保 Target 是最乾淨的 Numpy 型態
+
+    # 🛡️ 防禦 3: 確保 Target 是最乾淨的 Numpy 型態 (修正分類器報錯問題)
     if pd.api.types.is_numeric_dtype(train_df[target_col]):
-        train_df[target_col] = train_df[target_col].astype(np.float64)
+        # 檢查是否為整數型態 (如 0, 1, 2 分類標籤)
+        if train_df[target_col].dropna().apply(lambda x: float(x).is_integer()).all():
+            # 如果都是整數，轉為 int64，避免 Sklearn 誤判為 continuous (回歸)
+            train_df[target_col] = train_df[target_col].astype(np.int64)
+        else:
+            # 如果真的有小數點，才是 float64
+            train_df[target_col] = train_df[target_col].astype(np.float64)
     else:
         train_df[target_col] = train_df[target_col].astype(str)
-    
+        
     try:
         from preprocessing.interface import preprocess_for_training
         from sklearn.model_selection import train_test_split
