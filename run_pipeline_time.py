@@ -35,6 +35,7 @@ sys.path.insert(0, os.path.join(HERE, "visualization"))
 from src.config import ARTIFACTS_DIR, DEVICE, SEED
 from src import pipeline_time as _pt
 
+from preprocessing.interface import preprocess_for_timeseries
 
 # ── 工具 ─────────────────────────────────────────────────────────────────────
 
@@ -320,10 +321,19 @@ def _process_new_ts_one(base_name: str, train_df: pd.DataFrame,
     train_df = train_df.dropna(subset=[target_col]).reset_index(drop=True)
     test_df  = test_df.dropna(subset=[target_col]).reset_index(drop=True)
 
-    # 🛡️ 呼叫時序前處理守門員 (排序 + ffill)
+    # 🌟 呼叫你的 preprocessing 模組 API (時序專用)
     time_col = getattr(args, 'time_col', None)
-    train_df = _ts_sanitize_df(train_df, time_col)
-    test_df = _ts_sanitize_df(test_df, time_col)
+    
+    # 【架構師神操作】先合併再處理，保證類別編碼 (Label Encoding) 絕對一致！
+    n_train = len(train_df)
+    combined_df = pd.concat([train_df, test_df], ignore_index=True)
+    
+    # 執行時間排序、ffill、週期特徵萃取、字串安全編碼
+    combined_df = preprocess_for_timeseries(combined_df, time_col=time_col, target_col=target_col)
+    
+    # 處理完畢，安全地切回 Train 與 Test
+    train_df = combined_df.iloc[:n_train].copy().reset_index(drop=True)
+    test_df  = combined_df.iloc[n_train:].copy().reset_index(drop=True)
 
     y_tr_raw = train_df[target_col]
     y_te_raw = test_df[target_col]
@@ -331,7 +341,7 @@ def _process_new_ts_one(base_name: str, train_df: pd.DataFrame,
     _feat_cols = list(train_df.drop(columns=[target_col])
                       .select_dtypes(include=[np.number]).columns)
                       
-    # 特徵擷取 (🚨已移除不安全的 fillna(0))
+    # 特徵擷取 (因為前面已經把字串日期和類別都轉成數值了，這裡可以直接全部吃進去！)
     X_tr = (train_df.drop(columns=[target_col])
               .select_dtypes(include=[np.number])
               .values.astype(np.float32))

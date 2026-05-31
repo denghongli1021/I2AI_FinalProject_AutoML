@@ -473,6 +473,47 @@ def preprocess_for_training(
     print("[預處理模組] 雙軌處理完成！")
     return X_train_dict, X_test_dict, y_train, y_test, preprocessors
 
+def preprocess_for_timeseries(
+    df: pd.DataFrame, 
+    time_col: str = None, 
+    target_col: str = None
+) -> pd.DataFrame:
+    """
+    [時序專用入口] 
+    提供給 run_pipeline_time.py 呼叫的安全時序前處理 API。
+    包含：強制時間排序、安全補值 (ffill)、萃取週期特徵、類別編碼。
+    嚴格禁止：全域平均補值、打亂順序 (防 Data Leakage)。
+    
+    Parameters
+    ----------
+    df : pd.DataFrame
+        準備進行時序預處理的資料表 (建議 Train 與 Test 垂直合併後一起傳入，確保編碼一致)。
+    time_col : str, optional
+        時間欄位的名稱 (例如 'date', 'timestamp')。
+    target_col : str, optional
+        預測目標欄位的名稱 (例如 'sales', 'pressure')。
+
+    Returns
+    -------
+    clean_df : pd.DataFrame
+        全部轉為純數值 (Float32)、無缺失值、按時間排序完畢的乾淨資料表。
+    """
+    print("\n>>> [Interface] 啟動時序專屬預處理管線...")
+    
+    # 【架構師技巧】延遲載入 (Lazy Import)：
+    # 把 import 寫在函數裡面，確保只有在跑時序任務時才會載入 TSDataProcessor，
+    # 這樣不會拖慢原本 Tabular 任務的啟動速度，也能避免模組間的循環引用 (Circular Import)。
+    from preprocessing.core.ts_preprocessor import TSDataProcessor
+    
+    # 1. 呼叫我們剛剛寫好的「時序戰術指揮官」
+    processor = TSDataProcessor(time_col=time_col, target_col=target_col)
+    
+    # 2. 執行端到端 (End-to-End) 的安全處理
+    clean_df = processor.process(df)
+    
+    print(">>> [Interface] 時序預處理完成！準備進入訓練管線。")
+    return clean_df
+
 def preprocess_for_inference(
     data_source: Union[pd.DataFrame, str, List[str]],
     fitted_preprocessor: Any,
