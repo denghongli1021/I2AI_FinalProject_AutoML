@@ -150,8 +150,15 @@ def reg_metric_direction(metric: str) -> str:
 
 class _RegDataset(torch.utils.data.Dataset):
     def __init__(self, X: np.ndarray, y: np.ndarray = None):
-        self.X = torch.tensor(X, dtype=torch.float32)
-        self.y = torch.tensor(y, dtype=torch.float32) if y is not None else None
+        # 🛡️ 終極安檢：確保進入 Dataset 的一定是純 Numpy 陣列
+        X_arr = X.to_numpy() if hasattr(X, "to_numpy") else np.array(X)
+        self.X = torch.tensor(X_arr, dtype=torch.float32)
+        
+        if y is not None:
+            y_arr = y.to_numpy() if hasattr(y, "to_numpy") else np.array(y)
+            self.y = torch.tensor(y_arr, dtype=torch.float32)
+        else:
+            self.y = None
 
     def __len__(self):
         return len(self.X)
@@ -369,7 +376,8 @@ def train_reg_dl_single_fold(
     criterion = nn.MSELoss()
 
     loader = _make_reg_loader(X_tr, y_tr, batch_size=bs, shuffle=True)
-    X_val_t = torch.tensor(X_val, dtype=torch.float32, device=device)
+    X_val_arr = X_val.to_numpy() if hasattr(X_val, "to_numpy") else np.array(X_val)
+    X_val_t = torch.tensor(X_val_arr, dtype=torch.float32, device=device)
 
     direction = reg_metric_direction(metric)
     best = -np.inf if direction == "maximize" else np.inf
@@ -777,8 +785,11 @@ def run_reg_dl_cv(config, X, y, X_test, device=None, tag=None, save_artifacts=Tr
         scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=t_max)
         criterion = nn.MSELoss()
         loader = _make_reg_loader(X_t, y[tr_idx], batch_size=bs, shuffle=True)
-        X_v_t = torch.tensor(X_v, dtype=torch.float32, device=device)
-        X_te_t = torch.tensor(X_te, dtype=torch.float32, device=device)
+        X_v_arr = X_v.to_numpy() if hasattr(X_v, "to_numpy") else np.array(X_v)
+        X_te_arr = X_te.to_numpy() if hasattr(X_te, "to_numpy") else np.array(X_te)
+        
+        X_v_t = torch.tensor(X_v_arr, dtype=torch.float32, device=device)
+        X_te_t = torch.tensor(X_te_arr, dtype=torch.float32, device=device)
 
         best = -np.inf if direction == "maximize" else np.inf
         cnt = 0
@@ -941,7 +952,10 @@ class MetaLearnerRegStacker:
         print(f"  [Stack] Meta-feature shape: {X_meta_eff.shape}  (effective)")
 
         direction = reg_metric_direction(self.metric)
-        cv = KFold(n_splits=min(self.n_folds, max(2, len(y_eff) // 20)), shuffle=False)
+        # ✅ 改為時序專用的滾動視窗 (Walk-Forward Validation)：
+        from sklearn.model_selection import TimeSeriesSplit
+        cv_splits = min(self.n_folds, max(2, len(y_eff) // 20))
+        cv = TimeSeriesSplit(n_splits=cv_splits)
         # 注意：時序資料原則不要 shuffle，但 meta features 來自 OOF（已折疊過時序資訊），這裡保守不 shuffle
 
         # 小樣本強制 Ridge
