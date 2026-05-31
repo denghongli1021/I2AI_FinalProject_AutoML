@@ -500,9 +500,6 @@ def preprocess_for_timeseries(
     """
     print("\n>>> [Interface] 啟動時序專屬預處理管線...")
     
-    # 【架構師技巧】延遲載入 (Lazy Import)：
-    # 把 import 寫在函數裡面，確保只有在跑時序任務時才會載入 TSDataProcessor，
-    # 這樣不會拖慢原本 Tabular 任務的啟動速度，也能避免模組間的循環引用 (Circular Import)。
     from preprocessing.core.ts_preprocessor import TSDataProcessor
     
     # 1. 呼叫我們剛剛寫好的「時序戰術指揮官」
