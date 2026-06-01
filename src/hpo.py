@@ -203,9 +203,9 @@ def _dl_train_space(trial: optuna.Trial) -> dict:
 
 def _transformer_train_space(trial: optuna.Trial) -> dict:
     """Transformer / PatchTST 專用訓練超參數（更多 epoch、更低 lr）。"""
-    n_epochs = trial.suggest_int("n_epochs", 80, 200)
+    n_epochs = trial.suggest_int("n_epochs", 40, 120)
     # t_max ∈ [n_epochs//2, n_epochs]，確保 CosineAnnealingLR 最多 2 個週期
-    t_max = trial.suggest_int("t_max", max(30, n_epochs // 2), n_epochs)
+    t_max = trial.suggest_int("t_max", max(15, n_epochs // 2), n_epochs)
     return {
         "lr": trial.suggest_float("lr", 1e-5, 3e-3, log=True),
         "weight_decay": trial.suggest_float("weight_decay", 1e-5, 1e-2, log=True),
@@ -215,7 +215,7 @@ def _transformer_train_space(trial: optuna.Trial) -> dict:
         "mixup_prob": trial.suggest_float("mixup_prob", 0.0, 0.8),
         "t_max": t_max,
         "n_epochs": n_epochs,
-        "patience": trial.suggest_int("patience", 10, 20),
+        "patience": trial.suggest_int("patience", 8, 15),
     }
 
 
@@ -337,6 +337,11 @@ class TabularHPO:
             cv = StratifiedKFold(n_splits=self.n_folds, shuffle=True, random_state=SEED)
             folds = list(cv.split(X, y))
 
+        # HPO 評估折數：預設與 n_folds 相同，可由 global_cfg["hpo_n_folds"] 縮短
+        # （Final CV 仍使用完整 n_folds，此設定只影響 HPO objective 的評估速度）
+        hpo_n_folds = min(len(folds), global_cfg.get("hpo_n_folds", len(folds)))
+        hpo_folds = folds[:hpo_n_folds]
+
         # === 預先計算所有 feature_set × fold 組合，消除 objective 內的重複 FeatureBuilder ===
         _all_fs: set = set()
         for _n in self.model_names:
@@ -354,10 +359,10 @@ class TabularHPO:
                 _all_fs.update(CATBOOST_FEATURE_SETS)
             else:
                 _all_fs.update(TABULAR_FEATURE_SETS)
-        print(f"  [HPO] Pre-computing {len(_all_fs)} feature set(s) × {len(folds)} folds ...")
+        print(f"  [HPO] Pre-computing {len(_all_fs)} feature set(s) × {hpo_n_folds} folds ...")
         _feat_cache: dict = {}
         for _fs in sorted(_all_fs):
-            for _fi, (_tr, _vl) in enumerate(folds):
+            for _fi, (_tr, _vl) in enumerate(hpo_folds):
                 _fb = FeatureBuilder(feature_set=_fs, global_cfg=global_cfg)
                 _feat_cache[(_fs, _fi)] = (_fb.fit_transform(X[_tr]), _fb.transform(X[_vl]))
 
@@ -398,7 +403,7 @@ class TabularHPO:
                     model_params["n_neighbors"] = max(1, min(model_params["n_neighbors"], _min_train - 1))
 
                 scores = []
-                for _fi, (tr_idx, val_idx) in enumerate(folds):
+                for _fi, (tr_idx, val_idx) in enumerate(hpo_folds):
                     X_tr, X_val = _feat_cache[(fs, _fi)]
                     m = build_tabular_model(_name, model_params, device=_device, class_weight=_cw)
                     if _name == "lgbm":

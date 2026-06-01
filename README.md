@@ -211,7 +211,7 @@ python scripts/data_collect_time.py
 [6] Transformer / PatchTST HPO（DLHPO）
       表格模式：SignalTransformer（CLS token + 固定 Sinusoidal PE + norm_first HPO 搜尋）
       時序模式：PatchTST（Patch Embedding + Mean Pooling）
-      獨立搜尋空間：大 n_epochs（80–200）、低 lr；HPO 評分 2-fold 平均；AMP 加速
+      獨立搜尋空間：n_epochs（40–120）、patience（8–15）、低 lr；HPO 評分 2-fold 平均；AMP 加速
   │
   ▼
 [7] 5-Fold CV → OOF + Test 預測（run_cv）
@@ -337,11 +337,14 @@ python scripts/data_collect_time.py
 - `budget.should_skip(0.20)` 當剩餘時間 < 20% 時跳過該階段
 
 ### get_cfg() 模式（依資料量）
+
+`hpo_n_folds`：HPO 評估用的折數（與最終 5-Fold CV 獨立），縮短 HPO 搜尋時間。
+
 | 資料量 | 模式 |
 |--------|------|
-| `--fast` | tabular_trials=5, nas_epochs=5, dl_trials=3；**transformer_trials 維持 15**（Transformer 需要更多 trial） |
+| `--fast` | tabular_trials=5, nas_epochs=5, dl_trials=3, **transformer_trials=5**, hpo_n_folds=3 |
 | < 500 筆 | 小資料：n_repeats=2, n_seeds=3, kpca/kmeans 開啟；transformer_trials=12 |
-| < 50,000 筆 | 標準：tabular_trials=20, meta_trials=15；transformer_trials=15 |
+| < 50,000 筆 | 標準：tabular_trials=12, meta_trials=8, **transformer_trials=8**, **hpo_n_folds=3** |
 | ≥ 50,000 筆 | 大資料：縮減 trial 數，關閉 kpca/kmeans；transformer_trials=10 |
 
 ### 時序模式特殊行為
@@ -373,7 +376,32 @@ python scripts/data_collect_time.py
 
 ## 已知問題 / 改善備忘
 
+完整的「改進建議路線圖」請見 [`架構設計.md`](架構設計.md) §12（準確率提升、執行時間優化、健壯性改進、微服務拆分）。
+
+現有的自動保護機制：
 - **大數據 poly2 OOM**：> 100k 筆時 poly 交互項 tensor 可能 GPU OOM → 已加自適應 n_top 上限（50M 元素預算）
 - **小數據過擬合**：< 500 筆時 poly2 + NAS + Stacking 三重風險 → n_repeats/n_seeds 已加大
 - **CatBoost 高維 timeout**：n_features > 300 時自動設 per-model timeout 防卡住
 - **NAS 在小表格資料跳過**：< 2000 筆自動略過 NAS 與 CNN/Transformer HPO
+- **Stacking NaN 防護**：`MetaLearnerStacker` 在 `StandardScaler` 前插入 `SimpleImputer(strategy='median')`，防止原始特徵含 NaN 時 `SelectKBest` 拋出 `ValueError`（`ensemble.py`）
+
+優先實作的快速勝利（Quick Wins）：
+| 編號 | 主題 | 預期收益 |
+| :---: | :--- | :--- |
+| **T1** | Tabular HPO 前用 MI 對 5 個 feature_set 預過濾，僅保留 Top-2 | 省 50% HPO 時間 |
+| **T3** | NAS Supernet 改全資料訓 1 次後 5-fold 共用 | 省 75% NAS 時間 |
+| **T4** | DL HPO 改 ASHA / HyperBand 早期淘汰 | 同預算下跑 3× trials |
+| **A1** | Optuna 由 TPE 改 CMA-ES（連續超參數） | +5~15% Macro F1 |
+| **A6** | Stacker 前對樹模型機率套 Isotonic / Platt scaling | Stacking 穩定性提升 |
+
+已知正確性風險：時序切分不一致（`run_pipeline_time.py:210` vs `pipeline_time.py:621`）、`signal` 特徵 L2 範數無零除保護（`preprocess.py:209`）、`_smart_prepare()` 異常捕捉過寬（`run_pipeline.py:140`）。詳見 架構設計.md §12.3。
+
+---
+
+## 實測結果（部分資料集）
+
+| 資料集 | 類型 | 樣本數 | 最終 Test 分數 | 模式 |
+|--------|------|-------|--------------|------|
+| `6_letter` | 表格分類 26 類 | 18,668 | **Macro F1 = 0.983**（Stack） | `--fast` |
+| `CLS_GunPointMaleVersusFemale` | TS 分類 | 451 | **Macro F1 = 0.994**（Stack） | `--fast` |
+| `6332_cylinder-bands` | 表格分類 2 類 | 540 | **Macro F1 = 0.813**（Blend） | 標準 |

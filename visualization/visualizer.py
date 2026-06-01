@@ -11,8 +11,19 @@ warnings.filterwarnings('ignore')
 class AutoMLVisualizer:
     def __init__(self, model, X_test, output_dir="plots"):
         self.model = model
-        self.X_test = X_test
         self.output_dir = output_dir
+
+        # ─── 特徵欄位防禦裝甲 ───────────────────────────────────────────────
+        # 確保 X_test 必定為含有正確欄位名稱的 DataFrame，防止 NumPy Array 或流水號干擾
+        if isinstance(X_test, np.ndarray):
+            if hasattr(model, "feature_names") and model.feature_names is not None:
+                cols = model.feature_names
+            else:
+                cols = [f"Feature {i}" for i in range(X_test.shape[1])]
+            self.X_test = pd.DataFrame(X_test, columns=cols)
+        else:
+            self.X_test = X_test.copy()
+        # ───────────────────────────────────────────────────────────────────
         
         if not os.path.exists(self.output_dir):
             os.makedirs(self.output_dir)
@@ -62,7 +73,18 @@ class AutoMLVisualizer:
             mins, secs = divmod(int(_elapsed), 60)
             time_str = f"{mins}m {secs}s" if mins > 0 else f"{secs}s"
             print(f"  SHAP computation complete: {len(self.X_test)} samples in {time_str}")
-
+            
+        # ─── SHAP 物件名稱強制覆蓋 ──────────────────────────────────────────
+        # 雙重保險：確保 shap_values 內部的 feature_names 屬性必定與 X_test 的真名欄位對齊
+        if hasattr(self.shap_values, "feature_names") and self.shap_values.feature_names is not None:
+            if len(self.shap_values.feature_names) == len(self.X_test.columns):
+                self.shap_values.feature_names = list(self.X_test.columns)
+        else:
+            try:
+                self.shap_values.feature_names = list(self.X_test.columns)
+            except Exception:
+                pass
+            
     def _get_shap_matrix(self):
         """
         統一處理不同 Explainer 的 shap_values 輸出格式：

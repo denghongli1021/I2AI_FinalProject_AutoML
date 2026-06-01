@@ -95,11 +95,12 @@ def get_cfg(fast: bool, n_samples: int = 10_000) -> dict:
         return {
             "tabular_trials": 5,  "tabular_top_k": 1,
             "scout_trials": 3,    "scout_val_size": 0.2, "scout_ratio": 2 / 3,
-            "nas_epochs": 5,      "nas_candidates": 5,   "nas_rounds": 2,
+            "nas_epochs": 5,      "nas_candidates": 5,   "nas_rounds": 1,
             "mlp_train_trials": 3,"mlp_top_k": 1,
-            "dl_trials": 3,       "transformer_trials": 10, "dl_top_k": 1,
+            "dl_trials": 3,       "transformer_trials": 5, "dl_top_k": 1,
             "meta_trials": 3,     "blend_restarts": 1,
             "n_repeats": 1,       "n_seeds": 1,
+            "hpo_n_folds": 3,     # HPO 評估用 3-fold 兼顧速度與穩定性；Final CV 仍 5-fold
             "use_kpca": False,    "use_kmeans": False,
             "use_resnet18": False,"use_1d_aug": False,
             "is_fast": True,      "tabular_model_timeout": 1000,  # 每模型最多 ~17 分鐘
@@ -118,13 +119,14 @@ def get_cfg(fast: bool, n_samples: int = 10_000) -> dict:
         }
     if n_samples < 50_000:
         return {
-            "tabular_trials": 20, "tabular_top_k": 2,   # top_k=2 → 每模型保留兩組超參，增加 ensemble 多樣性
-            "scout_trials": 7,    "scout_val_size": 0.2, "scout_ratio": 2 / 3,
-            "nas_epochs": 10,     "nas_candidates": 8,   "nas_rounds": 2,
-            "mlp_train_trials": 8,"mlp_top_k": 1,
-            "dl_trials": 8,       "transformer_trials": 15, "dl_top_k": 1,
-            "meta_trials": 15,    "blend_restarts": 3,   # 更多 meta-learner 試次 + blend 重啟
+            "tabular_trials": 12, "tabular_top_k": 2,   # top_k=2 → 每模型保留兩組超參，增加 ensemble 多樣性
+            "scout_trials": 5,    "scout_val_size": 0.2, "scout_ratio": 2 / 3,
+            "nas_epochs": 10,     "nas_candidates": 8,   "nas_rounds": 1,
+            "mlp_train_trials": 5,"mlp_top_k": 1,
+            "dl_trials": 5,       "transformer_trials": 8, "dl_top_k": 1,
+            "meta_trials": 8,     "blend_restarts": 3,
             "n_repeats": 1,       "n_seeds": 1,
+            "hpo_n_folds": 3,     # HPO 評估用 3-fold（與 Scout 一致）；Final CV 仍用 5-fold
             "use_kpca": True,     "use_kmeans": True,
             "use_resnet18": True, "use_1d_aug": False,
         }
@@ -260,7 +262,8 @@ def run(
                 for name in selected
             }
             actual_total = sum(per_model_trials.values())
-            print(f"\n[2b] Tabular Full HPO ({actual_total} trials ÷ {n_keep} models, 5-Fold CV) ...")
+            _hpo_nf = cfg.get("hpo_n_folds", 5)
+            print(f"\n[2b] Tabular Full HPO ({actual_total} trials ÷ {n_keep} models, {_hpo_nf}-Fold CV) ...")
             print("  [Alloc] " + "  ".join(f"{n}={t}" for n, t in per_model_trials.items()))
 
             # 從 Scout 結果鎖定每個模型的最佳 feature_set，讓 HPO 專注在超參數空間

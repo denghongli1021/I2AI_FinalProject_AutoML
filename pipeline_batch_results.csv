@@ -1,3 +1,2 @@
 dataset,type,task,n_train,n_test,accuracy,f1_macro,rmse,r2,score,elapsed_s
-1049_pc4,Tab,classification,1166,292,0.9041,0.7928,,,0.7928,254.1
-1067_kc1,Tab,regression,1687,422,,,0.3366,0.1411,0.3366,409.3
+6332_cylinder-bands,Tab,?,,,,,,,,0.0

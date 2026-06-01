@@ -116,17 +116,31 @@ def _get_feature_names(df: pd.DataFrame, target_col: str) -> list:
 def _build_shap_col_names(feature_set: str, orig_names: list, n_transformed: int) -> list:
     """Map transformed feature dimensions to human-readable names."""
     n = len(orig_names)
-    if feature_set == "raw":
-        return orig_names[:n_transformed]
-    if feature_set == "signal":
-        base = orig_names[:n]
-        return (base + [f"{nm}_l2" for nm in base])[:n_transformed]
-    if feature_set in ("pca64", "svd64", "kpca32"):
-        return [f"PC{i}" for i in range(n_transformed)]
-    # raw_stat / raw_stat_fft / poly2 / ts_tabular — prefix with original names then numbered
-    if n_transformed >= n:
-        return orig_names + [f"feat_{i}" for i in range(n_transformed - n)]
-    return [f"feat_{i}" for i in range(n_transformed)]
+    # 1. 降維特徵：因為特徵已混淆，直接用 PC/SVD 命名
+    if any(k in feature_set for k in ("pca", "svd", "kpca")):
+        return [f"{feature_set}_{i}" for i in range(n_transformed)]
+    # 2. 完美對齊：如果轉換後的維度與原始特徵數一致，直接還原！
+    if n_transformed == n:
+        return orig_names.copy()
+        
+    # 3. Signal 相關特徵 (支援模糊匹配如 "ts_signal")
+    if "signal" in feature_set:
+        base = orig_names.copy()
+        extended = base + [f"{nm}_l2" for nm in base]
+        
+        if n_transformed <= len(extended):
+            return extended[:n_transformed]
+        else:
+            # 萬一維度比預期還大，後面再用 feature_set 名稱補齊
+            return extended + [f"{feature_set}_{i}" for i in range(n_transformed - len(extended))]
+            
+    # 4. 擴增特徵 (如 raw_stat 增加了統計量)
+    if n_transformed > n:
+        return orig_names + [f"{feature_set}_{i}" for i in range(n_transformed - n)]
+        
+    # 5. 【關鍵修復 Fallback】：如果維度變小 (例如前處理自動剔除了無效/常數欄位)
+    # 絕對不能變成 feat_N！至少保留對應數量的真實名稱。
+    return orig_names[:n_transformed]
 
 
 def _smart_prepare(df: pd.DataFrame, target_col: str):
@@ -201,15 +215,20 @@ def _run_shap_visualization(artifacts_dir: str, X_test_raw: np.ndarray,
 
 
 def _run_dl_shap_visualization(artifacts_dir: str, X_train_raw: np.ndarray,
-                                X_test_raw: np.ndarray, feature_names: list,
-                                dataset_name: str = "", max_test_samples: int = 200):
+                               X_test_raw: np.ndarray, feature_names: list,
+                               dataset_name: str = "", max_test_samples: int = 200):
     """Load best DL model (.pt) from artifacts_dir and generate SHAP plots via PermutationExplainer."""
     try:
         import torch
         import sys as _sys
+        import os
+        import pandas as pd
+        import numpy as np
+        
         _viz_path = os.path.join(HERE, "visualization")
         if _viz_path not in _sys.path:
             _sys.path.insert(0, _viz_path)
+            
         from visualizer import AutoMLVisualizer
         from src.train import _build_dl_model
         from src.preprocess import FeatureBuilder
@@ -245,13 +264,13 @@ def _run_dl_shap_visualization(artifacts_dir: str, X_train_raw: np.ndarray,
 
         predictor = _Predictor(_model_obj)
 
-        # 自動偵測訓練時的 global_cfg，確保特徵維度與 checkpoint 吻合
         _gcfg_candidates = [
             {"use_kmeans": True,  "use_kpca": False},
             {"use_kmeans": False, "use_kpca": False},
             {"use_kmeans": True,  "use_kpca": True},
             {"use_kmeans": False, "use_kpca": True},
         ]
+        
         fb = None
         for _gcfg in _gcfg_candidates:
             _fb_try = FeatureBuilder(feature_set=feature_set, global_cfg=_gcfg).fit(X_train_raw)
@@ -260,12 +279,17 @@ def _run_dl_shap_visualization(artifacts_dir: str, X_train_raw: np.ndarray,
                 print(f"[Viz-DL] FeatureBuilder(feature_set={feature_set},"
                       f" use_kmeans={_gcfg['use_kmeans']}) → {in_features} 維")
                 break
+                
         if fb is None:
             print(f"[Viz-DL] 警告：無法自動匹配 in_features={in_features}，使用預設 global_cfg")
             fb = FeatureBuilder(feature_set=feature_set).fit(X_train_raw)
 
         X_tf = fb.transform(X_test_raw)
+        
+        # 🚀 [修改點] 生成 SHAP 欄位名稱
         col_names = _build_shap_col_names(feature_set, feature_names, X_tf.shape[1])
+        
+        # 建立 DataFrame
         X_df = pd.DataFrame(X_tf, columns=col_names)
 
         if len(X_df) > max_test_samples:
@@ -289,6 +313,7 @@ def _run_dl_shap_visualization(artifacts_dir: str, X_train_raw: np.ndarray,
         print(f"\n[Viz-DL] SHAP 圖表已輸出 → {viz_output}")
     except Exception as _e:
         print(f"\n[Viz-DL] DL 視覺化跳過（{_e}）")
+
 
 
 # ── 批次評估模式 ──────────────────────────────────────────────────────────────
