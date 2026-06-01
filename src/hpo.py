@@ -359,11 +359,7 @@ class TabularHPO:
         for _fs in sorted(_all_fs):
             for _fi, (_tr, _vl) in enumerate(folds):
                 _fb = FeatureBuilder(feature_set=_fs, global_cfg=global_cfg)
-                # 🛡️ 安全切片：如果是 DataFrame 就用 .iloc 抓取 Row，否則直接切片
-                X_tr_fold = X.iloc[_tr] if hasattr(X, "iloc") else X[_tr]
-                X_vl_fold = X.iloc[_vl] if hasattr(X, "iloc") else X[_vl]
-                
-                _feat_cache[(_fs, _fi)] = (_fb.fit_transform(X_tr_fold), _fb.transform(X_vl_fold))
+                _feat_cache[(_fs, _fi)] = (_fb.fit_transform(X[_tr]), _fb.transform(X[_vl]))
 
         all_configs = []
 
@@ -510,11 +506,7 @@ class TabularHPO:
         for _fs in sorted(_scout_fs):
             for _fi, (_tr, _vl) in enumerate(scout_folds):
                 _fb = FeatureBuilder(feature_set=_fs, global_cfg=global_cfg)
-                # 🛡️ 安全切片：如果是 DataFrame 就用 .iloc 抓取 Row，否則直接切片
-                X_tr_fold = X.iloc[_tr] if hasattr(X, "iloc") else X[_tr]
-                X_vl_fold = X.iloc[_vl] if hasattr(X, "iloc") else X[_vl]
-                    
-                _scout_cache[(_fs, _fi)] = (_fb.fit_transform(X_tr_fold), _fb.transform(X_vl_fold))
+                _scout_cache[(_fs, _fi)] = (_fb.fit_transform(X[_tr]), _fb.transform(X[_vl]))
 
         scores = {}
         best_params = {}
@@ -664,11 +656,8 @@ class DLHPO:
             arch_p = None
             for i, (tr_idx, val_idx) in enumerate(hpo_folds):
                 fb = FeatureBuilder(feature_set=fs, global_cfg=global_cfg)
-                # 🛡️ 安全切片：如果是 DataFrame 就用 .iloc 抓取 Row，否則直接切片
-                X_tr_fold = X.iloc[tr_idx] if hasattr(X, "iloc") else X[tr_idx]
-                X_val_fold = X.iloc[val_idx] if hasattr(X, "iloc") else X[val_idx]
-                X_tr = fb.fit_transform(X_tr_fold)
-                X_val = fb.transform(X_val_fold)
+                X_tr = fb.fit_transform(X[tr_idx])
+                X_val = fb.transform(X[val_idx])
 
                 # arch space 只在第一個 fold 確定（in_features 跨 fold 穩定）
                 if i == 0:
@@ -771,11 +760,8 @@ class MLPTrainHPO:
 
             fs = trial.suggest_categorical("feature_set", MLP_FEATURE_SETS)
             fb = FeatureBuilder(feature_set=fs, global_cfg=global_cfg)
-            # 🛡️ 安全切片：如果是 DataFrame 就用 .iloc 抓取 Row，否則直接切片
-            X_tr_fold = X.iloc[tr_idx] if hasattr(X, "iloc") else X[tr_idx]
-            X_val_fold = X.iloc[val_idx] if hasattr(X, "iloc") else X[val_idx]
-            X_tr = fb.fit_transform(X_tr_fold)
-            X_val = fb.transform(X_val_fold)
+            X_tr = fb.fit_transform(X[tr_idx])
+            X_val = fb.transform(X[val_idx])
             train_p = _dl_train_space(trial)
 
             _device = device
@@ -893,11 +879,8 @@ class TSNetTrainHPO:
 
             fs = trial.suggest_categorical("feature_set", TS_DL_FEATURE_SETS)
             fb = FeatureBuilder(feature_set=fs, global_cfg=global_cfg)
-            # 🛡️ 安全切片：如果是 DataFrame 就用 .iloc 抓取 Row，否則直接切片
-            X_tr_fold = X.iloc[tr_idx] if hasattr(X, "iloc") else X[tr_idx]
-            X_val_fold = X.iloc[val_idx] if hasattr(X, "iloc") else X[val_idx]
-            X_tr = fb.fit_transform(X_tr_fold)
-            X_val = fb.transform(X_val_fold)
+            X_tr = fb.fit_transform(X[tr_idx])
+            X_val = fb.transform(X[val_idx])
             train_p = _dl_train_space(trial)
 
             _device = device

@@ -1,5 +1,5 @@
 """
-run_pipeline_time.py — 時序專用 Pipeline 入口（v2 時序安全版）
+run_pipeline_time.py — 時序專用 Pipeline 入口（v1）
 
 僅掃 ucr_ts_80_new(時序資料)/（預切分格式：*_TRAIN.csv + *_TEST.csv），
 每個資料集依前綴自動偵測 task：
@@ -13,7 +13,7 @@ run_pipeline_time.py — 時序專用 Pipeline 入口（v2 時序安全版）
     python run_pipeline_time.py --batch --fast
 
     # 單一 TRAIN CSV（自動尋找對應 TEST CSV）
-    python run_pipeline_time.py --csv "ucr_ts_80_new(時序資料)/REG_VentilatorPressure_TRAIN.csv" --time-col "Date"
+    python run_pipeline_time.py --csv "ucr_ts_80_new(時序資料)/REG_VentilatorPressure_TRAIN.csv"
 
 結果輸出：pipeline_time_batch_results.csv（每跑完一個資料集即 flush）
 """
@@ -35,7 +35,6 @@ sys.path.insert(0, os.path.join(HERE, "visualization"))
 from src.config import ARTIFACTS_DIR, DEVICE, SEED
 from src import pipeline_time as _pt
 
-from preprocessing.interface import preprocess_for_timeseries
 
 # ── 工具 ─────────────────────────────────────────────────────────────────────
 
@@ -79,7 +78,7 @@ def _build_shap_col_names(feature_set: str, orig_names: list, n_transformed: int
 
 
 def _run_shap_visualization(artifacts_dir: str, X_test_raw: np.ndarray,
-                              feature_names: list, dataset_name: str = ""):
+                             feature_names: list, dataset_name: str = ""):
     try:
         from visualizer import AutoMLVisualizer
         import joblib as _jl
@@ -115,29 +114,6 @@ def _ts_datasets(ts_dir: str, top_n: int, last: bool) -> list:
                        os.path.join(ts_dir, base + "_TEST.csv")))
     return result
 
-# ── 🛡️ 時序專用前處理守門員 ──────────────────────────────────────────────────
-def _ts_sanitize_df(df: pd.DataFrame, time_col: str = None) -> pd.DataFrame:
-    """
-    執行時序安全前處理：
-    1. 若提供時間欄位，強制按時間排序 (防 Data Leakage)
-    2. 安全補值：Forward Fill (ffill) 避免時序訊號斷裂
-    """
-    df = df.copy()
-    
-    # 1. 🕒 時間排序
-    if time_col and time_col in df.columns:
-        print(f"  [TS 前處理] 偵測到時間欄位 '{time_col}'，強制按時間先後排序...")
-        df[time_col] = pd.to_datetime(df[time_col])
-        df = df.sort_values(by=time_col).reset_index(drop=True)
-        df = df.drop(columns=[time_col])
-
-    # 2. 🛡️ 安全補值
-    n_nans = df.isna().sum().sum()
-    if n_nans > 0:
-        print(f"  [TS 前處理] 發現 {n_nans} 個缺失值，執行時序安全補值 (ffill -> bfill)...")
-        df = df.ffill().bfill()
-        
-    return df
 
 # ── 單一資料集執行 ───────────────────────────────────────────────────────────
 
@@ -153,26 +129,21 @@ def _process_one(csv_path: str, args, t_ds: float) -> dict:
     if target_col not in df.columns:
         raise ValueError(f"找不到目標欄 '{target_col}'，可用：{list(df.columns)}")
 
-    # 🚨 先清除目標為 NaN 的廢資料
     n_before = len(df)
     df = df.dropna(subset=[target_col]).reset_index(drop=True)
     if len(df) < n_before:
         print(f"  [info] dropped {n_before - len(df)} rows with NaN target")
-        
-    # 🛡️ 呼叫時序前處理守門員 (排序 + ffill)
-    time_col = getattr(args, 'time_col', None)
-    df = _ts_sanitize_df(df, time_col)
 
     y_raw = df[target_col]
     task = _auto_detect_task(csv_path, y_raw)
     print(f"  [Task] {task}  target={target_col}")
     _arts_dir = os.path.join(ARTIFACTS_DIR, "batch_time", dataset_name)
 
-    # 特徵：僅取數值欄 (🚨已移除不安全的 fillna(0))
+    # 特徵：僅取數值欄、填 0
     feature_names = list(df.drop(columns=[target_col]).select_dtypes(include=[np.number]).columns)
     X_all = (df.drop(columns=[target_col])
                .select_dtypes(include=[np.number])
-               .values.astype(np.float32))
+               .fillna(0).values.astype(np.float32))
 
     if X_all.shape[1] == 0:
         raise ValueError("無可用數值特徵（select_dtypes 後 0 欄）")
@@ -194,7 +165,7 @@ def _process_one(csv_path: str, args, t_ds: float) -> dict:
 
         budget = _pt.TimeBudget(limit_sec=args.time_limit, t_start=t_ds)
         # 分類沿用 pipeline.get_cfg
-        import pipeline as _pl
+        from src import pipeline as _pl
         cfg = _pl.get_cfg(args.fast, n_samples=len(y_tr))
         cfg["is_timeseries"] = False  # UCR 分類視為樣本獨立
 
@@ -234,7 +205,7 @@ def _process_one(csv_path: str, args, t_ds: float) -> dict:
             "elapsed_s": elapsed,
         }
 
-    # ── 回歸 (時序) ─────────────────────────────────────────────────────────
+    # ── 回歸 ────────────────────────────────────────────────────────────────
     y_all = np.asarray(y_raw.values, dtype=np.float32).ravel()
     # 時序回歸：嚴格依時間順序切分（最後 20% 為測試集）
     split_idx = int(len(X_all) * 0.8)
@@ -317,37 +288,20 @@ def _process_new_ts_one(base_name: str, train_df: pd.DataFrame,
     target_col = _find_target_col(train_df)
     _arts_dir = os.path.join(ARTIFACTS_DIR, "batch_new_ts", base_name)
 
-    # 🚨 先清除目標為 NaN 的廢資料
     train_df = train_df.dropna(subset=[target_col]).reset_index(drop=True)
     test_df  = test_df.dropna(subset=[target_col]).reset_index(drop=True)
-
-    # 🌟 呼叫你的 preprocessing 模組 API (時序專用)
-    time_col = getattr(args, 'time_col', None)
-    
-    # 【架構師神操作】先合併再處理，保證類別編碼 (Label Encoding) 絕對一致！
-    n_train = len(train_df)
-    combined_df = pd.concat([train_df, test_df], ignore_index=True)
-    
-    # 執行時間排序、ffill、週期特徵萃取、字串安全編碼
-    combined_df = preprocess_for_timeseries(combined_df, time_col=time_col, target_col=target_col)
-    
-    # 處理完畢，安全地切回 Train 與 Test
-    train_df = combined_df.iloc[:n_train].copy().reset_index(drop=True)
-    test_df  = combined_df.iloc[n_train:].copy().reset_index(drop=True)
 
     y_tr_raw = train_df[target_col]
     y_te_raw = test_df[target_col]
 
     _feat_cols = list(train_df.drop(columns=[target_col])
                       .select_dtypes(include=[np.number]).columns)
-                      
-    # 特徵擷取 (因為前面已經把字串日期和類別都轉成數值了，這裡可以直接全部吃進去！)
     X_tr = (train_df.drop(columns=[target_col])
               .select_dtypes(include=[np.number])
-              .values.astype(np.float32))
+              .fillna(0).values.astype(np.float32))
     X_te = (test_df.drop(columns=[target_col])
               .select_dtypes(include=[np.number])
-              .values.astype(np.float32))
+              .fillna(0).values.astype(np.float32))
 
     if X_tr.shape[1] == 0:
         raise ValueError("無可用數值特徵（select_dtypes 後 0 欄）")
@@ -373,7 +327,7 @@ def _process_new_ts_one(base_name: str, train_df: pd.DataFrame,
         print(f"  [Task] classification  n_train={len(y_tr)}  n_test={len(y_te)}  n_classes={n_classes}")
 
         budget = _pt.TimeBudget(limit_sec=args.time_limit, t_start=t_ds)
-        import pipeline as _pl
+        from src import pipeline as _pl
         cfg = _pl.get_cfg(args.fast, n_samples=len(y_tr))
         cfg["is_timeseries"] = False
 
@@ -699,16 +653,13 @@ def main():
     parser.add_argument("--result-file", default=None,
                         help="附加結果 CSV（含 source 欄，附加模式）")
     parser.add_argument("--viz", action="store_true",
-                        help="訓練完成後自動產生 SHAP 視覺化圖表")
+                        help="訓練完成後自動產生 SHAP 視覺化圖表（需要 shap + plotly + kaleido）")
 
     parser.add_argument("--csv",    default=None, help="單一 CSV 路徑（或 _TRAIN.csv 自動找 _TEST.csv）")
     parser.add_argument("--train",  default=None, help="訓練集 CSV 路徑（搭配 --test 使用預切分模式）")
     parser.add_argument("--test",   default=None, help="測試集 CSV 路徑（搭配 --train 使用預切分模式）")
     parser.add_argument("--target", default=None,
                         help="目標欄位名稱（--csv 模式必填）")
-    # 🌟 新增：時序專用排序欄位
-    parser.add_argument("--time-col", default=None,
-                        help="時間欄位名稱（若提供，系統將強制按此欄位進行時序排序）")
 
     args = parser.parse_args()
     if args.new_ts_batch:

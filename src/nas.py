@@ -176,20 +176,8 @@ class MLPNASSearcher:
         )
         criterion = nn.CrossEntropyLoss()
 
-        # 🛡️ 型態安全轉換：確保進入 PyTorch 的一定是 Numpy Array
-        X_array = X.to_numpy() if hasattr(X, 'to_numpy') else np.array(X)
-        y_array = y.to_numpy() if hasattr(y, 'to_numpy') else np.array(y)
-        
-        X_t = torch.tensor(X_array, dtype=torch.float32, device=self.device)
-        
-        # 注意 y 的型態：如果是二元/多類別分類通常用 torch.long，如果是回歸則用 float32
-        # 請保留你原本程式碼中對 dtype 的設定，只把丟進去的變數換成 y_array
-        if 'dtype' in str(self.__class__): # 假設你原本是長下面這樣，請依你原本的寫法替換
-            y_t = torch.tensor(y_array, dtype=torch.long, device=self.device)
-        else:
-            # 安全起見，直接用你原本的寫法，只是把 y 換成 y_array
-            y_t = torch.tensor(y_array, device=self.device)
-        
+        X_t = torch.tensor(X, dtype=torch.float32, device=self.device)
+        y_t = torch.tensor(y, dtype=torch.long, device=self.device)
         ds = torch.utils.data.TensorDataset(X_t, y_t)
         loader = torch.utils.data.DataLoader(ds, batch_size=256, shuffle=True)
 
@@ -218,23 +206,15 @@ class MLPNASSearcher:
     ) -> float:
         """用共享權重直接推論，計算 Macro F1（免重新訓練）。"""
         from sklearn.metrics import f1_score as skf1
-        import numpy as np
 
         supernet.eval()
-        
-        # 🛡️ 型態安全轉換：確保進入 PyTorch 的一定是 Numpy Array
-        X_array = X.to_numpy() if hasattr(X, 'to_numpy') else np.array(X)
-        
-        # 隱藏層處理邏輯 
-        # hidden_dim = max(self.hidden_dim_choices)
+        hidden_dim = max(self.hidden_dim_choices)
         # 若搜尋架構的 hidden_dim 比 supernet 小，截取前幾個神經元
         # （簡化處理：直接用 supernet 的 hidden_dim，不做截取）
-        
-        X_t = torch.tensor(X_array, dtype=torch.float32, device=self.device)
+        X_t = torch.tensor(X, dtype=torch.float32, device=self.device)
         with torch.no_grad():
             logits = supernet(X_t, arch, dropout_rate=0.0)
         preds = logits.argmax(dim=1).cpu().numpy()
-        
         return skf1(y, preds, average="macro", zero_division=0)
 
     # ------------------------------------------------------------------
@@ -412,13 +392,7 @@ class TSNetSupernet(nn.Module):
         n_blocks = arch["n_blocks"]
         operations = arch["operations"]  # list[int], len == n_blocks
 
-        # 🛡️ 終極安檢：只要 x 還不是 PyTorch Tensor，就強迫轉換！
-        if not isinstance(x, torch.Tensor):
-            # 如果它有 .to_numpy() 屬性 (例如 Pandas DataFrame/Series)，先脫掉外衣
-            if hasattr(x, 'to_numpy'):
-                x = x.to_numpy()
-            
-            # 安全地轉成 Tensor 並送到正確的 GPU/CPU 設備上
+        if isinstance(x, np.ndarray):
             device = next(self.parameters()).device
             x = torch.tensor(x, dtype=torch.float32, device=device)
 
@@ -534,23 +508,16 @@ class TSNASSearcher:
         scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
             optimizer, T_max=self.n_supernet_epochs
         )
-        # 🛡️ 終極安檢：確保 X 和 y 在進入 PyTorch 前都是純 Numpy 陣列
-        X_array = X.to_numpy() if hasattr(X, "to_numpy") else np.array(X)
-        y_array = y.to_numpy() if hasattr(y, "to_numpy") else np.array(y)
-
         # 動態判斷回歸 / 分類
         is_regression = (n_classes == 1)
         if is_regression:
             criterion = nn.MSELoss()
-            # 餵入安全的 X_array 和 y_array
-            X_t = torch.tensor(X_array, dtype=torch.float32, device=self.device)
-            y_t = torch.tensor(y_array, dtype=torch.float32, device=self.device).view(-1, 1)
+            X_t = torch.tensor(X, dtype=torch.float32, device=self.device)
+            y_t = torch.tensor(y, dtype=torch.float32, device=self.device).view(-1, 1)
         else:
             criterion = nn.CrossEntropyLoss()
-            # 餵入安全的 X_array 和 y_array
-            X_t = torch.tensor(X_array, dtype=torch.float32, device=self.device)
-            y_t = torch.tensor(y_array, dtype=torch.long, device=self.device)
-            
+            X_t = torch.tensor(X, dtype=torch.float32, device=self.device)
+            y_t = torch.tensor(y, dtype=torch.long, device=self.device)
         ds = torch.utils.data.TensorDataset(X_t, y_t)
         loader = torch.utils.data.DataLoader(ds, batch_size=256, shuffle=True, drop_last=False)
 
@@ -615,25 +582,16 @@ class TSNASSearcher:
         """演化搜尋：隨機初始族群 → 截斷選擇 → 突變 → 迭代。"""
         np.random.seed(SEED)
 
-        # 🛡️ 終極安檢：脫掉 Pandas 外衣，確保是純 Numpy 陣列
-        X_array = X.to_numpy() if hasattr(X, "to_numpy") else np.array(X)
-
         # 進迴圈前一次性轉換 tensor，避免重複轉換拖慢速度
         is_regression = (self.n_classes == 1)
-        # 餵入安全的 X_array
-        X_tensor = torch.tensor(X_array, dtype=torch.float32, device=self.device)
-        # 🛡️ 終極安檢：脫掉 Pandas 外衣，確保 y 是純 Numpy 陣列
-        y_array = y.to_numpy() if hasattr(y, "to_numpy") else np.array(y)
-
+        X_tensor = torch.tensor(X, dtype=torch.float32, device=self.device)
         if is_regression:
-            # 餵入安全的 y_array
-            y_tensor = torch.tensor(y_array, dtype=torch.float32, device=self.device).view(-1, 1)
+            y_tensor = torch.tensor(y, dtype=torch.float32, device=self.device).view(-1, 1)
             raw_y = None
         else:
-            # 餵入安全的 y_array
-            y_tensor = torch.tensor(y_array, dtype=torch.long, device=self.device)
-            # 🚨 關鍵細節：讓 raw_y 也變成乾淨的 Numpy 陣列，保護後續的 sklearn 評估！
-            raw_y = y_array
+            y_tensor = torch.tensor(y, dtype=torch.long, device=self.device)
+            raw_y = y
+
         try:
             population = [_random_ts_arch(self.max_blocks) for _ in range(self.n_candidates)]
             scores = [self._eval_arch(supernet, X_tensor, y_tensor, a, raw_y=raw_y) for a in population]

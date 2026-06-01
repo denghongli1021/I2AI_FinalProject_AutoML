@@ -262,28 +262,12 @@ class MetaLearnerStacker:
         # 若傳入原始特徵，先標準化再拼入（避免高維 raw 特徵淹沒 OOF 機率）
         X_orig_scaled = None
         if X_orig is not None:
-            # 🛡️ 第一層防護：過濾掉字串，只保留數值特徵
-            if hasattr(X_orig, "select_dtypes"):
-                import numpy as np
-                X_orig_num = X_orig.select_dtypes(include=[np.number]).values
-            else:
-                import numpy as np
-                X_orig_num = X_orig
-
-            if X_orig_num.shape[1] > 0:
-                # 🛡️ 第二層防護 (緊急補水)：把數值特徵裡面殘留的 NaN 補成 0，無限大補成極值
-                # 這行就是解決 "ValueError: Input X contains NaN" 的關鍵！
-                X_orig_num = np.nan_to_num(X_orig_num, nan=0.0, posinf=1e9, neginf=-1e9)
-
-            if X_orig_num.shape[1] > 0:
-                self._x_scaler = StandardScaler()
-                X_orig_scaled = self._x_scaler.fit_transform(X_orig_num)
-                from sklearn.feature_selection import SelectKBest, f_classif
-                actual_k = min(self.k_best, X_orig_scaled.shape[1])
-                self._selector = SelectKBest(f_classif, k=actual_k)
-                X_orig_scaled = self._selector.fit_transform(X_orig_scaled, y)
-            else:
-                X_orig_scaled = None # 若無數值特徵則放棄拼入
+            self._x_scaler = StandardScaler()
+            X_orig_scaled = self._x_scaler.fit_transform(X_orig)
+            from sklearn.feature_selection import SelectKBest, f_classif
+            actual_k = min(self.k_best, X_orig_scaled.shape[1])
+            self._selector = SelectKBest(f_classif, k=actual_k)
+            X_orig_scaled = self._selector.fit_transform(X_orig_scaled, y)
 
         X_meta = self._build_meta_features(oof_list, X_orig_scaled)
 
@@ -333,46 +317,19 @@ class MetaLearnerStacker:
 
     def predict_proba(self, test_list: list, X_orig: np.ndarray = None) -> np.ndarray:
         X_orig_scaled = None
-        if X_orig is not None and getattr(self, '_x_scaler', None) is not None:
-            # 🛡️ 第一層防護：過濾字串
-            if hasattr(X_orig, "select_dtypes"):
-                import numpy as np
-                X_orig_num = X_orig.select_dtypes(include=[np.number]).values
-            else:
-                import numpy as np
-                X_orig_num = X_orig
-                
-            if X_orig_num.shape[1] > 0:
-                # 🛡️ 第二層防護：補上 NaN (必須跟 fit 階段一模一樣)
-                X_orig_num = np.nan_to_num(X_orig_num, nan=0.0, posinf=1e9, neginf=-1e9)
-                
-                # 安全地執行 transform
-                X_orig_scaled = self._x_scaler.transform(X_orig_num)
-                if getattr(self, '_selector', None) is not None:
-                    X_orig_scaled = self._selector.transform(X_orig_scaled)
-                    
+        if X_orig is not None and self._x_scaler is not None:
+            X_orig_scaled = self._x_scaler.transform(X_orig)
+            if self._selector is not None:
+                X_orig_scaled = self._selector.transform(X_orig_scaled)
         X_meta = self._build_meta_features(test_list, X_orig_scaled)
         return self.meta_model_.predict_proba(X_meta)
 
     def predict(self, test_list: list, X_orig: np.ndarray = None) -> np.ndarray:
         X_orig_scaled = None
-        if X_orig is not None and getattr(self, '_x_scaler', None) is not None:
-            # 🛡️ 安全防護：推論時一樣只提取數值特徵
-            if hasattr(X_orig, "select_dtypes"):
-                import numpy as np
-                X_orig_num = X_orig.select_dtypes(include=[np.number]).values
-            else:
-                import numpy as np
-                X_orig_num = X_orig
-                
-            if X_orig_num.shape[1] > 0:
-                # 🛡️ 補上這行！推論階段一樣要處理 NaN
-                X_orig_num = np.nan_to_num(X_orig_num, nan=0.0, posinf=1e9, neginf=-1e9)
-                
-                X_orig_scaled = self._x_scaler.transform(X_orig_num)
-                if getattr(self, '_selector', None) is not None:
-                    X_orig_scaled = self._selector.transform(X_orig_scaled)
-        
+        if X_orig is not None and self._x_scaler is not None:
+            X_orig_scaled = self._x_scaler.transform(X_orig)
+            if self._selector is not None:
+                X_orig_scaled = self._selector.transform(X_orig_scaled)
         X_meta = self._build_meta_features(test_list, X_orig_scaled)
         proba = self.meta_model_.predict_proba(X_meta)
         t = getattr(self, "_threshold", 0.5)

@@ -1,10 +1,17 @@
 # 資料集（大型，使用者自行下載）
 openml_cc18_data/
+!openml_cc18_data/
+openml_cc18_data/*
+!openml_cc18_data/179_adult.csv
+openml_regression_data/
 ucr_ts_80*/
 
 # 模型快取
 autogluon_models/
-artifacts/
+artifacts/**
+!artifacts/single/
+!artifacts/single/179_adult/
+!artifacts/single/179_adult/**
 catboost_info/
 
 # 本地測試與內部文件
@@ -16,6 +23,7 @@ improve.md
 
 # Claude Code 工作區
 .claude/
+AGENTS.md
 github_readme.md
 CLAUDE.md
 
@@ -50,5 +58,3 @@ env/
 # IDE
 .vscode/
 .idea/
-
-*.csv

@@ -52,7 +52,12 @@ class AutoMLVisualizer:
                 print(f"  [SHAP] 取樣 {_max_samples}/{len(self.X_test)} 筆（視覺化不需要全量計算）...")
                 self.X_test = self.X_test.sample(n=_max_samples, random_state=42).reset_index(drop=True)
 
-            self.shap_values = self.explainer(self.X_test)
+            # max_evals = 2*n_features+1 → 只跑 1 次 permutation，比預設 ~4 次快 4 倍，
+            # 精度損失極小（特徵重要性排名穩定，視覺化用途已足夠）
+            _n_feat = self.X_test.shape[1]
+            _max_evals = 2 * _n_feat + 1
+            print(f"  [SHAP] max_evals={_max_evals} (1 permutation × {_n_feat} features × 2 directions)")
+            self.shap_values = self.explainer(self.X_test, max_evals=_max_evals)
             _elapsed = time.time() - _t0
             mins, secs = divmod(int(_elapsed), 60)
             time_str = f"{mins}m {secs}s" if mins > 0 else f"{secs}s"

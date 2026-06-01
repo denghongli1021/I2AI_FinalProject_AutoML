@@ -348,12 +348,8 @@ def run_tabular_cv(
         )
         for fold_idx, (tr_idx, val_idx) in fold_pbar:
             fb = FeatureBuilder(feature_set=config["feature_set"], global_cfg=global_cfg)
-            # 🛡️ 安全切片：相容 DataFrame 與 Numpy
-            X_tr_fold = X.iloc[tr_idx] if hasattr(X, "iloc") else X[tr_idx]
-            X_val_fold = X.iloc[val_idx] if hasattr(X, "iloc") else X[val_idx]
-            
-            X_tr = fb.fit_transform(X_tr_fold)
-            X_val = fb.transform(X_val_fold)
+            X_tr = fb.fit_transform(X[tr_idx])
+            X_val = fb.transform(X[val_idx])
             X_te = fb.transform(X_test)
 
             _cw = "balanced" if metric != "accuracy" else None
@@ -454,12 +450,8 @@ def run_dl_cv(
             torch.manual_seed(cur_seed + fold_idx)
 
             fb = FeatureBuilder(feature_set=config["feature_set"], global_cfg=global_cfg)
-            # 🛡️ 安全切片：相容 DataFrame 與 Numpy
-            X_tr_fold = X.iloc[tr_idx] if hasattr(X, "iloc") else X[tr_idx]
-            X_val_fold = X.iloc[val_idx] if hasattr(X, "iloc") else X[val_idx]
-            
-            X_tr = fb.fit_transform(X_tr_fold)
-            X_val = fb.transform(X_val_fold)
+            X_tr = fb.fit_transform(X[tr_idx])
+            X_val = fb.transform(X[val_idx])
             X_te = fb.transform(X_test)
 
             in_features = X_tr.shape[1]

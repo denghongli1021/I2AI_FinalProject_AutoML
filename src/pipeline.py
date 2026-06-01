@@ -97,7 +97,7 @@ def get_cfg(fast: bool, n_samples: int = 10_000) -> dict:
             "scout_trials": 3,    "scout_val_size": 0.2, "scout_ratio": 2 / 3,
             "nas_epochs": 5,      "nas_candidates": 5,   "nas_rounds": 2,
             "mlp_train_trials": 3,"mlp_top_k": 1,
-            "dl_trials": 3,       "transformer_trials": 15, "dl_top_k": 1,
+            "dl_trials": 3,       "transformer_trials": 10, "dl_top_k": 1,
             "meta_trials": 3,     "blend_restarts": 1,
             "n_repeats": 1,       "n_seeds": 1,
             "use_kpca": False,    "use_kmeans": False,
@@ -157,12 +157,11 @@ class PipelineResult:
 
 
 # ── 主引擎 ────────────────────────────────────────────────────────────────────
-from typing import Union, Dict, Any
-import pandas as pd
+
 def run(
-    X_train: Union[np.ndarray, pd.DataFrame, Dict[str, Any]],
+    X_train: np.ndarray,
     y_train: np.ndarray,
-    X_test:  Union[np.ndarray, pd.DataFrame, Dict[str, Any]],
+    X_test:  np.ndarray,
     n_classes: int,
     cfg: dict,
     budget: TimeBudget,
@@ -203,18 +202,6 @@ def run(
     tabular_configs:list = []
     dl_configs:     list = []
 
-    # =========================================================================
-    # 🚀 2. 雙軌解包與相容性路由 (Router)
-    # =========================================================================
-    if isinstance(X_train, dict) and "tree" in X_train and "dl" in X_train:
-        print("\n[Pipeline] 🔄 偵測到雙軌資料，正在分流 Tree(生肉) 與 DL(熟肉) 軌道...")
-        X_train_tree, X_train_dl = X_train["tree"], X_train["dl"]
-        X_test_tree,  X_test_dl  = X_test["tree"],  X_test["dl"]
-    else:
-        print("\n[Pipeline] ⚠️ 偵測到單軌資料，套用至所有模型 (向下相容模式)...")
-        X_train_tree = X_train_dl = X_train
-        X_test_tree  = X_test_dl  = X_test
-
     # ── [2] Tabular HPO ───────────────────────────────────────────────────────
     if not skip_tabular:
         # Phase 1: Scout — 單次 holdout，快速淘汰弱模型
@@ -227,7 +214,7 @@ def run(
             metric=metric,
         )
         scout_scores, scout_best_params = scout_hpo.scout(
-            X_train_tree, y_train,
+            X_train, y_train,
             scout_trials=cfg["scout_trials"],
             val_size=cfg["scout_val_size"],
             global_cfg=cfg,
@@ -286,7 +273,7 @@ def run(
                 print("  [FS Lock] " + "  ".join(f"{n}={fs}" for n, fs in locked_fs.items()))
 
             # fast 模式或高維 CatBoost：設定 per-model timeout 防止單模型卡住 pipeline
-            n_features = X_train_tree.shape[1]
+            n_features = X_train.shape[1]
             per_model_timeout = {}
             _fast_timeout = cfg.get("tabular_model_timeout")
             if _fast_timeout:
@@ -309,7 +296,7 @@ def run(
                 per_model_timeout=per_model_timeout,
                 metric=metric,
             )
-            tabular_configs = tabular_hpo.run(X_train_tree, y_train, cfg,
+            tabular_configs = tabular_hpo.run(X_train, y_train, cfg,
                                               warm_start=scout_best_params,
                                               locked_feature_sets=locked_fs)
 
@@ -323,7 +310,7 @@ def run(
         # [3] NAS
         # 小型表格資料（< 2000 筆）做 NAS 容易過擬合且耗時，自動跳過
         skip_nas = no_nas or budget.should_skip(cost_fraction=0.30) or (
-            not is_ts and len(X_train_dl) < 2000
+            not is_ts and len(X_train) < 2000
         )
         if not skip_nas:
             if is_ts:
@@ -335,7 +322,7 @@ def run(
                     n_evolution_rounds=cfg["nas_rounds"],
                     device=DEVICE,
                 )
-                mlp_arch = nas.search(X_train_dl, y_train, n_classes)
+                mlp_arch = nas.search(X_train, y_train, n_classes)
             else:
                 print(f"\n[3] MLP NAS (epochs={cfg['nas_epochs']}, candidates={cfg['nas_candidates']}) ...")
                 print(f"  [Budget] {budget.status_str()}")
@@ -345,7 +332,7 @@ def run(
                     n_evolution_rounds=cfg["nas_rounds"],
                     device=DEVICE,
                 )
-                mlp_arch = nas.search(X_train_dl, y_train, n_classes)
+                mlp_arch = nas.search(X_train, y_train, n_classes)
         else:
             reason = "時間預算不足" if not no_nas else "no_nas=True"
             print(f"\n[3] 跳過 NAS（{reason}），使用預設架構")
@@ -372,11 +359,11 @@ def run(
                     top_k=cfg["mlp_top_k"], device=DEVICE,
                     metric=metric,
                 )
-            mlp_configs = mlp_hpo.run(X_train_dl, y_train, n_classes, cfg)
+            mlp_configs = mlp_hpo.run(X_train, y_train, n_classes, cfg)
 
         # [5] CNN1D / TCN HPO
         # 小型表格資料（< 2000 筆）DL 模型無法收斂且拖低 ensemble，自動跳過
-        skip_dl_small = not is_ts and len(X_train_dl) < 2000
+        skip_dl_small = not is_ts and len(X_train) < 2000
         cnn_name  = "tcn" if is_ts else ("resnet1d" if cfg.get("use_resnet18") else "cnn1d")
         dl_trials = budget.scale_trials(cfg["dl_trials"])
         if budget.should_skip(cost_fraction=0.20) or skip_dl_small:
@@ -390,7 +377,7 @@ def run(
                 top_k=cfg["dl_top_k"], n_classes=n_classes, device=DEVICE,
                 metric=metric,
             )
-            cnn_configs = cnn_hpo.run(X_train_dl, y_train, cfg)
+            cnn_configs = cnn_hpo.run(X_train, y_train, cfg)
 
         # [6] Transformer / PatchTST HPO
         tf_name   = "patchtst" if is_ts else "transformer"
@@ -406,7 +393,7 @@ def run(
                 top_k=cfg["dl_top_k"], n_classes=n_classes, device=DEVICE,
                 metric=metric,
             )
-            tf_configs = tf_hpo.run(X_train_dl, y_train, cfg)
+            tf_configs = tf_hpo.run(X_train, y_train, cfg)
 
         dl_configs = mlp_configs + cnn_configs + tf_configs
     else:
@@ -416,9 +403,6 @@ def run(
     all_configs = tabular_configs + dl_configs
     if not all_configs:
         raise RuntimeError("沒有任何 model config！請確認 HPO 成功完成。")
-
-    _TABULAR = {"lgbm", "xgb", "catboost", "rf", "extra_trees", "logreg", "knn"}
-    _DL      = {"mlp", "cnn1d", "resnet1d", "tcn", "transformer", "patchtst", "tsnet"}
 
     print(f"\n[7] 5-Fold CV — {len(all_configs)} 個模型 config ...")
     for i, config in enumerate(all_configs):
@@ -430,13 +414,8 @@ def run(
             oof      = np.load(oof_path)
             test_pred = np.load(tst_path)
         else:
-            # 動態分流 根據 config['model_name'] 決定餵進 CV 的資料軌道
-            is_tabular = config["model_name"] in _TABULAR
-            cur_X_train = X_train_tree if is_tabular else X_train_dl
-            cur_X_test  = X_test_tree  if is_tabular else X_test_dl
-
             oof, test_pred = run_cv(
-                config, cur_X_train, y_train, cur_X_test, n_classes,
+                config, X_train, y_train, X_test, n_classes,
                 device=DEVICE, tag=tag, global_cfg=cfg, metric=metric,
             )
         all_oof.append(oof)
@@ -445,17 +424,26 @@ def run(
 
     # ── [7.5] 儲存最佳 Tabular 與 DL 模型 ────────────────────────────────────
     from src.metrics import calculate_score as _calc
-    #_TABULAR = {"lgbm", "xgb", "catboost", "rf", "extra_trees", "logreg", "knn"}
-    #_DL      = {"mlp", "cnn1d", "resnet1d", "tcn", "transformer", "patchtst", "tsnet"}
+    _TABULAR   = {"lgbm", "xgb", "catboost", "rf", "extra_trees", "logreg", "knn"}
+    _DL        = {"mlp", "cnn1d", "resnet1d", "tcn", "transformer", "patchtst", "tsnet"}
+    _ALL_NAMES = sorted(_TABULAR | _DL, key=len, reverse=True)
+
+    def _model_type(tag: str) -> str:
+        """從 tag（如 extra_trees_raw_stat_c0）還原正確的 model_name。"""
+        for n in _ALL_NAMES:
+            if tag.startswith(n + "_"):
+                return n
+        return tag.split("_")[0]
+
     tab_candidates = [
         (_calc(y_train, oof.argmax(1), metric=metric), tag)
         for tag, oof in zip(model_tags, all_oof)
-        if tag.split("_")[0] in _TABULAR
+        if _model_type(tag) in _TABULAR
     ]
     dl_candidates = [
         (_calc(y_train, oof.argmax(1), metric=metric), tag)
         for tag, oof in zip(model_tags, all_oof)
-        if tag.split("_")[0] in _DL
+        if _model_type(tag) in _DL
     ]
     for candidates, ext, dst_name in [
         (tab_candidates, ".pkl", "best_tabular_model.pkl"),
@@ -481,6 +469,30 @@ def run(
             shutil.copy2(fb_src, fb_dst)
             print(f"  [Best Model] FeatureBuilder({best_tab_tag}) → best_tabular_model_fb.pkl")
 
+    # ── [7.5b] 每種模型類型各儲存一個最佳模型 ──────────────────────────────────
+    model_best: dict = {}  # model_name -> (score, tag)
+    for tag, oof in zip(model_tags, all_oof):
+        mname = _model_type(tag)
+        score = _calc(y_train, oof.argmax(1), metric=metric)
+        if mname not in model_best or score > model_best[mname][0]:
+            model_best[mname] = (score, tag)
+
+    print("\n  [Per-Model Best] 儲存各模型類型最佳版本：")
+    for mname, (score, best_tag) in sorted(model_best.items()):
+        ext = ".pkl" if mname in _TABULAR else ".pt"
+        src = os.path.join(ARTIFACTS_DIR, f"{best_tag}_best_model{ext}")
+        dst = os.path.join(artifacts_dir, f"{mname}_best_model{ext}")
+        if os.path.exists(src):
+            shutil.copy2(src, dst)
+            print(f"    {mname}_best_model{ext}  (OOF {metric}={score:.4f}，來自 {best_tag})")
+        else:
+            print(f"    {mname}_best_model{ext}  ← 模型檔未找到（快取跳過？）")
+        if mname in _TABULAR:
+            fb_src = os.path.join(ARTIFACTS_DIR, f"{best_tag}_best_model_fb.pkl")
+            fb_dst = os.path.join(artifacts_dir, f"{mname}_best_model_fb.pkl")
+            if os.path.exists(fb_src):
+                shutil.copy2(fb_src, fb_dst)
+
     # ── [7.6] 丟掉最差 DL 模型 ───────────────────────────────────────────────
     if len(dl_candidates) > 1:
         worst_score, worst_tag = min(dl_candidates)
@@ -499,8 +511,8 @@ def run(
     # ── [9] Ensemble B: Meta-Learner Stacking ─────────────────────────────────
     print("\n[9] Ensemble B — Meta-Learner Stacking (Concatenated) ...")
     stacker = MetaLearnerStacker(n_meta_trials=cfg["meta_trials"], metric=metric, n_samples=len(y_train))
-    stacker.fit(all_oof, y_train, X_orig=X_train_tree, is_timeseries=is_ts)
-    test_stack = stacker.predict(all_test, X_orig=X_test_tree)
+    stacker.fit(all_oof, y_train, X_orig=X_train, is_timeseries=is_ts)
+    test_stack = stacker.predict(all_test, X_orig=X_test)
 
     return PipelineResult(
         test_blend=test_blend,

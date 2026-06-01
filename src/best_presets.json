@@ -1,6 +1,6 @@
 {
   "lgbm": {
-    "feature_set": "raw_stat_fft",
+    "feature_set": "raw_stat",
     "num_leaves": 63,
     "learning_rate": 0.1,
     "n_estimators": 2000,
@@ -11,7 +11,7 @@
     "reg_lambda": 1.0
   },
   "xgb": {
-    "feature_set": "raw_stat_fft",
+    "feature_set": "raw_stat",
     "max_depth": 8,
     "learning_rate": 0.1,
     "n_estimators": 2000,
@@ -22,7 +22,7 @@
     "reg_lambda": 1.0
   },
   "catboost": {
-    "feature_set": "raw_stat_fft",
+    "feature_set": "raw_stat",
     "depth": 8,
     "learning_rate": 0.1,
     "iterations": 2000,

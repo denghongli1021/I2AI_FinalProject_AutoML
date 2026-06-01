@@ -17,6 +17,12 @@ pip install -r requirements.txt
 ### Pipeline（自製系統）
 
 ```cmd
+#最常用(用來跑一個資料集:給目標欄位)
+python run_pipeline.py --csv openml_cc18_data/179_adult.csv --target class --viz
+python run_pipeline.py --train mydata/train.csv --test mydata/test.csv --target income --viz
+python run_pipeline_time.py --csv sensor_data.csv --target pressure --viz
+python run_pipeline_time.py --train mydata/train.csv --test mydata/test.csv --target pressure --viz
+
 # 批次評估：前 5 個 OpenML-CC18 分類資料集
 python run_pipeline.py --batch --top-n 5
 
@@ -70,6 +76,9 @@ python run_pipeline_time.py --new-ts-batch --cls-top-n 10 --reg-top-n 10
 # 新TS批次：快速模式
 python run_pipeline_time.py --new-ts-batch --cls-top-n 5 --reg-top-n 5 --fast
 
+# 新TS批次：指定起始偏移量（適用於斷點續跑或分段評估）
+python run_pipeline_time.py --new-ts-batch --cls-top-n 5 --reg-top-n 5 --cls-offset 3 --reg-offset 3
+
 # 新TS批次：結果附加至指定 CSV
 python run_pipeline_time.py --new-ts-batch --cls-top-n 10 --reg-top-n 10 --result-file result.csv
 
@@ -94,6 +103,9 @@ python generate_shap.py --dataset test/dataset.csv --target RiskPerformance
 
 # DL 模型（SignalTransformer）
 python generate_shap.py --dataset test/dataset.csv --target RiskPerformance --model dl
+
+# DL 模型（限制背景與測試樣本數以極速完成 PermutationExplainer）
+python generate_shap.py --dataset test/dataset.csv --target RiskPerformance --model dl --dl-bg 100 --dl-test-samples 50
 
 # 同時產生 tabular + DL 兩種 SHAP 圖
 python generate_shap.py --dataset test/dataset.csv --target RiskPerformance --model both
@@ -227,7 +239,7 @@ python scripts/data_collect_time.py
 ├── run_baseline.py         # AutoGluon 對照組（分類 + 回歸）
 ├── generate_shap.py        # 從現有 artifacts 產生 SHAP 視覺化（不重新訓練）
 ├── merge_final_results.py  # 合併三份批次結果 CSV → pipeline_batch_results.csv
-├── scripts/
+├── scripts/                # 資料集收集與下載指令稿
 │   ├── data_collect.py     # 下載 OpenML-CC18 資料集
 │   ├── data_collect_reg.py # 下載 OpenML 回歸資料集
 │   └── data_collect_time.py# 下載 UCR 時序資料集
@@ -257,14 +269,14 @@ python scripts/data_collect_time.py
 │   │   └── assembler.py    # 兩軌特徵組裝（樹軌：OrdinalEncoder；DL 軌：OHE）
 │   ├── processors/         # 各型別處理器（numeric / category / text / time / image / feature_generator）
 │   └── utils/              # 記憶體優化（memory_optimizer）、資料健康度（data_health）、自訂轉換器
-├── visualization/
-│   └── visualizer.py       # AutoMLVisualizer：SHAP 視覺化（TreeExplainer 精確解 / PermutationExplainer 最多 500 筆取樣，輸出高畫質 PNG）
-├── test/
-│   ├── dataset.csv               # 測試用資料集
-│   ├── ground_truth.csv          # 測試標準答案
-│   ├── run_submission.py         # 競賽提交（v3 完整 pipeline）
-│   ├── run_baseline_submission.py # AutoGluon 競賽提交
-│   └── compare_submissions.py    # 比較三份提交 CSV
+├── visualization/          # SHAP 視覺化與測試模組
+│   ├── visualizer.py       # AutoMLVisualizer：SHAP 視覺化（TreeExplainer 精確解 / PermutationExplainer 最多 500 筆，輸出高畫質 PNG）
+│   ├── test_generality.py  # IBM HR 員工離職與房價預測的通用性測試
+│   ├── test_nn.py          # SklearnWrapper 類別：驗證 PyTorch MLP 神經網路的 SHAP
+│   ├── test_timeseries.py  # ETTh1 電力數據時序回歸的視覺化測試
+│   └── test_diabetes.py    # 糖尿病資料集的 SHAP 視覺化測試
+├── test/                   # 測試與驗證資料夾
+│   └── dataset.csv         # 測試用資料集
 ├── logs/                   # 執行 log（pipeline_dataset_run.log、baseline_dataset_run.log）
 ├── pipeline_batch_results.csv    # 合併後的完整批次結果（pipeline + baseline + pipeline_time）
 ├── result.csv              # 時序批次結果（pipeline_time）

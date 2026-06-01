@@ -129,188 +129,35 @@ def _build_shap_col_names(feature_set: str, orig_names: list, n_transformed: int
     return [f"feat_{i}" for i in range(n_transformed)]
 
 
-# def _smart_prepare(df: pd.DataFrame, target_col: str):
-#     """
-#     使用 preprocessing 模組進行智慧前處理。
-#     AutoRouter 自動偵測 numeric / categorical / text / datetime 欄位，
-#     建立雙軌管線（tree 軌道保留原始尺度供樹狀模型使用）。
-#     回傳 (X_tr, X_te, y_tr_raw, y_te_raw, feature_names)，X 為 float32 numpy。
-#     若 preprocessing 模組不可用，自動回退到基本的 _prepare_X() + train_test_split。
-#     """
-#     try:
-#         from preprocessing.interface import preprocess_for_training
-        
-#         # 1. 取得雙軌資料字典 (X_dict_tr 裡面包含 "tree" 和 "dl" 的 DataFrame)
-#         X_dict_tr, X_dict_te, y_tr_raw, y_te_raw, _ = preprocess_for_training(
-#             data_source=df,
-#             target_col=target_col,
-#             test_size=0.2,
-#         )
-        
-#         # 2. 建立特徵名稱字典 (下游模型在做特徵重要性分析時會用到)
-#         feature_names_dict = {
-#             "tree": list(X_dict_tr["tree"].columns),
-#             "dl": list(X_dict_tr["dl"].columns)
-#         }
-        
-#         # 3. 🚀 直接回傳字典
-#         return X_dict_tr, X_dict_te, y_tr_raw, y_te_raw, feature_names_dict
-#     except Exception as _e:
-#         print(f"  [Preprocess] 智慧前處理失敗（{_e}），回退到基本前處理")
-#         X_all = _prepare_X(df, target_col)
-#         feat_names = _get_feature_names(df, target_col)
-#         y_all_raw = df[target_col]
-#         X_tr, X_te, y_tr_raw, y_te_raw = train_test_split(
-#             X_all, y_all_raw, test_size=0.2, random_state=SEED
-#         )
-#         return X_tr, X_te, y_tr_raw, y_te_raw, feat_names
-def _smart_prepare(
-    train_df: pd.DataFrame, 
-    target_col: str, 
-    test_df: pd.DataFrame = None,  
-    enable_adv_val: bool = True
-):
+def _smart_prepare(df: pd.DataFrame, target_col: str):
     """
-    [Pipeline Wrapper] 使用 preprocessing 模組進行智慧前處理。
-    全自動處理對抗驗證、雙軌制分流，並為 HPO 準備好驗證集。
+    使用 preprocessing 模組進行智慧前處理。
+    AutoRouter 自動偵測 numeric / categorical / text / datetime 欄位，
+    建立雙軌管線（tree 軌道保留原始尺度供樹狀模型使用）。
+    回傳 (X_tr, X_te, y_tr_raw, y_te_raw, feature_names)，X 為 float32 numpy。
+    若 preprocessing 模組不可用，自動回退到基本的 _prepare_X() + train_test_split。
     """
-    print("\n" + "="*50)
-    print("🚀 [Pipeline] 啟動智慧前處理 (Smart Prepare)...")
-    print("="*50)
-
-    # 🛡️ 防禦 1: 強制關閉 Pandas 輸出模式
-    # 避免 OrdinalEncoder 輸出 DataFrame 導致 Cython 無法讀取而當機
-    import sklearn
-    sklearn.set_config(transform_output="default")
-
-    # 🛡️ 防禦 2: 深度淨化資料型態 (Deep Sanitize)
-    # 剝除所有會讓 Cython 崩潰的 PyArrow 與 Pandas Extension Types
-    def _sanitize_df(df):
-        if df is None: return None
-        df = df.copy()
-        
-        for col in df.columns:
-            dtype_str = str(df[col].dtype).lower()
-            
-            # 1. 處理字串與類別 -> 轉回標準 Python object
-            if isinstance(df[col].dtype, pd.CategoricalDtype) or "string" in dtype_str:
-                df[col] = df[col].astype(object)
-                
-            # 2. 處理 Pandas Nullable 數值 (Int8, Float32, boolean 等) -> 轉為 Float64
-            elif pd.api.types.is_extension_array_dtype(df[col]):
-                if pd.api.types.is_numeric_dtype(df[col]):
-                    df[col] = df[col].astype(np.float64)
-                else:
-                    df[col] = df[col].astype(object)
-                    
-        # ⚠️ 關鍵修補：徹底將殘留在 object 欄位中的 pd.NA 替換為 Scikit-Learn 看得懂的 np.nan
-        # 使用 pd.NA 比較安全，避免遺漏
-        df = df.replace({pd.NA: np.nan})
-    
-        return df
-
-    print("[防爆裝甲] 正在淨化訓練集資料型態，保護 Scikit-Learn 底層引擎...")
-    train_df = _sanitize_df(train_df)
-    if test_df is not None:
-        test_df = _sanitize_df(test_df)
-
-    # 🛡️ 防禦 3: 確保 Target 是最乾淨的 Numpy 型態 (修正分類器報錯問題)
-    if pd.api.types.is_numeric_dtype(train_df[target_col]):
-        # 檢查是否為整數型態 (如 0, 1, 2 分類標籤)
-        if train_df[target_col].dropna().apply(lambda x: float(x).is_integer()).all():
-            # 如果都是整數，轉為 int64，避免 Sklearn 誤判為 continuous (回歸)
-            train_df[target_col] = train_df[target_col].astype(np.int64)
-        else:
-            # 如果真的有小數點，才是 float64
-            train_df[target_col] = train_df[target_col].astype(np.float64)
-    else:
-        train_df[target_col] = train_df[target_col].astype(str)
-        
     try:
         from preprocessing.interface import preprocess_for_training
-        from sklearn.model_selection import train_test_split
-        
-        # ==========================================
-        # ⚙️ 呼叫底層 interface.py (一鍵包辦清理、對抗驗證、雙軌產出)
-        # ==========================================
-        # 我們直接把 test_df 傳進去，interface 就會自動做對抗驗證！
-        X_out_1, X_out_2, y_1, y_2, preprocessors = preprocess_for_training(
-            data_source=train_df,
+        X_dict_tr, X_dict_te, y_tr_raw, y_te_raw, _ = preprocess_for_training(
+            data_source=df,
             target_col=target_col,
-            test_data_source=test_df, 
             test_size=0.2,
-            enable_adv_val=enable_adv_val
         )
-        
-        # ==========================================
-        # ✂️ 為下游 HPO (超參數優化) 準備 80/20 驗證集
-        # ==========================================
-        if test_df is not None:
-            # 情況 A：有給 test_df，interface 回傳的是 [100% Train] 與 [100% Test]
-            # 為了讓 HPO 能調參，我們要把 100% Train (X_out_1) 自己切成 80/20
-            print("[Pipeline] 正在為 HPO 訓練切分 80/20 驗證集...")
-            
-            X_dict_tr, X_dict_val = {}, {}
-            stratify = y_1 if (y_1.nunique() <= 20 and y_1.nunique() >= 2) else None
-            
-            # 使用索引切割，確保 tree 和 dl 兩個軌道的資料是對齊的
-            idx_tr, idx_val, y_tr_raw, y_val_raw = train_test_split(
-                X_out_1["tree"].index, y_1, test_size=0.2, random_state=42, stratify=stratify
-            )
-            
-            for track in ["tree", "dl"]:
-                X_dict_tr[track] = X_out_1[track].loc[idx_tr].reset_index(drop=True)
-                X_dict_val[track] = X_out_1[track].loc[idx_val].reset_index(drop=True)
-                
-            y_tr_raw = y_tr_raw.reset_index(drop=True)
-            y_val_raw = y_val_raw.reset_index(drop=True)
-            
-            # 💡 X_out_2 這裡就是已經處理好的 kaggle test_df (雙軌字典)，
-            # 如果你的 Pipeline 最後會直接預測，其實可以直接把它存起來備用！
-
-        else:
-            # 情況 B：沒有給 test_df，interface 已經幫我們切好 80/20 了
-            X_dict_tr, X_dict_val = X_out_1, X_out_2
-            y_tr_raw, y_val_raw = y_1, y_2
-
-        # ==========================================
-        # 📦 封裝與回傳
-        # ==========================================
-        feature_names_dict = {
-            "tree": list(X_dict_tr["tree"].columns),
-            "dl": list(X_dict_tr["dl"].columns)
-        }
-        
-        print("✅ [Pipeline] 雙軌智慧前處理成功！準備進入 HPO/NAS 分流...")
-        
-        # 🚀 強烈建議：把 preprocessors 也回傳，這樣你的 Pipeline 才能把它存成 .pkl 給推論期使用！
-        return X_dict_tr, X_dict_val, y_tr_raw, y_val_raw, feature_names_dict, preprocessors
-        
+        X_tr = X_dict_tr["tree"].values.astype(np.float32)
+        X_te = X_dict_te["tree"].values.astype(np.float32)
+        feature_names = list(X_dict_tr["tree"].columns)
+        return X_tr, X_te, y_tr_raw, y_te_raw, feature_names
     except Exception as _e:
-        import traceback
-        traceback.print_exc() # 印出完整的錯誤 Traceback 方便除錯
-        print(f"❌ [Pipeline] 智慧前處理失敗（{_e}），回退到基本前處理...")
-        
-        # --------- 防呆回退機制 (Fallback) ---------
-        # 如果你原本有 _prepare_X 函式，就在這裡保留你的 fallback 邏輯
-        # 為了避免 Pipeline 當機，回傳假雙軌
-        try:
-            X_all = _prepare_X(train_df, target_col) 
-            feat_names = _get_feature_names(train_df, target_col)
-            y_all_raw = train_df[target_col]
+        print(f"  [Preprocess] 智慧前處理失敗（{_e}），回退到基本前處理")
+        X_all = _prepare_X(df, target_col)
+        feat_names = _get_feature_names(df, target_col)
+        y_all_raw = df[target_col]
+        X_tr, X_te, y_tr_raw, y_te_raw = train_test_split(
+            X_all, y_all_raw, test_size=0.2, random_state=SEED
+        )
+        return X_tr, X_te, y_tr_raw, y_te_raw, feat_names
 
-            X_tr, X_val, y_tr_raw, y_val_raw = train_test_split(
-                X_all, y_all_raw, test_size=0.2, random_state=42
-            )
-            
-            X_dict_tr = {"tree": X_tr, "dl": X_tr}
-            X_dict_val = {"tree": X_val, "dl": X_val}
-            feature_names_dict = {"tree": feat_names, "dl": feat_names}
-            
-            return X_dict_tr, X_dict_val, y_tr_raw, y_val_raw, feature_names_dict, None
-        except:
-            print("🚨 嚴重錯誤：Fallback 基本前處理也失敗了！")
-            raise
 
 def _run_shap_visualization(artifacts_dir: str, X_test_raw: np.ndarray,
                              feature_names: list, dataset_name: str = ""):
@@ -353,42 +200,118 @@ def _run_shap_visualization(artifacts_dir: str, X_test_raw: np.ndarray,
         print(f"\n[Viz] 視覺化跳過（{_e}）")
 
 
-# ── 批次評估模式 ──────────────────────────────────────────────────────────────
-from preprocessing.data_loader import load_and_merge_data
-# ── 批次評估模式 ──────────────────────────────────────────────────────────────
-from preprocessing.data_loader import load_and_merge_data
+def _run_dl_shap_visualization(artifacts_dir: str, X_train_raw: np.ndarray,
+                                X_test_raw: np.ndarray, feature_names: list,
+                                dataset_name: str = "", max_test_samples: int = 200):
+    """Load best DL model (.pt) from artifacts_dir and generate SHAP plots via PermutationExplainer."""
+    try:
+        import torch
+        import sys as _sys
+        _viz_path = os.path.join(HERE, "visualization")
+        if _viz_path not in _sys.path:
+            _sys.path.insert(0, _viz_path)
+        from visualizer import AutoMLVisualizer
+        from src.train import _build_dl_model
+        from src.preprocess import FeatureBuilder
+        from src.config import SEED as _SEED
 
-def run_batch(args, datasets_override=None):
-    """
-    [共用核心] 執行資料集前處理與模型訓練。
-    - 如果沒有 datasets_override，就是正常的 Batch 模式 (去掃描資料夾)。
-    - 如果有 datasets_override，就是 Single 模式 (只跑指定的那一個檔案)。
-    """
-    is_single_mode = datasets_override is not None
+        pt_path = os.path.join(artifacts_dir, "best_dl_model.pt")
+        if not os.path.exists(pt_path):
+            print("[Viz-DL] best_dl_model.pt 不存在，跳過 DL 視覺化"); return
+
+        ckpt        = torch.load(pt_path, map_location="cpu")
+        config      = ckpt["config"]
+        in_features = ckpt["in_features"]
+        n_classes   = ckpt["n_classes"]
+        model_name  = config["model_name"]
+        feature_set = config["feature_set"]
+
+        _model_obj = _build_dl_model(model_name, config["arch_params"], in_features, n_classes)
+        _model_obj.load_state_dict(ckpt["state_dict"])
+        _model_obj.eval()
+        print(f"[Viz-DL] 載入 {model_name}  feature_set={feature_set}"
+              f"  in_features={in_features}  n_classes={n_classes}")
+
+        class _Predictor:
+            def __init__(self, m):
+                self._m = m
+            def predict_proba(self, X):
+                with torch.no_grad():
+                    if isinstance(X, pd.DataFrame):
+                        X = X.values
+                    return torch.softmax(self._m(torch.FloatTensor(X)), dim=1).numpy()
+            def predict(self, X):
+                return self.predict_proba(X).argmax(axis=1)
+
+        predictor = _Predictor(_model_obj)
+
+        # 自動偵測訓練時的 global_cfg，確保特徵維度與 checkpoint 吻合
+        _gcfg_candidates = [
+            {"use_kmeans": True,  "use_kpca": False},
+            {"use_kmeans": False, "use_kpca": False},
+            {"use_kmeans": True,  "use_kpca": True},
+            {"use_kmeans": False, "use_kpca": True},
+        ]
+        fb = None
+        for _gcfg in _gcfg_candidates:
+            _fb_try = FeatureBuilder(feature_set=feature_set, global_cfg=_gcfg).fit(X_train_raw)
+            if _fb_try.transform(X_train_raw[:1]).shape[1] == in_features:
+                fb = _fb_try
+                print(f"[Viz-DL] FeatureBuilder(feature_set={feature_set},"
+                      f" use_kmeans={_gcfg['use_kmeans']}) → {in_features} 維")
+                break
+        if fb is None:
+            print(f"[Viz-DL] 警告：無法自動匹配 in_features={in_features}，使用預設 global_cfg")
+            fb = FeatureBuilder(feature_set=feature_set).fit(X_train_raw)
+
+        X_tf = fb.transform(X_test_raw)
+        col_names = _build_shap_col_names(feature_set, feature_names, X_tf.shape[1])
+        X_df = pd.DataFrame(X_tf, columns=col_names)
+
+        if len(X_df) > max_test_samples:
+            rng = np.random.default_rng(_SEED)
+            idx = rng.choice(len(X_df), size=max_test_samples, replace=False)
+            X_df = X_df.iloc[idx].reset_index(drop=True)
+            print(f"[Viz-DL] X_test 取樣 {max_test_samples}/{X_tf.shape[0]} 筆"
+                  f"（可用 --dl-shap-samples 調整）")
+
+        viz_output = os.path.join(artifacts_dir, "shap_plots_dl")
+        print(f"[Viz-DL] 執行 SHAP（{X_df.shape[0]} 筆 × {X_df.shape[1]} 特徵）...")
+        viz = AutoMLVisualizer(model=predictor, X_test=X_df, output_dir=viz_output)
+
+        shap_mat = viz._get_shap_matrix()
+        top_feat = col_names[int(np.abs(shap_mat).mean(0).argmax())]
+        viz.generate_all_plots(
+            sample_index=0,
+            target_feature=top_feat,
+            prefix=f"{dataset_name}_dl",
+        )
+        print(f"\n[Viz-DL] SHAP 圖表已輸出 → {viz_output}")
+    except Exception as _e:
+        print(f"\n[Viz-DL] DL 視覺化跳過（{_e}）")
+
+
+# ── 批次評估模式 ──────────────────────────────────────────────────────────────
+
+def run_batch(args):
+    openml_dir = os.path.join(HERE, args.openml_dir)
+    reg_dir    = os.path.join(HERE, args.reg_dir)
+
     datasets = []
-
-    if is_single_mode:
-        datasets = datasets_override
+    if os.path.isdir(openml_dir):
+        datasets += _find_datasets(openml_dir, args.top_n, last=args.last)
     else:
-        openml_dir = os.path.join(HERE, getattr(args, "openml_dir", ""))
-        reg_dir    = os.path.join(HERE, getattr(args, "reg_dir", ""))
-        if os.path.isdir(openml_dir):
-            datasets += _find_datasets(openml_dir, args.top_n, last=args.last)
-        else:
-            print(f"[警告] 找不到 OpenML 目錄：{openml_dir}")
-        if os.path.isdir(reg_dir):
-            datasets += _find_datasets(reg_dir, args.reg_top_n, last=args.last, force_task="regression")
-        if not datasets:
-            print("[錯誤] 無可用資料集"); sys.exit(1)
+        print(f"[警告] 找不到 OpenML 目錄：{openml_dir}")
+    if os.path.isdir(reg_dir):
+        datasets += _find_datasets(reg_dir, args.reg_top_n, last=args.last, force_task="regression")
+    if not datasets:
+        print("[錯誤] 無可用資料集"); sys.exit(1)
 
-    mode_name = "單資料集" if is_single_mode else "批次"
     print(f"\n{'='*65}")
-    print(f"  Pipeline {mode_name}模式（非時序）  ─  {len(datasets)} 個資料集  fast={args.fast}")
+    print(f"  Pipeline 批次評估（非時序）  ─  {len(datasets)} 個資料集  fast={args.fast}")
     print(f"{'='*65}")
-    
     results = []
-    out_file_name = "pipeline_single_results.csv" if is_single_mode else "pipeline_batch_results.csv"
-    out_path = os.path.join(HERE, out_file_name)
+    out_path = os.path.join(HERE, "pipeline_batch_results.csv")
 
     def _flush():
         if results:
@@ -405,26 +328,12 @@ def run_batch(args, datasets_override=None):
         t_ds = time.time()
         task = "?"
         try:
-            # 🚀 統一使用 DataLoader 進行記憶體壓縮 (支援字串或列表)
-            df = load_and_merge_data(csv_path)
-            
-            # 🚀 動態決定 target_col：單檔模式吃 args.target，批次模式自動偵測
-            if is_single_mode and getattr(args, "target", None):
-                target_col = args.target
-                if target_col not in df.columns:
-                    print(f"[錯誤] 找不到目標欄位 '{target_col}'，可用欄位：{list(df.columns)}")
-                    sys.exit(1)
-            else:
-                target_col = _find_target_col(df)
-                
+            df = pd.read_csv(csv_path)
+            target_col = _find_target_col(df)
             df = df.dropna(subset=[target_col]).reset_index(drop=True)
             y_raw = df[target_col]
             task = force_task if force_task else _auto_detect_task(y_raw)
-            
-            # 呼叫你新版的智慧前處理
-            X_dict_tr, X_dict_te, y_tr_raw, y_te_raw, feature_names_dict, preprocessors = _smart_prepare(df, target_col)
-            
-            artifacts_dir = os.path.join(ARTIFACTS_DIR, "single" if is_single_mode else "batch", dataset_name)
+            X_tr, X_te, y_tr_raw, y_te_raw, feature_names = _smart_prepare(df, target_col)
 
             if task == "classification":
                 le = LabelEncoder()
@@ -432,17 +341,20 @@ def run_batch(args, datasets_override=None):
                 y_tr = le.transform(y_tr_raw.astype(str).values)
                 y_te = le.transform(y_te_raw.astype(str).values)
                 n_classes = len(le.classes_)
-                print(f"  target={target_col}  n_train={len(y_tr)}  n_test={len(y_te)}  n_classes={n_classes}  split=Random Stratified")
+                print(f"  n_train={len(y_tr)}  n_test={len(y_te)}  n_classes={n_classes}  split=Random Stratified")
 
+                _batch_artifacts = os.path.join(ARTIFACTS_DIR, "batch", dataset_name)
                 budget = _pl.TimeBudget(limit_sec=args.time_limit, t_start=t_ds)
                 cfg = _pl.get_cfg(args.fast, n_samples=len(y_tr))
                 cfg["is_timeseries"] = False
-                
-                # 分類引擎有 Router，可以直接傳字典
                 result = _pl.run(
-                    X_dict_tr, y_tr, X_dict_te, n_classes, cfg, budget,
-                    skip_tabular=args.skip_tabular, skip_dl=args.skip_dl,
-                    no_nas=args.no_nas, is_ts=False, artifacts_dir=artifacts_dir, metric=args.metric,
+                    X_tr, y_tr, X_te, n_classes, cfg, budget,
+                    skip_tabular=args.skip_tabular,
+                    skip_dl=args.skip_dl,
+                    no_nas=args.no_nas,
+                    is_ts=False,
+                    artifacts_dir=_batch_artifacts,
+                    metric=args.metric,
                 )
                 from src.metrics import calculate_score, get_metric_name
                 score_b = calculate_score(y_te, result.test_blend, metric=args.metric)
@@ -452,47 +364,37 @@ def run_batch(args, datasets_override=None):
                 acc  = round(calculate_score(y_te, best_preds, metric="accuracy"), 4)
                 f1   = round(calculate_score(y_te, best_preds, metric="f1"), 4)
                 elapsed = round(time.time() - t_ds, 1)
-                
                 print(f"\n  [結果] Blend → {get_metric_name(args.metric)}={score_b:.4f}")
                 print(f"  [結果] Stack → {get_metric_name(args.metric)}={score_s:.4f}")
                 print(f"  [耗時] {elapsed}s")
-                
                 if args.viz:
-                    # SHAP 統一使用 tree 軌道畫圖
-                    _run_shap_visualization(artifacts_dir, X_dict_te.get("tree", X_dict_te), feature_names_dict.get("tree", []), dataset_name)
-                    
+                    _run_shap_visualization(_batch_artifacts, X_te, feature_names, dataset_name)
+                    _run_dl_shap_visualization(_batch_artifacts, X_tr, X_te, feature_names, dataset_name, args.dl_shap_samples)
                 results.append({
                     "dataset": dataset_name, "type": "Tab", "task": task,
                     "n_train": len(y_tr), "n_test": len(y_te),
-                    "accuracy": acc, "f1_macro": f1, "rmse": None, "r2": None,
+                    "accuracy": acc, "f1_macro": f1,
+                    "rmse": None, "r2": None,
                     "score": best_score, "elapsed_s": elapsed,
                 })
 
             else:  # regression
                 y_tr = np.asarray(y_tr_raw.values, dtype=np.float32).ravel()
                 y_te = np.asarray(y_te_raw.values, dtype=np.float32).ravel()
-                print(f"  target={target_col}  n_train={len(y_tr)}  n_test={len(y_te)}  task=regression  split=Random")
+                print(f"  n_train={len(y_tr)}  n_test={len(y_te)}  task=regression  split=Random")
 
                 budget = _pl.TimeBudget(limit_sec=args.time_limit, t_start=t_ds)
                 cfg = _pt.get_cfg_time(args.fast, n_samples=len(y_tr))
-                
-                # 🛡️ 迴歸引擎專用防呆：因為 pipeline_time 可能沒有 router，我們把 tree 拆出來傳
-                X_tr_pass = X_dict_tr["tree"] if isinstance(X_dict_tr, dict) else X_dict_tr
-                X_te_pass = X_dict_te["tree"] if isinstance(X_dict_te, dict) else X_dict_te
-                
-                # 將神經網路需要的資料藏在 cfg 裡面帶進去
-                if isinstance(X_dict_tr, dict):
-                    cfg["X_train_dl"] = X_dict_tr.get("dl", X_tr_pass)
-                    cfg["X_test_dl"]  = X_dict_te.get("dl", X_te_pass)
-                
                 result = _pt.run_regression(
-                    X_tr_pass, y_tr, X_te_pass, cfg, budget,
-                    skip_tabular=args.skip_tabular, skip_dl=args.skip_dl,
-                    artifacts_dir=artifacts_dir, metric=args.reg_metric,
+                    X_tr, y_tr, X_te, cfg, budget,
+                    skip_tabular=args.skip_tabular,
+                    skip_dl=args.skip_dl,
+                    artifacts_dir=os.path.join(ARTIFACTS_DIR, "batch", dataset_name),
+                    metric=args.reg_metric,
                 )
-                rmse_b, rmse_s, r2_b, r2_s, best_rmse, best_r2, primary_score = _eval_regression(y_te, result, args.reg_metric)
+                rmse_b, rmse_s, r2_b, r2_s, best_rmse, best_r2, primary_score = \
+                    _eval_regression(y_te, result, args.reg_metric)
                 elapsed = round(time.time() - t_ds, 1)
-                
                 print(f"\n  [結果] Blend → RMSE={rmse_b:.4f}  R2={r2_b:.4f}")
                 print(f"  [結果] Stack → RMSE={rmse_s:.4f}  R2={r2_s:.4f}")
                 print(f"  [耗時] {elapsed}s")
@@ -512,14 +414,15 @@ def run_batch(args, datasets_override=None):
             results.append({
                 "dataset": dataset_name, "type": "Tab", "task": task,
                 "n_train": None, "n_test": None,
-                "accuracy": None, "f1_macro": None, "rmse": None, "r2": None,
+                "accuracy": None, "f1_macro": None,
+                "rmse": None, "r2": None,
                 "score": None, "elapsed_s": round(time.time() - t_ds, 1),
             })
             _flush()
             _flush_result()
 
     print(f"\n{'='*65}")
-    print(f"  SUMMARY — Pipeline（非時序 {mode_name}模式）")
+    print("  BATCH SUMMARY — Pipeline（非時序）")
     print(f"{'='*65}")
     print(pd.DataFrame(results).to_string(index=False))
     _flush()
@@ -527,93 +430,52 @@ def run_batch(args, datasets_override=None):
     print(f"{'='*65}\n")
 
 
-# ── 單一 CSV 模式 (轉接器) ────────────────────────────────────────────────────────
+# ── 單一 CSV 模式 ──────────────────────────────────────────────────────────────
 
 def run_single(args):
-    """
-    接收單一 CSV 的參數，將其包裝成陣列後，直接轉接給 run_batch 處理。
-    """
     csv_path = args.csv
     if not os.path.isfile(csv_path):
         print(f"[錯誤] 找不到檔案：{csv_path}"); sys.exit(1)
-        
-    if not getattr(args, "target", None):
-        print("[錯誤] --csv 模式需明確指定 --target 目標欄位名稱。")
-        sys.exit(1)
 
     dataset_name = os.path.splitext(os.path.basename(csv_path))[0]
-    single_dataset_list = [(dataset_name, csv_path, None)]
-    run_batch(args, datasets_override=single_dataset_list)
-
-# ── 預切分模式 (支援多檔列表 + 雙軌前處理) ────────────────────────────────────────────────
-
-def run_presplit(args):
-    """用戶手動提供 TRAIN / TEST 檔案 (支援清單)，直接進入雙軌前處理並訓練。"""
-    
-    # 1. 處理訓練集與測試集路徑 (支援 args.train 為列表)
-    train_paths = [os.path.abspath(p) for p in args.train] if isinstance(args.train, list) else [os.path.abspath(args.train)]
-    test_path = os.path.abspath(args.test) if args.test else None
-    
-    # 2. 檢查檔案是否存在
-    for p in train_paths + ([test_path] if test_path else []):
-        if not p or not os.path.isfile(p):
-            print(f"[錯誤] 找不到檔案：{p}"); sys.exit(1)
-
-    base = os.path.splitext(os.path.basename(train_paths[0]))[0]
-    dataset_name = base[:-6] if base.endswith("_TRAIN") else base
-
     print(f"\n{'='*65}")
-    print(f"  Pipeline 預切分模式（非時序）  ─  {dataset_name}  |  device={DEVICE}")
+    print(f"  Pipeline 單資料集模式（非時序）  ─  {dataset_name}")
     print(f"{'='*65}")
+    t_ds = time.time()
 
-    # 3. 使用 DataLoader 自動壓縮與合併
-    train_df = load_and_merge_data(train_paths)
-
-    if test_path:
-        # 將 test.csv 當主表，並把 train_paths 裡的 4 個副表接在後面一起送去合併
-        test_paths = [test_path] + train_paths[1:]
-        test_df = load_and_merge_data(test_paths)
-
-    if not getattr(args, "target", None) or args.target not in train_df.columns:
-        print(f"[錯誤] --train/--test 模式需明確指定 --target，可用欄位：{list(train_df.columns)}")
+    df = pd.read_csv(csv_path)
+    if not getattr(args, "target", None):
+        print(f"[錯誤] --csv 模式需以 --target 明確指定目標欄位名稱。可用欄位：{list(df.columns)}")
         sys.exit(1)
     target_col = args.target
+    if target_col not in df.columns:
+        print(f"[錯誤] 找不到目標欄位 '{target_col}'，可用欄位：{list(df.columns)}")
+        sys.exit(1)
 
-    train_df = train_df.dropna(subset=[target_col]).reset_index(drop=True)
-    if test_df is not None and target_col in test_df.columns:
-        test_df = test_df.dropna(subset=[target_col]).reset_index(drop=True)
-    
-    y_tr_raw = train_df[target_col]
-    task = _auto_detect_task(y_tr_raw)
+    y_raw = df[target_col]
+    task = _auto_detect_task(y_raw)
+    X_tr, X_te, y_tr_raw, y_te_raw, feature_names = _smart_prepare(df, target_col)
 
-    # 🚀 4. 呼叫新版雙軌智慧前處理！(傳入 test_df 會自動啟動對抗驗證)
-    X_dict_tr, X_dict_te, y_tr_raw, y_te_raw, feature_names_dict, _ = _smart_prepare(
-        train_df, target_col, test_df=test_df
-    )
-
-    t_ds = time.time()
-    artifacts_dir = os.path.join(ARTIFACTS_DIR, "single", dataset_name)
-
-    # 5. 分類或迴歸任務分流
     if task == "classification":
         le = LabelEncoder()
-        le.fit(y_tr_raw.astype(str).values)
+        le.fit(y_raw.astype(str).values)
         y_tr = le.transform(y_tr_raw.astype(str).values)
-        
-        # 安全轉換測試集標籤
-        classes_set = set(le.classes_)
-        y_te = np.array([le.transform([str(v)])[0] if str(v) in classes_set else 0 for v in y_te_raw], dtype=np.int64)
+        y_te = le.transform(y_te_raw.astype(str).values)
         n_classes = len(le.classes_)
-        print(f"  n_train={len(y_tr)}  n_test={len(y_te)}  n_classes={n_classes}  task=classification")
+        print(f"  target={target_col}  n_train={len(y_tr)}  n_test={len(y_te)}  n_classes={n_classes}")
 
+        _single_artifacts = os.path.join(ARTIFACTS_DIR, "single", dataset_name)
         budget = _pl.TimeBudget(limit_sec=args.time_limit, t_start=t_ds)
         cfg = _pl.get_cfg(args.fast, n_samples=len(y_tr))
         cfg["is_timeseries"] = False
-        
         result = _pl.run(
-            X_dict_tr, y_tr, X_dict_te, n_classes, cfg, budget,
-            skip_tabular=args.skip_tabular, skip_dl=args.skip_dl,
-            no_nas=args.no_nas, is_ts=False, artifacts_dir=artifacts_dir, metric=args.metric,
+            X_tr, y_tr, X_te, n_classes, cfg, budget,
+            skip_tabular=args.skip_tabular,
+            skip_dl=args.skip_dl,
+            no_nas=args.no_nas,
+            is_ts=False,
+            artifacts_dir=_single_artifacts,
+            metric=args.metric,
         )
         from src.metrics import calculate_score, get_metric_name
         score_b = calculate_score(y_te, result.test_blend, metric=args.metric)
@@ -623,7 +485,108 @@ def run_presplit(args):
         print(f"  [結果] Stack → {get_metric_name(args.metric)}={score_s:.4f}")
         print(f"  [耗時] {elapsed}s")
         if args.viz:
-            _run_shap_visualization(artifacts_dir, X_dict_te.get("tree", X_dict_te), feature_names_dict.get("tree", []), dataset_name)
+            _run_shap_visualization(_single_artifacts, X_te, feature_names, dataset_name)
+            _run_dl_shap_visualization(_single_artifacts, X_tr, X_te, feature_names, dataset_name, args.dl_shap_samples)
+
+    else:  # regression
+        y_tr = np.asarray(y_tr_raw.values, dtype=np.float32).ravel()
+        y_te = np.asarray(y_te_raw.values, dtype=np.float32).ravel()
+        print(f"  target={target_col}  n_train={len(y_tr)}  n_test={len(y_te)}  task=regression")
+
+        budget = _pl.TimeBudget(limit_sec=args.time_limit, t_start=t_ds)
+        cfg = _pt.get_cfg_time(args.fast, n_samples=len(y_tr))
+        result = _pt.run_regression(
+            X_tr, y_tr, X_te, cfg, budget,
+            skip_tabular=args.skip_tabular,
+            skip_dl=args.skip_dl,
+            artifacts_dir=os.path.join(ARTIFACTS_DIR, "single", dataset_name),
+            metric=args.reg_metric,
+        )
+        rmse_b, rmse_s, r2_b, r2_s, _, _, _ = _eval_regression(y_te, result, args.reg_metric)
+        elapsed = round(time.time() - t_ds, 1)
+        print(f"\n  [結果] Blend → RMSE={rmse_b:.4f}  R2={r2_b:.4f}")
+        print(f"  [結果] Stack → RMSE={rmse_s:.4f}  R2={r2_s:.4f}")
+        print(f"  [耗時] {elapsed}s")
+
+    print(f"{'='*65}\n")
+
+
+# ── 預切分模式 ────────────────────────────────────────────────────────────────
+
+def run_presplit(args):
+    """用戶手動提供 TRAIN / TEST 兩個 CSV，直接使用不再自行切分。"""
+    train_path = os.path.abspath(args.train)
+    test_path  = os.path.abspath(args.test)
+    for p, label in [(train_path, "TRAIN"), (test_path, "TEST")]:
+        if not os.path.isfile(p):
+            print(f"[錯誤] 找不到{label}檔案：{p}"); sys.exit(1)
+
+    base = os.path.splitext(os.path.basename(train_path))[0]
+    dataset_name = base[:-6] if base.endswith("_TRAIN") else base
+
+    print(f"\n{'='*65}")
+    print(f"  Pipeline 預切分模式（非時序）  ─  {dataset_name}  |  device={DEVICE}")
+    print(f"{'='*65}")
+
+    train_df = pd.read_csv(train_path)
+    test_df  = pd.read_csv(test_path)
+    if not args.target:
+        print(f"[錯誤] --train/--test 模式需以 --target 明確指定目標欄位名稱。可用欄位：{list(train_df.columns)}")
+        sys.exit(1)
+    target_col = args.target
+    if target_col not in train_df.columns:
+        print(f"[錯誤] 找不到目標欄位 '{target_col}'，可用欄位：{list(train_df.columns)}")
+        sys.exit(1)
+
+    train_df = train_df.dropna(subset=[target_col]).reset_index(drop=True)
+    test_df  = test_df.dropna(subset=[target_col]).reset_index(drop=True)
+
+    y_tr_raw = train_df[target_col]
+    y_te_raw = test_df[target_col]
+    task = _auto_detect_task(y_tr_raw)
+    feature_names = _get_feature_names(train_df, target_col)
+
+    X_tr = _prepare_X(train_df, target_col)
+    X_te = _prepare_X(test_df, target_col)
+    min_cols = min(X_tr.shape[1], X_te.shape[1])
+    X_tr = X_tr[:, :min_cols]
+    X_te = X_te[:, :min_cols]
+
+    t_ds = time.time()
+
+    if task == "classification":
+        le = LabelEncoder()
+        y_tr = le.fit_transform(y_tr_raw.astype(str).values)
+        classes_set = set(le.classes_)
+        y_te = np.array(
+            [le.transform([str(v)])[0] if str(v) in classes_set else 0
+             for v in y_te_raw], dtype=np.int64)
+        n_classes = len(le.classes_)
+        print(f"  n_train={len(y_tr)}  n_test={len(y_te)}  n_classes={n_classes}  task=classification")
+
+        _presplit_artifacts = os.path.join(ARTIFACTS_DIR, "single", dataset_name)
+        budget = _pl.TimeBudget(limit_sec=args.time_limit, t_start=t_ds)
+        cfg = _pl.get_cfg(args.fast, n_samples=len(y_tr))
+        cfg["is_timeseries"] = False
+        result = _pl.run(
+            X_tr, y_tr, X_te, n_classes, cfg, budget,
+            skip_tabular=args.skip_tabular,
+            skip_dl=args.skip_dl,
+            no_nas=args.no_nas,
+            is_ts=False,
+            artifacts_dir=_presplit_artifacts,
+            metric=args.metric,
+        )
+        from src.metrics import calculate_score, get_metric_name
+        score_b = calculate_score(y_te, result.test_blend, metric=args.metric)
+        score_s = calculate_score(y_te, result.test_stack, metric=args.metric)
+        elapsed = round(time.time() - t_ds, 1)
+        print(f"\n  [結果] Blend → {get_metric_name(args.metric)}={score_b:.4f}")
+        print(f"  [結果] Stack → {get_metric_name(args.metric)}={score_s:.4f}")
+        print(f"  [耗時] {elapsed}s")
+        if args.viz:
+            _run_shap_visualization(_presplit_artifacts, X_te, feature_names, dataset_name)
+            _run_dl_shap_visualization(_presplit_artifacts, X_tr, X_te, feature_names, dataset_name, args.dl_shap_samples)
 
     else:  # regression
         y_tr = np.asarray(y_tr_raw.values, dtype=np.float32).ravel()
@@ -632,18 +595,12 @@ def run_presplit(args):
 
         budget = _pl.TimeBudget(limit_sec=args.time_limit, t_start=t_ds)
         cfg = _pt.get_cfg_time(args.fast, n_samples=len(y_tr))
-        
-        # 🛡️ 迴歸防呆處理
-        X_tr_pass = X_dict_tr["tree"] if isinstance(X_dict_tr, dict) else X_dict_tr
-        X_te_pass = X_dict_te["tree"] if isinstance(X_dict_te, dict) else X_dict_te
-        if isinstance(X_dict_tr, dict):
-            cfg["X_train_dl"] = X_dict_tr.get("dl", X_tr_pass)
-            cfg["X_test_dl"]  = X_dict_te.get("dl", X_te_pass)
-
         result = _pt.run_regression(
-            X_tr_pass, y_tr, X_te_pass, cfg, budget,
-            skip_tabular=args.skip_tabular, skip_dl=args.skip_dl,
-            artifacts_dir=artifacts_dir, metric=args.reg_metric,
+            X_tr, y_tr, X_te, cfg, budget,
+            skip_tabular=args.skip_tabular,
+            skip_dl=args.skip_dl,
+            artifacts_dir=os.path.join(ARTIFACTS_DIR, "single", dataset_name),
+            metric=args.reg_metric,
         )
         rmse_b, rmse_s, r2_b, r2_s, _, _, _ = _eval_regression(y_te, result, args.reg_metric)
         elapsed = round(time.time() - t_ds, 1)
@@ -690,11 +647,8 @@ def main():
     # 單一 CSV / 預切分模式旗標
     parser.add_argument("--csv",          type=str, default=None,
                         help="單一 CSV 檔案路徑（80/20 random split）")
-    
-    # 🚀 這裡加上了 nargs='+'，讓 --train 可以接收多個檔案變成 List
-    parser.add_argument("--train",        nargs='+', default=None,
-                        help="訓練集 CSV 路徑清單（支援多檔，搭配 --test 使用預切分模式）")
-    
+    parser.add_argument("--train",        type=str, default=None,
+                        help="訓練集 CSV 路徑（搭配 --test 使用預切分模式）")
     parser.add_argument("--test",         type=str, default=None,
                         help="測試集 CSV 路徑（搭配 --train 使用預切分模式）")
     parser.add_argument("--target",       type=str, default=None,
@@ -703,6 +657,8 @@ def main():
                         help="附加結果 CSV（含 source 欄，附加模式）")
     parser.add_argument("--viz",          action="store_true",
                         help="訓練完成後自動產生 SHAP 視覺化圖表（需要 shap + plotly + kaleido）")
+    parser.add_argument("--dl-shap-samples", type=int, default=200,
+                        help="DL SHAP 使用的 X_test 樣本數上限（預設 200，控制 PermutationExplainer 耗時）")
 
     args = parser.parse_args()
 
@@ -716,6 +672,7 @@ def main():
         parser.print_help()
         print("\n[提示] 請指定 --csv <path>、--train/--test 或 --batch 來執行 Pipeline。")
         print("[提示] 時序資料（UCR）請改用 run_pipeline_time.py")
+
 
 if __name__ == "__main__":
     main()
