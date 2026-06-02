@@ -64,13 +64,18 @@ class TSDataProcessor:
         n_nans = int(df.isna().sum().sum())
         if n_nans > 0:
             print(f"  [TS 模組] 發現 {n_nans} 個缺失值，執行時序安全補值 (僅 ffill)...")
-            # 只用「過去」的值往前補（安全）。bfill 會用到未來，已移除。
-            df = df.ffill()
-            # 開頭沒有過去可補的殘留 NaN，用 0 兜底（不引入未來資訊）
-            remaining = int(df.isna().sum().sum())
+            
+            # 🚀 修正：排除 target_col，確保不會把訓練集的答案往下補給測試集
+            cols_to_fill = [c for c in df.columns if c != self.target_col]
+            
+            # 只針對特徵欄位進行補值
+            df[cols_to_fill] = df[cols_to_fill].ffill()
+            
+            # 開頭沒有過去可補的殘留 NaN，用 0 兜底
+            remaining = int(df[cols_to_fill].isna().sum().sum())
             if remaining > 0:
                 print(f"  [TS 模組] 開頭仍有 {remaining} 個無過去可補的缺失，以 0 兜底。")
-                df = df.fillna(0)
+                df[cols_to_fill] = df[cols_to_fill].fillna(0)
 
         # ── 3. 🔠 類別欄位安全編碼（只在 train 段 fit）─────────────────
         cat_cols = [
