@@ -36,7 +36,7 @@ from src import pipeline_time as _pt
 
 _RESULT_COLS = [
     "source", "dataset", "type", "task", "n_train", "n_test",
-    "accuracy", "f1_macro", "rmse", "r2", "score", "elapsed_s",
+    "accuracy", "f1_macro", "rmse", "r2", "score", "elapsed_s", "fast",
 ]
 
 def _append_result(out_path: str, row: dict):
@@ -342,11 +342,33 @@ def run_batch(args):
         if results:
             pd.DataFrame(results).to_csv(out_path, index=False)
 
+    result_file = getattr(args, "result_file", None)
+    out_path_rf = os.path.join(HERE, result_file) if result_file else None
+
     def _flush_result():
-        if getattr(args, "result_file", None) and results:
-            _append_result(args.result_file, {**results[-1], "source": "pipeline"})
+        if out_path_rf and results:
+            _append_result(out_path_rf, results[-1])
+
+    # 斷點續跑：只在使用 --result-file 時，跳過 source==pipeline 且 fast 相同的已完成記錄
+    done_datasets = set()
+    if out_path_rf and os.path.exists(out_path_rf):
+        try:
+            _existing = pd.read_csv(out_path_rf)
+            if "source" in _existing.columns and "fast" in _existing.columns:
+                _mask = (_existing["source"] == "pipeline") & \
+                        (_existing["fast"].fillna(False).astype(bool) == bool(args.fast))
+                done_datasets = set(_existing.loc[_mask, "dataset"].tolist())
+            else:
+                done_datasets = set(_existing["dataset"].tolist())
+            if done_datasets:
+                print(f"  [Resume] 已完成 {len(done_datasets)} 個，將跳過: {sorted(done_datasets)}")
+        except Exception:
+            pass
 
     for dataset_name, csv_path, force_task in datasets:
+        if dataset_name in done_datasets:
+            print(f"\n  [Skip] {dataset_name}（已有結果，跳過）")
+            continue
         print(f"\n{'─'*65}")
         print(f"  [Tab] {dataset_name}  |  device={DEVICE}")
         print(f"{'─'*65}")
@@ -396,11 +418,13 @@ def run_batch(args):
                     _run_shap_visualization(_batch_artifacts, X_te, feature_names, dataset_name)
                     _run_dl_shap_visualization(_batch_artifacts, X_tr, X_te, feature_names, dataset_name, args.dl_shap_samples)
                 results.append({
+                    "source": "pipeline",
                     "dataset": dataset_name, "type": "Tab", "task": task,
                     "n_train": len(y_tr), "n_test": len(y_te),
                     "accuracy": acc, "f1_macro": f1,
                     "rmse": None, "r2": None,
                     "score": best_score, "elapsed_s": elapsed,
+                    "fast": args.fast,
                 })
 
             else:  # regression
@@ -424,11 +448,13 @@ def run_batch(args):
                 print(f"  [結果] Stack → RMSE={rmse_s:.4f}  R2={r2_s:.4f}")
                 print(f"  [耗時] {elapsed}s")
                 results.append({
+                    "source": "pipeline",
                     "dataset": dataset_name, "type": "Tab", "task": task,
                     "n_train": len(y_tr), "n_test": len(y_te),
                     "accuracy": None, "f1_macro": None,
                     "rmse": round(best_rmse, 4), "r2": round(best_r2, 4),
                     "score": round(primary_score, 4), "elapsed_s": elapsed,
+                    "fast": args.fast,
                 })
 
             _flush()
@@ -437,11 +463,13 @@ def run_batch(args):
         except Exception:
             traceback.print_exc()
             results.append({
+                "source": "pipeline",
                 "dataset": dataset_name, "type": "Tab", "task": task,
                 "n_train": None, "n_test": None,
                 "accuracy": None, "f1_macro": None,
                 "rmse": None, "r2": None,
                 "score": None, "elapsed_s": round(time.time() - t_ds, 1),
+                "fast": args.fast,
             })
             _flush()
             _flush_result()
@@ -521,7 +549,7 @@ def run_single(args):
                 "source": "pipeline", "dataset": dataset_name, "type": "Tab", "task": "classification",
                 "n_train": len(y_tr), "n_test": len(y_te),
                 "accuracy": acc, "f1_macro": f1, "rmse": None, "r2": None,
-                "score": best_score, "elapsed_s": elapsed,
+                "score": best_score, "elapsed_s": elapsed, "fast": args.fast,
             })
             print(f"  結果已寫入 → {args.result_file}")
 
@@ -550,7 +578,7 @@ def run_single(args):
                 "n_train": len(y_tr), "n_test": len(y_te),
                 "accuracy": None, "f1_macro": None,
                 "rmse": round(best_rmse, 4), "r2": round(best_r2, 4),
-                "score": round(primary_score, 4), "elapsed_s": elapsed,
+                "score": round(primary_score, 4), "elapsed_s": elapsed, "fast": args.fast,
             })
             print(f"  結果已寫入 → {args.result_file}")
 
