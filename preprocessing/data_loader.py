@@ -58,7 +58,7 @@ def load_and_merge_data(data_source: Union[pd.DataFrame, str, List[str]], main_f
                         if pd.api.types.is_numeric_dtype(df[col]):
                             agg_funcs[col] = 'mean'
                         else:
-                            agg_funcs[col] = lambda x: ' '.join(x.astype(str).unique())
+                            agg_funcs[col] = lambda x: ' '.join([str(v) for v in x.dropna().unique() if str(v).strip() != ''])
                 
                 if agg_funcs:
                     df = df.groupby(join_keys).agg(agg_funcs).reset_index()
