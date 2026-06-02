@@ -474,9 +474,10 @@ def preprocess_for_training(
     return X_train_dict, X_test_dict, y_train, y_test, preprocessors
 
 def preprocess_for_timeseries(
-    df: pd.DataFrame, 
-    time_col: str = None, 
-    target_col: str = None
+    df: pd.DataFrame,
+    time_col: str = None,
+    target_col: str = None,
+    n_train: int = None
 ) -> pd.DataFrame:
     """
     [時序專用入口] 
@@ -492,6 +493,9 @@ def preprocess_for_timeseries(
         時間欄位的名稱 (例如 'date', 'timestamp')。
     target_col : str, optional
         預測目標欄位的名稱 (例如 'sales', 'pressure')。
+    n_train : int, optional
+        訓練段列數。若呼叫端是 concat([train, test]) 後傳入，請帶 len(train)，
+        類別編碼便只用 train 段 fit，杜絕 test 分布洩漏回 train。
 
     Returns
     -------
@@ -499,11 +503,11 @@ def preprocess_for_timeseries(
         全部轉為純數值 (Float32)、無缺失值、按時間排序完畢的乾淨資料表。
     """
     print("\n>>> [Interface] 啟動時序專屬預處理管線...")
-    
+
     from preprocessing.core.ts_preprocessor import TSDataProcessor
-    
+
     # 1. 呼叫我們剛剛寫好的「時序戰術指揮官」
-    processor = TSDataProcessor(time_col=time_col, target_col=target_col)
+    processor = TSDataProcessor(time_col=time_col, target_col=target_col, n_train=n_train)
     
     # 2. 執行端到端 (End-to-End) 的安全處理
     clean_df = processor.process(df)
@@ -580,8 +584,8 @@ def preprocess_for_inference(
     # =========================================================
     # 🛡️ 終極防線 (推論專用版)：確保 Scikit-Learn 引擎絕對不會吃到 pd.NA
     # =========================================================
-    import pandas as pd
-    import numpy as np
+    # 註：pd / np 已在模組頂端 import；此處不可再區域 import，
+    #     否則會讓 np 在整個函式變成區域變數，導致前面 (Phase 2) 的 np.* 觸發 UnboundLocalError。
     if isinstance(X_aligned, pd.DataFrame):
         X_aligned = X_aligned.copy() # 避免 SettingWithCopyWarning
         for col in X_aligned.columns:
