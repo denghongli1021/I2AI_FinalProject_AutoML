@@ -565,12 +565,17 @@ def run_new_ts_batch_pipeline(args):
     result_file = getattr(args, "result_file", None)
     out_path = os.path.join(HERE, result_file) if result_file else os.path.join(HERE, "time_results.csv")
 
-    # 斷點續跑：跳過已寫入結果的資料集
+    # 斷點續跑：只跳過 source==pipeline 且 fast 值相同的記錄（區分 fast/full 兩次跑）
     done_datasets = set()
     if os.path.exists(out_path):
         try:
             _existing = pd.read_csv(out_path)
-            done_datasets = set(_existing["dataset"].tolist())
+            if "source" in _existing.columns and "fast" in _existing.columns:
+                _mask = (_existing["source"] == "pipeline") & \
+                        (_existing["fast"].fillna(False).astype(bool) == bool(args.fast))
+                done_datasets = set(_existing.loc[_mask, "dataset"].tolist())
+            else:
+                done_datasets = set(_existing["dataset"].tolist())
             if done_datasets:
                 print(f"  [Resume] 已完成 {len(done_datasets)} 個，將跳過: {sorted(done_datasets)}")
         except Exception:

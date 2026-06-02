@@ -5,3 +5,5 @@ pipeline,CLS_AllGestureWiimoteX,TS,classification,300,700,0.5286,0.5335,,,0.5335
 pipeline,CLS_AllGestureWiimoteY,TS,classification,300,700,0.6457,0.6426,,,0.6426,2158.2,True
 pipeline,CLS_AllGestureWiimoteZ,TS,classification,300,700,0.5729,0.5659,,,0.5659,2054.4,True
 pipeline,REG_AcousticContaminationMadrid_nmv,TS,regression,166,72,,,3.6262,0.6769,3.6262,842.6,True
+pipeline,REG_AluminiumConcentration,TS,regression,440,189,,,232.8417,0.7576,232.8417,2030.7,True
+pipeline,REG_AppliancesEnergy,TS,regression,95,42,,,3.4674,-0.017,3.4674,5174.7,True

@@ -165,12 +165,17 @@ def run_new_ts_batch(args):
     result_file = getattr(args, "result_file", None)
     out_path = os.path.join(HERE, result_file) if result_file else os.path.join(HERE, "time_results.csv")
 
-    # 斷點續跑：跳過已寫入結果的資料集
+    # 斷點續跑：只跳過 source==baseline 的記錄（不干擾 pipeline 結果）
     done_datasets = set()
     if os.path.exists(out_path):
         try:
             _existing = pd.read_csv(out_path)
-            done_datasets = set(_existing["dataset"].tolist())
+            if "source" in _existing.columns:
+                done_datasets = set(
+                    _existing.loc[_existing["source"] == "baseline", "dataset"].tolist()
+                )
+            else:
+                done_datasets = set(_existing["dataset"].tolist())
             if done_datasets:
                 print(f"  [Resume] 已完成 {len(done_datasets)} 個，將跳過: {sorted(done_datasets)}")
         except Exception:
