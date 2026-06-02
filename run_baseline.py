@@ -103,7 +103,7 @@ def _get_new_ts_datasets(new_ts_dir: str, cls_top_n: int = 3, reg_top_n: int = 3
 
 _TIME_RESULT_COLS = [
     "source", "dataset", "type", "task", "n_train", "n_test",
-    "accuracy", "f1_macro", "rmse", "r2", "score", "elapsed_s",
+    "accuracy", "f1_macro", "rmse", "r2", "score", "elapsed_s", "fast",
 ]
 
 
@@ -165,11 +165,25 @@ def run_new_ts_batch(args):
     result_file = getattr(args, "result_file", None)
     out_path = os.path.join(HERE, result_file) if result_file else os.path.join(HERE, "time_results.csv")
 
+    # 斷點續跑：跳過已寫入結果的資料集
+    done_datasets = set()
+    if os.path.exists(out_path):
+        try:
+            _existing = pd.read_csv(out_path)
+            done_datasets = set(_existing["dataset"].tolist())
+            if done_datasets:
+                print(f"  [Resume] 已完成 {len(done_datasets)} 個，將跳過: {sorted(done_datasets)}")
+        except Exception:
+            pass
+
     print(f"\n{'='*65}")
     print(f"  AutoGluon 新TS批次  ─  {len(selected)} 個資料集  (source=baseline)")
     print(f"{'='*65}")
 
     for base_name in selected:
+        if base_name in done_datasets:
+            print(f"\n  [Skip] {base_name}（已有結果，跳過）")
+            continue
         train_path = os.path.join(new_ts_dir, base_name + "_TRAIN.csv")
         test_path  = os.path.join(new_ts_dir, base_name + "_TEST.csv")
         task = "regression" if base_name.startswith("REG_") else "classification"
@@ -239,6 +253,7 @@ def run_new_ts_batch(args):
                 "r2":       metrics.get("r2"),
                 "score":    metrics.get("f1_macro", metrics.get("r2")),
                 "elapsed_s": elapsed,
+                "fast": False,
             }
             _append_time_result(out_path, row)
 
@@ -262,7 +277,7 @@ def run_new_ts_batch(args):
                 "source": "baseline", "dataset": base_name, "type": "TS",
                 "task": task, "n_train": 0, "n_test": 0,
                 "accuracy": None, "f1_macro": None, "rmse": None, "r2": None,
-                "score": None, "elapsed_s": elapsed,
+                "score": None, "elapsed_s": elapsed, "fast": False,
             })
 
     print(f"\n  結果已儲存 → {out_path}")

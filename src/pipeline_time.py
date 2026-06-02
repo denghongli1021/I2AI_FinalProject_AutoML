@@ -1075,13 +1075,13 @@ def run_regression(
         print(f"\n[2a] Tabular Scout ({cfg['scout_trials']} trials/model, 3-Fold TS CV) ...")
         print(f"  [Budget] {budget.status_str()}")
         # CatBoost per-phase timeout（寬裕設定，防單一模型佔用過久）
-        _catboost_timeout = {"catboost": 600}   # Scout: 10 min
+        _scout_timeout = {"catboost": 600, "xgb": 600, "lgbm": 600}  # Scout: 10 min
         scout = TabularRegHPO(
             model_names=_ALL_REG_TABULAR_MODELS,
             n_trials=cfg["scout_trials"],
             top_k=1,
             metric=metric,
-            per_model_timeout=_catboost_timeout,
+            per_model_timeout=_scout_timeout,
         )
         scout_scores, scout_best_params = scout.scout(X_train, y_scaled,
                                                       scout_trials=cfg["scout_trials"],
@@ -1135,7 +1135,7 @@ def run_regression(
                 n_trials=cfg["tabular_trials"],
                 top_k=cfg["tabular_top_k"],
                 metric=metric,
-                per_model_timeout={"catboost": 1200},  # Full HPO: 20 min
+                per_model_timeout={"catboost": 1200, "xgb": 1200, "lgbm": 1200},  # Full HPO: 20 min
             )
             tabular_configs = hpo.run(X_train, y_scaled, global_cfg=cfg,
                                       warm_start=scout_best_params,
