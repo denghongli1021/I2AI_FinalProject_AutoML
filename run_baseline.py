@@ -585,7 +585,7 @@ def main():
     parser.add_argument("--task",        default=None,   choices=["classification", "regression"])
     parser.add_argument("--ts",          action="store_true",
                         help="標記為時序資料（單一 CSV 模式下，回歸改用 chronological split）")
-    parser.add_argument("--time-budget", type=int, default=1800, help="訓練時間上限（秒，預設 1800）")
+    parser.add_argument("--time-budget", type=int, default=None, help="訓練時間上限（秒，預設不限制）")
     parser.add_argument("--presets",     default="medium_quality",
                         choices=["medium_quality", "good_quality", "best_quality"],
                         help="AutoGluon presets（預設 medium_quality）")

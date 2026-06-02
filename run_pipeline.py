@@ -505,6 +505,10 @@ def run_single(args):
         from src.metrics import calculate_score, get_metric_name
         score_b = calculate_score(y_te, result.test_blend, metric=args.metric)
         score_s = calculate_score(y_te, result.test_stack, metric=args.metric)
+        best_preds = result.test_stack if score_s >= score_b else result.test_blend
+        best_score = round(max(score_b, score_s), 4)
+        acc  = round(calculate_score(y_te, best_preds, metric="accuracy"), 4)
+        f1   = round(calculate_score(y_te, best_preds, metric="f1"), 4)
         elapsed = round(time.time() - t_ds, 1)
         print(f"\n  [結果] Blend → {get_metric_name(args.metric)}={score_b:.4f}")
         print(f"  [結果] Stack → {get_metric_name(args.metric)}={score_s:.4f}")
@@ -512,6 +516,14 @@ def run_single(args):
         if args.viz:
             _run_shap_visualization(_single_artifacts, X_te, feature_names, dataset_name)
             _run_dl_shap_visualization(_single_artifacts, X_tr, X_te, feature_names, dataset_name, args.dl_shap_samples)
+        if getattr(args, "result_file", None):
+            _append_result(args.result_file, {
+                "source": "pipeline", "dataset": dataset_name, "type": "Tab", "task": "classification",
+                "n_train": len(y_tr), "n_test": len(y_te),
+                "accuracy": acc, "f1_macro": f1, "rmse": None, "r2": None,
+                "score": best_score, "elapsed_s": elapsed,
+            })
+            print(f"  結果已寫入 → {args.result_file}")
 
     else:  # regression
         y_tr = np.asarray(y_tr_raw.values, dtype=np.float32).ravel()
@@ -527,11 +539,20 @@ def run_single(args):
             artifacts_dir=os.path.join(ARTIFACTS_DIR, "single", dataset_name),
             metric=args.reg_metric,
         )
-        rmse_b, rmse_s, r2_b, r2_s, _, _, _ = _eval_regression(y_te, result, args.reg_metric)
+        rmse_b, rmse_s, r2_b, r2_s, best_rmse, best_r2, primary_score = _eval_regression(y_te, result, args.reg_metric)
         elapsed = round(time.time() - t_ds, 1)
         print(f"\n  [結果] Blend → RMSE={rmse_b:.4f}  R2={r2_b:.4f}")
         print(f"  [結果] Stack → RMSE={rmse_s:.4f}  R2={r2_s:.4f}")
         print(f"  [耗時] {elapsed}s")
+        if getattr(args, "result_file", None):
+            _append_result(args.result_file, {
+                "source": "pipeline", "dataset": dataset_name, "type": "Tab", "task": "regression",
+                "n_train": len(y_tr), "n_test": len(y_te),
+                "accuracy": None, "f1_macro": None,
+                "rmse": round(best_rmse, 4), "r2": round(best_r2, 4),
+                "score": round(primary_score, 4), "elapsed_s": elapsed,
+            })
+            print(f"  結果已寫入 → {args.result_file}")
 
     print(f"{'='*65}\n")
 
