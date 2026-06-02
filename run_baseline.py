@@ -91,11 +91,13 @@ def get_metrics(task: str, y_true, y_pred) -> dict:
         return {"rmse": round(rmse, 4), "r2": round(r2, 4)}
 
 
-def _get_new_ts_datasets(new_ts_dir: str, n_per_type: int = 3) -> list:
-    """Return first n_per_type CLS and REG base names from ucr_ts_80_new directory."""
+def _get_new_ts_datasets(new_ts_dir: str, cls_top_n: int = 3, reg_top_n: int = 3) -> list:
+    """Return first cls_top_n CLS and reg_top_n REG base names from ucr_ts_80_new directory."""
+    cls_n = cls_top_n
+    reg_n = reg_top_n
     train_files = sorted(f for f in os.listdir(new_ts_dir) if f.endswith("_TRAIN.csv"))
-    cls_bases = [f[:-10] for f in train_files if f.startswith("CLS_")][:n_per_type]
-    reg_bases = [f[:-10] for f in train_files if f.startswith("REG_")][:n_per_type]
+    cls_bases = [f[:-10] for f in train_files if f.startswith("CLS_")][:cls_n]
+    reg_bases = [f[:-10] for f in train_files if f.startswith("REG_")][:reg_n]
     return cls_bases + reg_bases
 
 
@@ -151,14 +153,17 @@ def _run_ag_shap(predictor, X_test_df: pd.DataFrame, task: str,
 
 
 def run_new_ts_batch(args):
-    """AutoGluon baseline on 3 CLS + 3 REG datasets from ucr_ts_80_new(時序資料)."""
+    """AutoGluon baseline on CLS + REG datasets from ucr_ts_80_new(時序資料)."""
     new_ts_dir = os.path.join(HERE, "ucr_ts_80_new(時序資料)")
     if not os.path.isdir(new_ts_dir):
         print(f"[錯誤] 找不到目錄：{new_ts_dir}")
         sys.exit(1)
 
-    selected = _get_new_ts_datasets(new_ts_dir, n_per_type=3)
-    out_path = os.path.join(HERE, "time_results.csv")
+    cls_n = getattr(args, "cls_top_n", 3)
+    reg_n = getattr(args, "reg_top_n", 3)
+    selected = _get_new_ts_datasets(new_ts_dir, cls_top_n=cls_n, reg_top_n=reg_n)
+    result_file = getattr(args, "result_file", None)
+    out_path = os.path.join(HERE, result_file) if result_file else os.path.join(HERE, "time_results.csv")
 
     print(f"\n{'='*65}")
     print(f"  AutoGluon 新TS批次  ─  {len(selected)} 個資料集  (source=baseline)")
@@ -606,11 +611,13 @@ def main():
     parser.add_argument("--last",       action="store_true",
                         help="取每目錄最後 top-n 個資料集")
     parser.add_argument("--new-ts-batch", action="store_true",
-                        help="新TS批次：讀 ucr_ts_80_new，各取3個CLS+REG，寫 time_results.csv")
+                        help="新TS批次：讀 ucr_ts_80_new，各取N個CLS+REG，寫 time_results.csv")
+    parser.add_argument("--cls-top-n",   type=int, default=3,
+                        help="--new-ts-batch 模式：取 N 個 CLS 資料集（預設 3）")
+    parser.add_argument("--reg-top-n",   type=int, default=3,
+                        help="--new-ts-batch / 批次模式：取 N 個 REG 資料集（預設 3）")
     parser.add_argument("--reg-dir",     default="openml_regression_data",
                         help="非時序回歸 CSV 目錄（批次模式用，預設 openml_regression_data）")
-    parser.add_argument("--reg-top-n",   type=int, default=5,
-                        help="回歸目錄取前 N 個資料集（批次模式用）")
 
     args = parser.parse_args()
 

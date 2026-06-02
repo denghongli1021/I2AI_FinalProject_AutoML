@@ -21,6 +21,7 @@ import math
 import json
 import time
 import shutil
+import hashlib
 import numpy as np
 
 from src.config import DEVICE, ARTIFACTS_DIR
@@ -160,6 +161,13 @@ class PipelineResult:
 
 # ── 主引擎 ────────────────────────────────────────────────────────────────────
 
+def _cfg_hash(cfg: dict) -> str:
+    """P0-1: 依影響特徵維度的 global_cfg 欄位計算 6 位 hash，防止不同 cfg 下快取污染。"""
+    sig_keys = ("use_kpca", "use_kmeans", "n_components", "n_segments")
+    sig = {k: cfg.get(k) for k in sig_keys}
+    return hashlib.md5(json.dumps(sig, sort_keys=True).encode()).hexdigest()[:6]
+
+
 def run(
     X_train: np.ndarray,
     y_train: np.ndarray,
@@ -221,16 +229,26 @@ def run(
             val_size=cfg["scout_val_size"],
             global_cfg=cfg,
         )
-        ranked     = sorted(scout_scores.items(), key=lambda kv: kv[1], reverse=True)
-        n_keep     = math.ceil(len(ranked) * cfg["scout_ratio"])
-        best_score = ranked[0][1] if ranked else 0.0
-        threshold  = best_score * (1.0 - cfg.get("scout_drop_tol", 0.07))
-        # 保留條件：同時滿足「前 2/3」與「不低於最佳 7%」
-        selected = [n for n, s in ranked[:n_keep] if s >= threshold]
-        dropped  = [n for n, _ in ranked if n not in selected]
-        print("  [Scout] 排名: " + "  ".join(f"{n}={s:.4f}" for n, s in ranked))
-        print(f"  [Scout] 閾值: {threshold:.4f} (best={best_score:.4f} × 93%)")
-        print(f"  [Scout] 保留 {len(selected)}/{len(ranked)}: {selected}  （淘汰: {dropped}）")
+        # P0-2: NaN 過濾：NaN 分數比較行為未定義，必須先排除
+        _nan_failed = [n for n, s in scout_scores.items() if math.isnan(s)]
+        valid_items = [(n, s) for n, s in scout_scores.items() if not math.isnan(s)]
+        if _nan_failed:
+            print(f"  [Scout] 警告：{_nan_failed} 所有 trial 失敗（score=NaN），已排除")
+        if not valid_items:
+            print("  [Scout] 所有模型均失敗，退化使用全部模型（黃金預設值保底）")
+            selected = list(scout_scores.keys())
+            dropped  = []
+        else:
+            ranked     = sorted(valid_items, key=lambda kv: kv[1], reverse=True)
+            n_keep     = math.ceil(len(ranked) * cfg["scout_ratio"])
+            best_score = ranked[0][1]
+            threshold  = best_score * (1.0 - cfg.get("scout_drop_tol", 0.07))
+            # 保留條件：同時滿足「前 2/3」與「不低於最佳 7%」
+            selected = [n for n, s in ranked[:n_keep] if s >= threshold]
+            dropped  = [n for n, _ in ranked if n not in selected] + _nan_failed
+            print("  [Scout] 排名: " + "  ".join(f"{n}={s:.4f}" for n, s in ranked))
+            print(f"  [Scout] 閾值: {threshold:.4f} (best={best_score:.4f} × 93%)")
+            print(f"  [Scout] 保留 {len(selected)}/{len(ranked)}: {selected}  （淘汰: {dropped}）")
 
         # 黃金預設值保底：Scout 結束後立即注入，確保時間不足時仍有可用模型
         _presets: dict = {}
@@ -408,8 +426,9 @@ def run(
         raise RuntimeError("沒有任何 model config！請確認 HPO 成功完成。")
 
     print(f"\n[7] 5-Fold CV — {len(all_configs)} 個模型 config ...")
+    _ch = _cfg_hash(cfg)  # P0-1: cfg hash 防止不同設定的快取互相污染
     for i, config in enumerate(all_configs):
-        tag      = f"{config['model_name']}_{config['feature_set']}_c{i}".replace("/", "_")
+        tag      = f"{config['model_name']}_{config['feature_set']}_c{i}_{_ch}".replace("/", "_")
         oof_path = os.path.join(artifacts_dir, f"{tag}_oof.npy")
         tst_path = os.path.join(artifacts_dir, f"{tag}_test.npy")
         if os.path.exists(oof_path) and os.path.exists(tst_path):
@@ -421,6 +440,8 @@ def run(
                 config, X_train, y_train, X_test, n_classes,
                 device=DEVICE, tag=tag, global_cfg=cfg, metric=metric,
             )
+            np.save(oof_path, oof)        # P0-1: 存入 per-dataset artifacts_dir（非全域 ARTIFACTS_DIR）
+            np.save(tst_path, test_pred)
         all_oof.append(oof)
         all_test.append(test_pred)
         model_tags.append(tag)

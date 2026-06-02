@@ -114,7 +114,123 @@ def _ts_datasets(ts_dir: str, top_n: int, last: bool) -> list:
                        os.path.join(ts_dir, base + "_TEST.csv")))
     return result
 
+def _run_dl_shap_visualization(artifacts_dir: str, X_train_raw: np.ndarray,
+                               X_test_raw: np.ndarray, feature_names: list,
+                               dataset_name: str = "", max_test_samples: int = 200,
+                               task: str = "classification"):
+    """載入最佳深度學習模型 (.pt) 並透過自適應 3D 轉換產生時序 DL SHAP 圖表"""
+    try:
+        import torch
+        import sys as _sys
+        import os
+        import pandas as pd
+        import numpy as np
+        
+        from visualizer import AutoMLVisualizer
+        from src.train import _build_dl_model
+        from src.preprocess import FeatureBuilder
+        from src.config import SEED as _SEED
 
+        pt_path = os.path.join(artifacts_dir, "best_dl_model.pt")
+        if not os.path.exists(pt_path):
+            print("[Viz-DL] best_dl_model.pt 不存在，跳過 DL 視覺化"); return
+
+        # 讀取權重與配置
+        ckpt        = torch.load(pt_path, map_location="cpu")
+        config      = ckpt["config"]
+        in_features = ckpt["in_features"]
+        n_classes   = ckpt.get("n_classes", 1)  # 回歸任務可能無種類數，預設為 1
+        model_name  = config["model_name"]
+        feature_set = config["feature_set"]
+
+        # 重建 DL 模型架構
+        _model_obj = _build_dl_model(model_name, config["arch_params"], in_features, n_classes)
+        _model_obj.load_state_dict(ckpt["state_dict"])
+        _model_obj.eval()
+        print(f"[Viz-DL] 載入 {model_name}  feature_set={feature_set}"
+              f"  in_features={in_features}  task={task}")
+
+        # 🚀 【步驟 2 核心實作】支援時序 3D Tensor 的 Predictor 包裝器
+        class _Predictor:
+            def __init__(self, m, task_type):
+                self._m = m
+                self.task_type = task_type
+                
+            def predict_proba(self, X):
+                with torch.no_grad():
+                    if isinstance(X, pd.DataFrame):
+                        X = X.values
+                    x_tensor = torch.FloatTensor(X)
+                    
+                    # 💡 試探法：自動依據時序模型的維度要求進行 2D -> 3D 重排
+                    try:
+                        out = self._m(x_tensor)  # 嘗試原本的 2D [batch, features]
+                    except Exception:
+                        try:
+                            # 嘗試 1D-CNN 常見格式: [batch, 1, seq_len]
+                            out = self._m(x_tensor.unsqueeze(1))
+                        except Exception:
+                            # 嘗試 Transformer/RNN 常見格式: [batch, seq_len, 1]
+                            out = self._m(x_tensor.unsqueeze(-1))
+                    
+                    if self.task_type == "classification":
+                        return torch.softmax(out, dim=1).numpy()
+                    else:
+                        return out.numpy().reshape(len(X), -1)
+
+            def predict(self, X):
+                res = self.predict_proba(X)
+                if self.task_type == "classification":
+                    return res.argmax(axis=1)
+                return res
+
+        predictor = _Predictor(_model_obj, task)
+
+        # 自動匹配特徵轉換器
+        _gcfg_candidates = [
+            {"use_kmeans": True,  "use_kpca": False},
+            {"use_kmeans": False, "use_kpca": False},
+            {"use_kmeans": True,  "use_kpca": True},
+            {"use_kmeans": False, "use_kpca": True},
+        ]
+        fb = None
+        for _gcfg in _gcfg_candidates:
+            try:
+                _fb_try = FeatureBuilder(feature_set=feature_set, global_cfg=_gcfg).fit(X_train_raw)
+                if _fb_try.transform(X_train_raw[:1]).shape[1] == in_features:
+                    fb = _fb_try
+                    break
+            except Exception:
+                continue
+                
+        if fb is None:
+            fb = FeatureBuilder(feature_set=feature_set).fit(X_train_raw)
+
+        X_tf = fb.transform(X_test_raw)
+        col_names = _build_shap_col_names(feature_set, feature_names, X_tf.shape[1])
+        X_df = pd.DataFrame(X_tf, columns=col_names)
+
+        # 樣本數過大時進行採樣，避免 SHAP 算太久
+        if len(X_df) > max_test_samples:
+            rng = np.random.default_rng(_SEED)
+            idx = rng.choice(len(X_df), size=max_test_samples, replace=False)
+            X_df = X_df.iloc[idx].reset_index(drop=True)
+            print(f"[Viz-DL] X_test 取樣 {max_test_samples}/{X_tf.shape[0]} 筆進行解釋")
+
+        viz_output = os.path.join(artifacts_dir, "shap_plots_dl")
+        print(f"[Viz-DL] 執行 SHAP（{X_df.shape[0]} 筆 × {X_df.shape[1]} 特徵）...")
+        viz = AutoMLVisualizer(model=predictor, X_test=X_df, output_dir=viz_output)
+        
+        shap_mat = viz._get_shap_matrix()
+        top_feat = col_names[int(np.abs(shap_mat).mean(0).argmax())]
+        viz.generate_all_plots(
+            sample_index=0,
+            target_feature=top_feat,
+            prefix=f"{dataset_name}_dl",
+        )
+        print(f"\n[Viz-DL] 時序 DL SHAP 圖表已輸出 → {viz_output}")
+    except Exception as _e:
+        print(f"\n[Viz-DL] DL 視覺化跳過（{_e}）")
 # ── 單一資料集執行 ───────────────────────────────────────────────────────────
 
 def _process_one(csv_path: str, args, t_ds: float) -> dict:
@@ -282,7 +398,8 @@ def _append_time_result(out_path: str, row: dict):
 # ── 新TS批次（ucr_ts_80_new）────────────────────────────────────────────────
 
 def _process_new_ts_one(base_name: str, train_df: pd.DataFrame,
-                        test_df: pd.DataFrame, args, t_ds: float) -> dict:
+                        test_df: pd.DataFrame, args, t_ds: float,
+                        out_path: str = None) -> dict:
     """Run pipeline on one pre-split TRAIN/TEST dataset pair."""
     task = "regression" if base_name.startswith("REG_") else "classification"
     target_col = _find_target_col(train_df)
@@ -348,10 +465,7 @@ def _process_new_ts_one(base_name: str, train_df: pd.DataFrame,
         elapsed = round(time.time() - t_ds, 1)
         print(f"\n  [結果] Blend={score_b:.4f}  Stack={score_s:.4f}  ({elapsed}s)")
 
-        if getattr(args, "viz", False):
-            _run_shap_visualization(_arts_dir, X_te, feature_names, base_name)
-
-        return {
+        row = {
             "source": "pipeline",
             "dataset": base_name, "type": "TS", "task": task,
             "n_train": len(y_tr), "n_test": len(y_te),
@@ -360,6 +474,18 @@ def _process_new_ts_one(base_name: str, train_df: pd.DataFrame,
             "score": round(max(score_b, score_s), 4),
             "elapsed_s": elapsed,
         }
+        if out_path:
+            _append_time_result(out_path, row)
+            row["_already_saved"] = True
+
+        if getattr(args, "viz", False):
+            _run_shap_visualization(_arts_dir, X_te, feature_names, base_name)
+            if not getattr(args, "skip_dl", False):
+                _run_dl_shap_visualization(_arts_dir, X_tr, X_te, feature_names, base_name,
+                                           max_test_samples=getattr(args, "dl_shap_samples", 200),
+                                           task="classification")
+
+        return row
 
     # ── 回歸 ────────────────────────────────────────────────────────────────
     y_tr = np.asarray(y_tr_raw.values, dtype=np.float32).ravel()
@@ -396,10 +522,7 @@ def _process_new_ts_one(base_name: str, train_df: pd.DataFrame,
     print(f"\n  [結果] Blend → RMSE={rmse_b:.4f}  R2={r2_b:.4f}")
     print(f"  [結果] Stack → RMSE={rmse_s:.4f}  R2={r2_s:.4f}  ({elapsed}s)")
 
-    if getattr(args, "viz", False):
-        _run_shap_visualization(_arts_dir, X_te, feature_names, base_name)
-
-    return {
+    row = {
         "source": "pipeline",
         "dataset": base_name, "type": "TS", "task": task,
         "n_train": len(y_tr), "n_test": len(y_te),
@@ -408,6 +531,18 @@ def _process_new_ts_one(base_name: str, train_df: pd.DataFrame,
         "score": round(primary_score, 4),
         "elapsed_s": elapsed,
     }
+    if out_path:
+        _append_time_result(out_path, row)
+        row["_already_saved"] = True
+
+    if getattr(args, "viz", False):
+        _run_shap_visualization(_arts_dir, X_te, feature_names, base_name)
+        if not getattr(args, "skip_dl", False):
+            _run_dl_shap_visualization(_arts_dir, X_tr, X_te, feature_names, base_name,
+                                       max_test_samples=getattr(args, "dl_shap_samples", 200),
+                                       task="regression")
+
+    return row
 
 
 def run_new_ts_batch_pipeline(args):
@@ -443,7 +578,8 @@ def run_new_ts_batch_pipeline(args):
         try:
             train_df = pd.read_csv(train_path)
             test_df  = pd.read_csv(test_path)
-            row = _process_new_ts_one(base_name, train_df, test_df, args, t_ds)
+            row = _process_new_ts_one(base_name, train_df, test_df, args, t_ds,
+                                       out_path=out_path)
         except Exception:
             traceback.print_exc()
             row = {
@@ -463,7 +599,8 @@ def run_new_ts_batch_pipeline(args):
                     _torch.cuda.empty_cache()
             except Exception:
                 pass
-        _append_time_result(out_path, row)
+        if not row.get("_already_saved"):
+            _append_time_result(out_path, row)
 
     print(f"\n  結果已儲存 → {out_path}")
     print(f"{'='*65}\n")
@@ -592,10 +729,13 @@ def run_single(args):
         print(f"  Pipeline-Time 單檔  ─  {base_name}  |  device={DEVICE}")
         print(f"{'='*65}")
         t_ds = time.time()
+        result_file = getattr(args, "result_file", None)
+        out_path = os.path.join(HERE, result_file) if result_file else None
         try:
             train_df = pd.read_csv(csv_path)
             test_df  = pd.read_csv(test_path)
-            row = _process_new_ts_one(base_name, train_df, test_df, args, t_ds)
+            row = _process_new_ts_one(base_name, train_df, test_df, args, t_ds,
+                                      out_path=out_path)
             print("\n  [完成]", row)
         except Exception:
             traceback.print_exc()

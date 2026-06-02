@@ -1,6 +1,6 @@
 # AutoML Pipeline — 人工智慧 Final Project
 
-自製 AutoML 系統，支援表格資料分類與時序資料分類 / 回歸。以 AutoGluon 為對照組，在 OpenML-CC18 與 UCR 時序資料集上進行批次評估。
+自製 AutoML 系統，支援表格資料分類 / 回歸與時序資料分類 / 回歸。以 AutoGluon 為對照組，在 OpenML-CC18 與 UCR 時序資料集上進行批次評估。
 
 ---
 
@@ -17,11 +17,9 @@ pip install -r requirements.txt
 ### Pipeline（自製系統）
 
 ```cmd
-#最常用(用來跑一個資料集:給目標欄位)
+# 最常用：單一 CSV（需以 --target 明確指定目標欄）
 python run_pipeline.py --csv openml_cc18_data/179_adult.csv --target class --viz
 python run_pipeline.py --train mydata/train.csv --test mydata/test.csv --target income --viz
-python run_pipeline_time.py --csv sensor_data.csv --target pressure --viz
-python run_pipeline_time.py --train mydata/train.csv --test mydata/test.csv --target pressure --viz
 
 # 批次評估：前 5 個 OpenML-CC18 分類資料集
 python run_pipeline.py --batch --top-n 5
@@ -53,24 +51,18 @@ python run_pipeline.py --batch --reg-metric r2
 # 競賽模式（讀取 test/train.csv + test/test.csv，輸出提交 CSV）
 python test/run_submission.py
 
-# 單一 CSV 評估（表格資料）
-python run_pipeline.py --csv openml_cc18_data/37_diabetes.csv
-
-# 單一 CSV 評估（指定目標欄）
-python run_pipeline.py --csv data.csv --target label
-
-# 預切分模式（手動提供 TRAIN / TEST）
-python run_pipeline.py --train train.csv --test test.csv
-
 # 訓練完成後自動產生 SHAP 視覺化（需要 shap + plotly + kaleido）
 python run_pipeline.py --csv data.csv --target label --viz
 python run_pipeline.py --batch --top-n 5 --viz
+
+# 結果附加至指定 CSV（追加模式，含 source 欄）
+python run_pipeline.py --csv data.csv --target label --result-file combined_results.csv
 ```
 
 ### 時序專用 Pipeline（分類 + 回歸）
 
 ```cmd
-# 新TS批次：CLS 與 REG 分開控制各取 N 個（推薦用法）
+# 新TS批次：CLS 與 REG 分開控制各取 N 個（ucr_ts_80_new，推薦用法）
 python run_pipeline_time.py --new-ts-batch --cls-top-n 10 --reg-top-n 10
 
 # 新TS批次：快速模式
@@ -79,20 +71,24 @@ python run_pipeline_time.py --new-ts-batch --cls-top-n 5 --reg-top-n 5 --fast
 # 新TS批次：指定起始偏移量（適用於斷點續跑或分段評估）
 python run_pipeline_time.py --new-ts-batch --cls-top-n 5 --reg-top-n 5 --cls-offset 3 --reg-offset 3
 
-# 新TS批次：結果附加至指定 CSV
+# 新TS批次：結果附加至指定 CSV（附加模式）
 python run_pipeline_time.py --new-ts-batch --cls-top-n 10 --reg-top-n 10 --result-file result.csv
 
-# 舊批次模式（前 N 個，不分 CLS/REG）
+# 舊批次模式（ucr_ts_80_new 前 N 個，不分 CLS/REG）
 python run_pipeline_time.py --batch --top-n 10
 
-# 批次評估：後 10 個（斷點續跑）
+# 批次評估：後 10 個（斷點續跑，已完成的 dataset 自動跳過）
 python run_pipeline_time.py --batch --top-n 10 --last
 
 # 指定分類 / 回歸指標
 python run_pipeline_time.py --batch --cls-metric accuracy --reg-metric r2
 
-# 單一 CSV（_TRAIN.csv 格式，自動尋找對應 _TEST.csv）
-python run_pipeline_time.py --csv "ucr_ts_80_new(時序資料)/REG_VentilatorPressure_TRAIN.csv"
+# 單一 CSV（_TRAIN.csv 格式，自動尋找對應 _TEST.csv；需指定 --target）
+python run_pipeline_time.py --csv "ucr_ts_80_new(時序資料)/REG_VentilatorPressure_TRAIN.csv" --target target
+
+# 單一 CSV + SHAP 視覺化 + 結果寫入指定 CSV
+python run_pipeline_time.py --fast --viz --csv "ucr_ts_80_new(時序資料)/CLS_ACSF1_TRAIN.csv" \
+    --target target --result-file combined_results.csv
 ```
 
 ### SHAP 視覺化（訓練後單獨執行）
@@ -104,7 +100,7 @@ python generate_shap.py --dataset test/dataset.csv --target RiskPerformance
 # DL 模型（SignalTransformer）
 python generate_shap.py --dataset test/dataset.csv --target RiskPerformance --model dl
 
-# DL 模型（限制背景與測試樣本數以極速完成 PermutationExplainer）
+# DL 模型（限制樣本數以縮短 PermutationExplainer 時間）
 python generate_shap.py --dataset test/dataset.csv --target RiskPerformance --model dl --dl-bg 100 --dl-test-samples 50
 
 # 同時產生 tabular + DL 兩種 SHAP 圖
@@ -116,14 +112,19 @@ python generate_shap.py --dataset test/dataset.csv --target RiskPerformance --mo
 ### 合併批次結果
 
 ```cmd
-# 合併 pipeline + baseline + pipeline_time 三份結果到 pipeline_batch_results.csv
+# 合併 pipeline + baseline + pipeline_time 三份批次結果到 pipeline_batch_results.csv
 python merge_final_results.py
+
+# 跨腳本同時寫入同一個 CSV（--result-file 追加模式，適用 run_pipeline.py / run_pipeline_time.py / run_baseline.py）
+python run_pipeline.py     --fast --viz --csv data1.csv --target y --result-file combined.csv
+python run_pipeline_time.py --fast --viz --csv data2_TRAIN.csv --target target --result-file combined.csv
+python run_baseline.py      --viz       --csv data1.csv --target y --result-file combined.csv
 ```
 
 ### 對照組 AutoGluon Baseline
 
 ```cmd
-# 批次模式（OpenML-CC18分類 + UCR-TS + OpenML回歸）
+# 批次模式（OpenML-CC18分類 + UCR-TS + OpenML回歸，各取 top-n 個）
 python run_baseline.py --batch --top-n 5
 
 # 批次：同時指定分類與回歸各取幾個
@@ -132,11 +133,18 @@ python run_baseline.py --batch --top-n 10 --reg-top-n 10
 # 批次評估：後 10 個
 python run_baseline.py --batch --top-n 10 --last
 
-# 新TS批次（ucr_ts_80_new，各取 3 個 CLS + 3 個 REG）
-python run_baseline.py --new-ts-batch
+# 新TS批次（ucr_ts_80_new，CLS 與 REG 分別指定筆數）
+python run_baseline.py --new-ts-batch --cls-top-n 5 --reg-top-n 5
 
-# 單一資料集
-python run_baseline.py --csv openml_cc18_data/22_mfeat-zernike.csv
+# 新TS批次：結果附加至指定 CSV
+python run_baseline.py --new-ts-batch --cls-top-n 5 --reg-top-n 5 --result-file result.csv
+
+# 單一資料集（需指定 --target）
+python run_baseline.py --csv openml_cc18_data/22_mfeat-zernike.csv --target class
+
+# 時序單一資料集（--ts 旗標，chronological split）
+python run_baseline.py --train "ucr_ts_80_new(時序資料)/CLS_ACSF1_TRAIN.csv" \
+    --test "ucr_ts_80_new(時序資料)/CLS_ACSF1_TEST.csv" --ts --target target
 
 # 指定時間上限與 presets
 python run_baseline.py --batch --top-n 5 --time-budget 120 --presets medium_quality
@@ -239,7 +247,7 @@ python scripts/data_collect_time.py
 ├── run_baseline.py         # AutoGluon 對照組（分類 + 回歸）
 ├── generate_shap.py        # 從現有 artifacts 產生 SHAP 視覺化（不重新訓練）
 ├── merge_final_results.py  # 合併三份批次結果 CSV → pipeline_batch_results.csv
-├── scripts/                # 資料集收集與下載指令稿
+├── scripts/
 │   ├── data_collect.py     # 下載 OpenML-CC18 資料集
 │   ├── data_collect_reg.py # 下載 OpenML 回歸資料集
 │   └── data_collect_time.py# 下載 UCR 時序資料集
@@ -262,24 +270,30 @@ python scripts/data_collect_time.py
 │       ├── transformer.py  # SignalTransformer（Sinusoidal PE, norm_first HPO）, PatchTST
 │       └── tabular.py      # build_tabular_model() 工廠函式
 ├── preprocessing/          # 雙軌前處理模組（樹模型軌 + 深度學習軌）
-│   ├── interface.py        # preprocess_for_training()：統一呼叫入口，回傳 {"tree":…, "dl":…}
+│   ├── interface.py        # preprocess_for_training()：統一呼叫入口
 │   ├── data_loader.py      # 資料載入與型別解析
 │   ├── core/
 │   │   ├── router.py       # 欄位型別路由（數值/類別/文字/時序/影像）
-│   │   └── assembler.py    # 兩軌特徵組裝（樹軌：OrdinalEncoder；DL 軌：OHE）
+│   │   ├── assembler.py    # 兩軌特徵組裝（樹軌：OrdinalEncoder；DL 軌：OHE）
+│   │   └── ts_preprocessor.py  # TSDataProcessor：時序前處理（排序/ffill/週期特徵）
 │   ├── processors/         # 各型別處理器（numeric / category / text / time / image / feature_generator）
-│   └── utils/              # 記憶體優化（memory_optimizer）、資料健康度（data_health）、自訂轉換器
-├── visualization/          # SHAP 視覺化與測試模組
-│   ├── visualizer.py       # AutoMLVisualizer：SHAP 視覺化（TreeExplainer 精確解 / PermutationExplainer 最多 500 筆，輸出高畫質 PNG）
-│   ├── test_generality.py  # IBM HR 員工離職與房價預測的通用性測試
-│   ├── test_nn.py          # SklearnWrapper 類別：驗證 PyTorch MLP 神經網路的 SHAP
-│   ├── test_timeseries.py  # ETTh1 電力數據時序回歸的視覺化測試
-│   └── test_diabetes.py    # 糖尿病資料集的 SHAP 視覺化測試
-├── test/                   # 測試與驗證資料夾
-│   └── dataset.csv         # 測試用資料集
+│   └── utils/              # 記憶體優化、資料健康度、對抗驗證
+├── visualization/
+│   ├── visualizer.py       # AutoMLVisualizer：SHAP（TreeExplainer / PermutationExplainer，輸出 PNG）
+│   ├── test_diabetes.py    # 糖尿病分類 SHAP 測試
+│   ├── test_generality.py  # IBM HR / 房價 SHAP 通用性測試
+│   ├── test_nn.py          # PyTorch MLP SklearnWrapper + PermutationExplainer 測試
+│   └── test_timeseries.py  # ETTh1 時序回歸視覺化測試
+├── test/
+│   ├── dataset.csv               # 測試用資料集
+│   ├── ground_truth.csv          # 測試標準答案
+│   ├── run_submission.py         # 競賽提交（完整 pipeline）
+│   ├── run_baseline_submission.py # AutoGluon 競賽提交
+│   └── compare_submissions.py    # 比較三份提交 CSV
 ├── logs/                   # 執行 log（pipeline_dataset_run.log、baseline_dataset_run.log）
 ├── pipeline_batch_results.csv    # 合併後的完整批次結果（pipeline + baseline + pipeline_time）
-├── result.csv              # 時序批次結果（pipeline_time）
+├── time_results.csv        # 時序批次結果（pipeline_time + baseline TS）
+├── combined_results.csv    # 跨腳本單次結果彙總（--result-file 指定時寫入）
 ├── openml_cc18_data/       # OpenML-CC18 表格分類資料集（CSV）
 ├── openml_regression_data/ # OpenML 表格回歸資料集（CSV）
 ├── ucr_ts_80_new(時序資料)/ # UCR 時序資料集（預切分格式：*_TRAIN.csv + *_TEST.csv）
@@ -294,15 +308,21 @@ python scripts/data_collect_time.py
 
 ## 關鍵設定與慣例
 
-### 目標欄自動偵測順序
-`target` → `label` → `class` → `y` → `c` → 最後一欄
+### 目標欄指定
+
+**單 CSV / train-test 模式下 `--target` 為必填**，批次模式才會自動偵測：
+
+| 模式 | `--target` |
+|------|-----------|
+| `--csv` / `--train --test`（全腳本） | **必填** |
+| `--batch` / `--new-ts-batch` | 自動偵測（`target` → `label` → `class` → `y` → `c`） |
 
 ### 任務自動判斷邏輯（`run_pipeline.py:_auto_detect_task`）
 - `dtype == object / bool` → 分類
 - 整數且 `nunique ≤ 50` 且比例 < 30% → 分類
-- 否則 → 回歸（`run_pipeline.py` 批次模式由 `--reg-top-n` 控制；`run_pipeline_time.py` 支援 REG_* 前綴）
+- 否則 → 回歸（批次模式由 `--reg-top-n` 控制，預設 5 個；設 0 可跳過）
 
-### 時序任務判斷（`run_pipeline_time.py:_auto_detect_task`）
+### 時序任務判斷（`run_pipeline_time.py`）
 - 檔名以 `REG_` 開頭 → 回歸（走 `pipeline_time.run_regression()`）
 - 否則依 dtype + nunique 判斷（與 run_pipeline.py 相同）
 
@@ -338,13 +358,11 @@ python scripts/data_collect_time.py
 
 ### get_cfg() 模式（依資料量）
 
-`hpo_n_folds`：HPO 評估用的折數（與最終 5-Fold CV 獨立），縮短 HPO 搜尋時間。
-
 | 資料量 | 模式 |
 |--------|------|
-| `--fast` | tabular_trials=5, nas_epochs=5, dl_trials=3, **transformer_trials=5**, hpo_n_folds=3 |
+| `--fast` | tabular_trials=5, nas_epochs=5, dl_trials=3, transformer_trials=5, hpo_n_folds=3 |
 | < 500 筆 | 小資料：n_repeats=2, n_seeds=3, kpca/kmeans 開啟；transformer_trials=12 |
-| < 50,000 筆 | 標準：tabular_trials=12, meta_trials=8, **transformer_trials=8**, **hpo_n_folds=3** |
+| < 50,000 筆 | 標準：tabular_trials=12, meta_trials=8, transformer_trials=8, hpo_n_folds=3 |
 | ≥ 50,000 筆 | 大資料：縮減 trial 數，關閉 kpca/kmeans；transformer_trials=10 |
 
 ### 時序模式特殊行為
@@ -355,19 +373,19 @@ python scripts/data_collect_time.py
 - **NAS**：TSNASSearcher 搜尋 4 種算子（conv_k3 / conv_k5 / tcn_d2 / tcn_d4）
   - `--no-nas` 時使用 `_DEFAULT_TSNET_ARCH`（conv_k3 + tcn_d2 + tcn_d4，channels=64）
 - **Mixup 停用**：時序模式下訓練自動停用（防混合引入未來資訊洩漏）
-- `TSFeatureBuilder`（跨時間步特徵）：lag=(1,2,3,7)、rolling window=(3,5,10,20)、momentum、diff
+- `TSFeatureBuilder`：lag=(1,2,3,7)、rolling window=(3,5,10,20)、momentum、diff
 
 **回歸（`REG_*` 前綴 CSV，時間序列預測）**
 - **入口**：`run_pipeline_time.py` + `pipeline_time.run_regression()`
 - **切分策略**：Chronological 順序切分（最後 20% 為測試集）
 - **Tabular 模型**：LGBMRegressor / XGBRegressor / CatBoostRegressor / Ridge / RF / ExtraTrees / KNN
-- **DL 模型**：TSNet + TCN + PatchTST（MSE loss）；**不做 NAS**（固定 `_DEFAULT_TSNET_ARCH`）
+- **DL 模型**：TSNet + TCN + PatchTST（MSE loss）；不做 NAS（固定 `_DEFAULT_TSNET_ARCH`）
 - **CV**：KFold Walk-forward（`get_ts_folds()`）
 - **Ensemble**：Nelder-Mead 加權算術平均 + Meta-Learner Stacking（Ridge / LGBMRegressor）
 - **評估指標**：RMSE + R²（`--reg-metric rmse/r2/mae`，預設 rmse）
 
 ### artifacts 快取機制
-`artifacts/{dataset_name}/{tag}_oof.npy` + `_test.npy`：CV 完成後自動儲存，重複執行直接載入。
+`artifacts/{dataset_name}/{tag}_oof.npy` + `_test.npy`：CV 完成後自動儲存，重複執行直接載入（大幅加速 re-run）。
 
 ### 斷點續跑（`run_pipeline_time.py`）
 批次模式啟動時自動載入既有 `pipeline_time_batch_results.csv`，跳過已有有效結果的 dataset；錯誤列（`task == "?"`）會重新嘗試。
@@ -383,7 +401,7 @@ python scripts/data_collect_time.py
 - **小數據過擬合**：< 500 筆時 poly2 + NAS + Stacking 三重風險 → n_repeats/n_seeds 已加大
 - **CatBoost 高維 timeout**：n_features > 300 時自動設 per-model timeout 防卡住
 - **NAS 在小表格資料跳過**：< 2000 筆自動略過 NAS 與 CNN/Transformer HPO
-- **Stacking NaN 防護**：`MetaLearnerStacker` 在 `StandardScaler` 前插入 `SimpleImputer(strategy='median')`，防止原始特徵含 NaN 時 `SelectKBest` 拋出 `ValueError`（`ensemble.py`）
+- **Stacking NaN 防護**：`MetaLearnerStacker` 在 `StandardScaler` 前插入 `SimpleImputer(strategy='median')`
 
 優先實作的快速勝利（Quick Wins）：
 | 編號 | 主題 | 預期收益 |
@@ -398,7 +416,20 @@ python scripts/data_collect_time.py
 
 ---
 
-## 實測結果（部分資料集）
+## 實測結果
+
+### 時序資料集（UCR）
+
+| 資料集 | 任務 | 樣本數（訓/測） | Pipeline 分數 | Baseline 分數 | 指標 |
+|--------|------|--------------|-------------|-------------|------|
+| `CLS_ACSF1` | TS 分類 10 類 | 100 / 100 | **F1 = 0.786** | F1 = 0.767 | Macro F1 |
+| `CLS_Adiac` | TS 分類 37 類 | 390 / 391 | **F1 = 0.727** | F1 = 0.595 | Macro F1 |
+| `CLS_AllGestureWiimoteX` | TS 分類 10 類 | 300 / 700 | **F1 = 0.566** | F1 = 0.444 | Macro F1 |
+| `REG_AcousticContaminationMadrid_nmv` | TS 回歸 | 166 / 72 | **RMSE = 3.668** (R²=0.669) | RMSE = 5.329 (R²=0.302) | RMSE ↓ |
+| `REG_AluminiumConcentration` | TS 回歸 | 440 / 189 | **RMSE = 232.9** (R²=0.758) | RMSE = 300.2 (R²=0.597) | RMSE ↓ |
+| `REG_AppliancesEnergy` | TS 回歸 | 95 / 42 | RMSE = 3.528 (R²=−0.053) | RMSE = 3.516 (R²=−0.046) | RMSE ↓ |
+
+### 表格資料集（OpenML）
 
 | 資料集 | 類型 | 樣本數 | 最終 Test 分數 | 模式 |
 |--------|------|-------|--------------|------|

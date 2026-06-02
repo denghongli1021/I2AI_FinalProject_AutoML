@@ -46,28 +46,29 @@ class AutoMLVisualizer:
             print(f"  Computing SHAP for all {len(self.X_test)} samples (full dataset)...")
             
             # 用 PermutationExplainer：
-            # - 支援任何模型（神經網路、SVM 等）
-            # - 全量計算每一筆資料，不採樣
-            # - 比 KernelSHAP 快：計算量 = O(樣本數 × 特徵數 × npermutations)
-            #   npermutations 預設只跑幾輪，不隨樣本數爆炸
-            # - background 只用來建立基準線，取 100 筆隨機樣本即可
+            # - 支援任何模型（神經網路、Pipeline、SVM 等）
             background_size = min(100, len(self.X_test))
             background = self.X_test.sample(n=background_size, random_state=42)
             
-            predict_fn = self.model.predict if hasattr(self.model, "predict") else self.model
+            # 🔥 【核心修改】：優先使用 predict_proba 以完美支援分類 Pipeline 的機率輸出
+            if hasattr(self.model, "predict_proba"):
+                predict_fn = self.model.predict_proba
+            elif hasattr(self.model, "predict"):
+                predict_fn = self.model.predict
+            else:
+                predict_fn = self.model
+                
             self.explainer = shap.PermutationExplainer(predict_fn, background)
 
-            # 取樣上限：視覺化用途 500 筆已足夠，避免對全量資料逐筆擾動（數小時）
+            # 取樣上限：視覺化用途 500 筆已足夠
             _max_samples = 500
             if len(self.X_test) > _max_samples:
-                print(f"  [SHAP] 取樣 {_max_samples}/{len(self.X_test)} 筆（視覺化不需要全量計算）...")
+                print(f"  [SHAP] 取樣 {_max_samples}/{len(self.X_test)} 筆...")
                 self.X_test = self.X_test.sample(n=_max_samples, random_state=42).reset_index(drop=True)
 
-            # max_evals = 2*n_features+1 → 只跑 1 次 permutation，比預設 ~4 次快 4 倍，
-            # 精度損失極小（特徵重要性排名穩定，視覺化用途已足夠）
             _n_feat = self.X_test.shape[1]
             _max_evals = 2 * _n_feat + 1
-            print(f"  [SHAP] max_evals={_max_evals} (1 permutation × {_n_feat} features × 2 directions)")
+            print(f"  [SHAP] max_evals={_max_evals}")
             self.shap_values = self.explainer(self.X_test, max_evals=_max_evals)
             _elapsed = time.time() - _t0
             mins, secs = divmod(int(_elapsed), 60)

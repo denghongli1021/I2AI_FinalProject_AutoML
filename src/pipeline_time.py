@@ -17,9 +17,11 @@ pipeline_time.py — 時序專用 Pipeline 引擎（分類 + 回歸）
 """
 from __future__ import annotations
 
+import json
 import math
 import os
 import time
+import hashlib
 import warnings
 
 import numpy as np
@@ -1215,9 +1217,12 @@ def run_regression(
         raise RuntimeError("沒有任何 model config 可供 CV！")
 
     print(f"\n[7] 5-Fold TimeSeries CV — {len(all_configs)} 個模型 config ...")
+    # P0-1: cfg hash 防止不同 global_cfg（fast/standard）的快取互相污染
+    _sig = {k: cfg.get(k) for k in ("use_kpca", "use_kmeans", "n_components", "n_segments")}
+    _ch = hashlib.md5(json.dumps(_sig, sort_keys=True).encode()).hexdigest()[:6]
     for i, config in enumerate(all_configs):
         # _yrs suffix: robust-scaled predictions (RobustScaler); invalidates old StandardScaler cache
-        tag = f"reg_{config['model_name']}_{config['feature_set']}_c{i}_yrs".replace("/", "_")
+        tag = f"reg_{config['model_name']}_{config['feature_set']}_c{i}_{_ch}_yrs".replace("/", "_")
         oof_path = os.path.join(artifacts_dir, f"{tag}_oof.npy")
         tst_path = os.path.join(artifacts_dir, f"{tag}_test.npy")
         mask_path = os.path.join(artifacts_dir, f"{tag}_mask.npy")
