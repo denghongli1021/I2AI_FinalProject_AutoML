@@ -24,7 +24,7 @@ OUT    = os.path.join(HERE, "pipeline_batch_results.csv")
 
 COLS = ["source", "dataset", "type", "task",
         "n_train", "n_test", "accuracy", "f1_macro",
-        "rmse", "r2", "score", "elapsed_s"]
+        "rmse", "r2", "score", "elapsed_s", "fast"]
 
 
 def _read(path, source):
@@ -72,7 +72,7 @@ def main():
 
     # 去重（同 source + dataset 保留最後一筆，因為通常後到的是更新的結果）
     before = len(merged)
-    merged = merged.drop_duplicates(subset=["source", "dataset"], keep="last").reset_index(drop=True)
+    merged = merged.drop_duplicates(subset=["source", "dataset", "fast"], keep="last").reset_index(drop=True)
     if len(merged) < before:
         print(f"  [dedup] 移除 {before - len(merged)} 個重複 (source, dataset) 列")
 
