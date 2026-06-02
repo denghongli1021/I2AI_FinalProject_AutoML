@@ -431,11 +431,16 @@ def run(
         tag      = f"{config['model_name']}_{config['feature_set']}_c{i}_{_ch}".replace("/", "_")
         oof_path = os.path.join(artifacts_dir, f"{tag}_oof.npy")
         tst_path = os.path.join(artifacts_dir, f"{tag}_test.npy")
+        cache_valid = False
         if os.path.exists(oof_path) and os.path.exists(tst_path):
-            print(f"  [CV] 載入快取 {tag}")
-            oof      = np.load(oof_path)
+            oof       = np.load(oof_path)
             test_pred = np.load(tst_path)
-        else:
+            if oof.shape[0] == len(y_train) and test_pred.shape[0] == len(X_test):
+                print(f"  [CV] 載入快取 {tag}")
+                cache_valid = True
+            else:
+                print(f"  [CV] 快取 shape 不符（oof={oof.shape[0]} vs y_train={len(y_train)}），重新計算 {tag}")
+        if not cache_valid:
             oof, test_pred = run_cv(
                 config, X_train, y_train, X_test, n_classes,
                 device=DEVICE, tag=tag, global_cfg=cfg, metric=metric,

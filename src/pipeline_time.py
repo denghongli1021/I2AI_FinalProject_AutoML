@@ -31,10 +31,12 @@ import torch.nn as nn
 from scipy.optimize import minimize
 from scipy.special import softmax
 from sklearn.ensemble import ExtraTreesRegressor, RandomForestRegressor
+from sklearn.impute import SimpleImputer
 from sklearn.linear_model import Ridge
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from sklearn.model_selection import KFold
 from sklearn.neighbors import KNeighborsRegressor
+from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import RobustScaler, StandardScaler
 from tqdm import tqdm
 
@@ -202,9 +204,9 @@ def build_reg_tabular_model(name: str, params: dict, seed: int = SEED, device: s
     if name == "extra_trees":
         return ExtraTreesRegressor(**params, random_state=seed, n_jobs=-2)
     if name == "ridge":
-        return Ridge(**params, random_state=seed)
+        return make_pipeline(SimpleImputer(strategy='median'), Ridge(**params, random_state=seed))
     if name == "knn":
-        return KNeighborsRegressor(**params, n_jobs=-2)
+        return make_pipeline(SimpleImputer(strategy='median'), KNeighborsRegressor(**params, n_jobs=-2))
     raise ValueError(f"Unknown regression tabular model: {name}")
 
 
@@ -913,6 +915,7 @@ class MetaLearnerRegStacker:
         self.n_samples = n_samples
         self.meta_model_ = None
         self.meta_name_: str = None
+        self._meta_imputer = None
         self._x_scaler = None
 
     def _build_meta(self, oof_list, X_orig=None):
@@ -939,6 +942,10 @@ class MetaLearnerRegStacker:
         X_meta = self._build_meta(oof_list, X_orig_scaled)
         X_meta_eff = X_meta[common]
         y_eff = y[common]
+
+        if np.isnan(X_meta_eff).any():
+            self._meta_imputer = SimpleImputer(strategy='median')
+            X_meta_eff = self._meta_imputer.fit_transform(X_meta_eff)
 
         print(f"  [Stack] Meta-feature shape: {X_meta_eff.shape}  (effective)")
 
@@ -1014,6 +1021,8 @@ class MetaLearnerRegStacker:
         if X_orig is not None and self._x_scaler is not None:
             X_orig_scaled = self._x_scaler.transform(X_orig)
         X_meta = self._build_meta(test_list, X_orig_scaled)
+        if self._meta_imputer is not None:
+            X_meta = self._meta_imputer.transform(X_meta)
         return self.meta_model_.predict(X_meta)
 
 
