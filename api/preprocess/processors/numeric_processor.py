@@ -54,5 +54,8 @@ def build_numeric_pipeline(
     elif scaler_type == "robust":
         # 使用四分位距縮放，對極端值不敏感
         steps.append(('scaler', RobustScaler()))
+    
+    if len(steps) == 0:
+        return 'passthrough'
         
     return Pipeline(steps=steps)

@@ -32,3 +32,8 @@ python-dotenv>=1.0.0
 # optuna>=3.5.0
 # scipy>=1.10.0
 # tqdm>=4.65.0
+# ─────────────────────────────────────────────────────────────────────────────
+# Autogluon engine (baseline 對照組) — 需本機後端執行,~80MB 依賴。
+# 第一次 import 慢 (5-10 秒),但訓練本身一條龍夠自動。
+# 沒裝時 /api/train/autogluon/stream 會回 503 但其他 engine 照常運作。
+# autogluon.tabular>=1.0

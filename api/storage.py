@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import pickle
 import time
 import uuid
@@ -56,6 +57,11 @@ from api.auth.db import Model as DbModel
 from api.auth.db import PredictionArtifact as DbPredictionArtifact
 from api.auth.db import Preprocessor as DbPreprocessor
 from api.auth.db import TrainingRun as DbTrainingRun
+from api.bootstrap import (
+    MODEL_BLOB_DIR,
+    model_blob_max_bytes,
+    model_blob_file_threshold_bytes,
+)
 
 # Guest (未登入) 的 in-memory store — 重啟就消失
 from api.store import DATASETS, MODELS, PREPROCESSORS, get_owned, list_owned, stamp
@@ -70,6 +76,79 @@ def _is_authed(user) -> bool:
 
 def _uid(user) -> Optional[int]:
     return user.id if _is_authed(user) else None
+
+
+# ── File blob helpers ──────────────────────────────────────────────
+# 大 blob (Daniel ensemble 動輒 GB) 塞不進 DB bytea (SQLite 1GB 上限、Postgres 1GB TOAST 上限),
+# 改寫到檔案系統,DB 只存 "FILEBLOB:" + 絕對路徑。讀回時偵測 sentinel 自動 fopen。
+_FILE_BLOB_PREFIX = b"FILEBLOB:"
+
+
+def _blob_path(model_id: str, kind: str) -> str:
+    """回傳 (絕對路徑) 某 model 某種 blob 的檔案存放位置。"""
+    return os.path.abspath(os.path.join(MODEL_BLOB_DIR, f"{model_id}_{kind}.pkl"))
+
+
+def _maybe_offload_blob(blob_bytes: Optional[bytes], model_id: str, kind: str,
+                       force_file: bool = False) -> Optional[bytes]:
+    """
+    blob 超過門檻 (預設 50MB) 就改寫到檔案,DB 只存 sentinel + 路徑;否則直接回 raw bytes。
+    force_file=True 時不看門檻,一律寫檔(給「DB 一試就被拒」的呼叫者用)。
+    回傳 DB 要存的 bytes (sentinel + path) 或原 blob bytes;None → None。
+    """
+    if blob_bytes is None:
+        return None
+    threshold = model_blob_file_threshold_bytes()
+    if not force_file and (threshold == 0 or len(blob_bytes) <= threshold):
+        return blob_bytes
+    # 寫到檔案
+    os.makedirs(MODEL_BLOB_DIR, exist_ok=True)
+    path = _blob_path(model_id, kind)
+    with open(path, "wb") as f:
+        f.write(blob_bytes)
+    print(f"[storage] {model_id}/{kind} blob {len(blob_bytes)/1024/1024:.1f}MB → 寫到檔案 {path}",
+          flush=True)
+    return _FILE_BLOB_PREFIX + path.encode("utf-8")
+
+
+# 區分「DB 本來就沒存」vs「file blob 被刪了」的 sentinel,
+# get_model 把它放進回傳 entry 給上層判斷,UI / 預測 endpoint 才能給出正確錯誤訊息。
+BLOB_STATUS_OK = "ok"               # DB 有 bytes (inline 或 file 都讀得到)
+BLOB_STATUS_EMPTY = "empty"         # DB 沒存 (estimator 本來就沒進 DB)
+BLOB_STATUS_FILE_MISSING = "file_missing"   # DB 有 sentinel 但檔案被刪了 (model_blobs/ 被清掉)
+
+
+def _read_blob(db_value):
+    """讀 DB 的 blob 欄。回傳 (bytes_or_None, status)。
+       status 取值見 BLOB_STATUS_* 常數。"""
+    if db_value is None:
+        return None, BLOB_STATUS_EMPTY
+    if isinstance(db_value, memoryview):
+        db_value = bytes(db_value)
+    if isinstance(db_value, bytes) and db_value.startswith(_FILE_BLOB_PREFIX):
+        path = db_value[len(_FILE_BLOB_PREFIX):].decode("utf-8", errors="replace")
+        try:
+            with open(path, "rb") as f:
+                return f.read(), BLOB_STATUS_OK
+        except FileNotFoundError:
+            print(f"[storage] file blob 不存在 (被刪 / 換機器?): {path}", flush=True)
+            return None, BLOB_STATUS_FILE_MISSING
+        except Exception as e:
+            print(f"[storage] 讀 file blob 失敗 {path}: {e}", flush=True)
+            return None, BLOB_STATUS_FILE_MISSING
+    raw = db_value if isinstance(db_value, bytes) else bytes(db_value)
+    return raw, BLOB_STATUS_OK
+
+
+def _delete_blob_files(model_id: str) -> None:
+    """刪除某 model 對應的所有 blob 檔(estimator / scaler / x_test);不存在就跳過。"""
+    for kind in ("estimator", "scaler", "x_test"):
+        path = _blob_path(model_id, kind)
+        if os.path.exists(path):
+            try:
+                os.unlink(path)
+            except Exception as e:
+                print(f"[storage] 刪 file blob 失敗 {path}: {e}", flush=True)
 
 
 def _hydrate_dataset_df(ds: DbDataset) -> pd.DataFrame:
@@ -225,8 +304,32 @@ def delete_dataset(dataset_id: str, user, db: Session) -> dict:
     db.flush()
     db.delete(ds)
     db.commit()
+    # DB 都提交了再順手清 file blobs (失敗也不影響 DB 結果)
+    for mid in model_ids:
+        _delete_blob_files(mid)
     return {"ok": True, "removed": {"dataset": dataset_id,
                                      "preprocessors": pp_ids, "models": model_ids}}
+
+
+def delete_model(model_id: str, user, db: Session) -> dict:
+    """刪除單一 model row + 清掉對應的 file blobs。"""
+    if not _is_authed(user):
+        # guest 路徑:in-memory dict 直接 pop
+        if model_id not in MODELS:
+            raise HTTPException(status_code=404, detail="model 不存在")
+        owner_check = MODELS[model_id].get("_owner")
+        if owner_check != stamp({}, user).get("_owner"):
+            raise HTTPException(status_code=404, detail="model 不存在")
+        MODELS.pop(model_id, None)
+        return {"ok": True, "removed": {"model": model_id}}
+
+    m = db.query(DbModel).filter_by(id=model_id, user_id=user.id).first()
+    if m is None:
+        raise HTTPException(status_code=404, detail="model 不存在")
+    db.delete(m)
+    db.commit()
+    _delete_blob_files(model_id)
+    return {"ok": True, "removed": {"model": model_id}}
 
 
 # ============================================================
@@ -366,15 +469,12 @@ def save_model(
     training_run_id: Optional[str] = None,
     hyperparameters: Optional[dict] = None,
     commit: bool = True,
-    blob_max_override: Optional[int] = None,
     estimator_pkl_bytes: Optional[bytes] = None,
 ) -> str:
     """存 sklearn 模型 — bundle + estimator + scaler + X_test (給 SHAP) + hyperparams。
 
     commit=False:只 db.add() 不 commit,讓呼叫者 (event_stream) 在迴圈結束後一次 commit,
                   把 N 次 round-trip 壓成 1 次,大幅加速。
-    blob_max_override:覆寫單一 blob 的大小上限 (預設 20 MB),給 Daniel ensemble bundle
-                       這種特別大的物件用 (200 MB+)。
     estimator_pkl_bytes:直接傳「已經 pickle 好的 bytes」,跳過 estimator 參數的二次 pickle。
                          給 daniel pipeline 用 (bundle 已在 subprocess 內 dump 完)。
     """
@@ -400,34 +500,37 @@ def save_model(
         }, user)
         return model_id
 
-    # DB path — pickle 太大時(>BLOB_MAX)就跳過,只存 bundle。
-    _BLOB_MAX = blob_max_override if blob_max_override is not None else 20 * 1024 * 1024
+    # DB path — pickle 失敗時 (例如 Lock / 不可序列化物件) 才跳過。
+    # 大小上限從 bootstrap.MODEL_BLOB_MAX_MB 讀;-1 = 不限制 (預設)。
+    _BLOB_MAX = model_blob_max_bytes()
+
+    def _too_big(blob_len: int, label: str) -> bool:
+        if _BLOB_MAX is None or blob_len <= _BLOB_MAX:
+            return False
+        print(f"[save_model] {label} pickle 太大 ({blob_len/1024/1024:.1f}MB > "
+              f"{_BLOB_MAX/1024/1024:.0f}MB),跳過 — "
+              f"此模型不能跑 SHAP/predict,但洞察/排行榜顯示正常", flush=True)
+        return True
 
     def _safe_pickle(obj, label):
-        """pickle 物件;太大或失敗就回 None 並印 warning。"""
+        """pickle 物件;失敗或超過上限就回 None 並印 warning。"""
         if obj is None:
             return None
         try:
             blob = pickle.dumps(obj, protocol=pickle.HIGHEST_PROTOCOL)
-            if len(blob) > _BLOB_MAX:
-                print(f"[save_model] {label} pickle 太大 ({len(blob)/1024/1024:.1f}MB > "
-                      f"{_BLOB_MAX/1024/1024:.0f}MB),跳過 — "
-                      f"此模型不能跑 SHAP/predict,但洞察/排行榜顯示正常",
-                      flush=True)
-                return None
-            return blob
         except Exception as e:
             print(f"[save_model] {label} pickle 失敗: {e} — 此模型不能跑 SHAP/predict", flush=True)
             return None
+        return None if _too_big(len(blob), label) else blob
 
-    # daniel ensemble:bytes 已從 subprocess 寫好的 pickle 檔讀進來,直接驗 size 用,不再 pickle 一次
+    # daniel ensemble:bytes 已從 subprocess 寫好的 pickle 檔讀進來,直接用,不再 pickle 一次
     if estimator_pkl_bytes is not None:
-        if len(estimator_pkl_bytes) > _BLOB_MAX:
-            print(f"[save_model] estimator (pre-pickled bytes) 太大 "
-                  f"({len(estimator_pkl_bytes)/1024/1024:.1f}MB > {_BLOB_MAX/1024/1024:.0f}MB),跳過", flush=True)
+        size_mb = len(estimator_pkl_bytes) / 1024 / 1024
+        if _too_big(len(estimator_pkl_bytes), "estimator (pre-pickled)"):
             estimator_blob = None
         else:
             estimator_blob = estimator_pkl_bytes
+            print(f"[save_model] estimator (pre-pickled) {size_mb:.1f}MB", flush=True)
     else:
         estimator_blob = _safe_pickle(estimator, "estimator")
     scaler_blob    = _safe_pickle(scaler,    "scaler")
@@ -437,6 +540,12 @@ def save_model(
         x_test_blob = None
     else:
         x_test_blob = _safe_pickle(X_test_df, "x_test")
+
+    # 大 blob (> 50MB 預設) 自動 offload 到檔案系統 — DB 只存 sentinel + 路徑。
+    # 避開 SQLite/Postgres 單 row 上限 (~1GB) 跟 statement_timeout (Supabase 8s) 的天花板。
+    estimator_blob = _maybe_offload_blob(estimator_blob, model_id, "estimator")
+    scaler_blob    = _maybe_offload_blob(scaler_blob,    model_id, "scaler")
+    x_test_blob    = _maybe_offload_blob(x_test_blob,    model_id, "x_test")
 
     db.add(DbModel(
         id=model_id,
@@ -516,8 +625,14 @@ def get_model(model_id: str, user, db: Session) -> dict:
     if m is None:
         raise HTTPException(status_code=404, detail="model 不存在")
 
+    # 三個 blob 欄走 _read_blob,FILEBLOB: sentinel 會自動從檔案讀回;
+    # status 區分「DB 沒存」vs「檔案不見」,讓上層 endpoint 給出正確錯誤訊息。
+    est_bytes,    est_status    = _read_blob(m.estimator_pkl)
+    scaler_bytes, _scaler_status = _read_blob(m.scaler_pkl)
+    xtest_bytes,  _xtest_status  = _read_blob(m.x_test_pkl)
+
     # X_test_df:預處理來源的模型不存自己的 pickle,從 preprocessor 撈
-    x_test_df = pickle.loads(m.x_test_pkl) if m.x_test_pkl else None
+    x_test_df = pickle.loads(xtest_bytes) if xtest_bytes else None
     if x_test_df is None and m.preprocessor_id:
         pp = db.query(DbPreprocessor).filter_by(id=m.preprocessor_id, user_id=user.id).first()
         if pp and pp.train_test_pkl:
@@ -530,8 +645,9 @@ def get_model(model_id: str, user, db: Session) -> dict:
     return {
         "id": m.id,
         "bundle": json.loads(m.bundle_json) if m.bundle_json else {},
-        "estimator": pickle.loads(m.estimator_pkl) if m.estimator_pkl else None,
-        "scaler": pickle.loads(m.scaler_pkl) if m.scaler_pkl else None,
+        "estimator": pickle.loads(est_bytes) if est_bytes else None,
+        "estimatorStatus": est_status,   # ok / empty / file_missing — 給 endpoint 分流錯誤訊息
+        "scaler": pickle.loads(scaler_bytes) if scaler_bytes else None,
         "featureNames": json.loads(m.feature_names_json) if m.feature_names_json else [],
         "X_test_df": x_test_df,
         "preprocessorId": m.preprocessor_id,
@@ -583,6 +699,7 @@ def finish_training_run(
     has_predictions: bool = False,
     error_msg: Optional[str] = None,
     elapsed_sec: Optional[float] = None,
+    task_type: Optional[str] = None,
 ) -> None:
     if run_id is None or not _is_authed(user):
         return
@@ -591,6 +708,10 @@ def finish_training_run(
     run.status = status
     run.finished_at = datetime.utcnow()
     run.elapsed_sec = elapsed_sec
+    # 從 result 推回真正的 task_type (create_training_run 那邊 hardcoded classification,
+    # TS regression 跑完才知道實際是 regression)
+    if task_type:
+        run.task_type = task_type
     if results_summary is not None:
         run.results_summary_json = json.dumps(results_summary, ensure_ascii=False, default=_json_default)
         # 補上真正的 dataset 檔名 (create 時是 "(loading)" 佔位,完成才知道實際名稱)

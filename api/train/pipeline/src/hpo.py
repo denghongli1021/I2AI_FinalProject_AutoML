@@ -61,7 +61,7 @@ _SCOUT_DEFAULTS: dict = {
         "feature_set": "raw",
         "depth": 6,
         "learning_rate": 0.05,
-        "iterations": 150,
+        "iterations": 200,
         "l2_leaf_reg": 3.0,
         "bagging_temperature": 0.5,
     },
@@ -133,9 +133,9 @@ def _tabular_space(name: str, trial: optuna.Trial, feat_sets: list,
         })
     elif name == "catboost":
         params.update({
-            "depth": trial.suggest_int("depth", 4, 6),
+            "depth": trial.suggest_int("depth", 4, 8),
             "learning_rate": trial.suggest_float("learning_rate", 5e-3, 0.3, log=True),
-            "iterations": trial.suggest_int("iterations", 100, 200),
+            "iterations": trial.suggest_int("iterations", 100, 500),
             "l2_leaf_reg": trial.suggest_float("l2_leaf_reg", 1e-8, 10.0, log=True),
             "bagging_temperature": trial.suggest_float("bagging_temperature", 0.0, 1.0),
         })
@@ -185,6 +185,9 @@ def _tabular_space(name: str, trial: optuna.Trial, feat_sets: list,
 
 def _dl_train_space(trial: optuna.Trial) -> dict:
     """DL 訓練超參數搜尋空間（CNN / MLP 用）。"""
+    n_epochs = trial.suggest_int("n_epochs", 20, 50)
+    # t_max ∈ [n_epochs//2, n_epochs]，確保 CosineAnnealingLR 最多 2 個週期
+    t_max = trial.suggest_int("t_max", max(5, n_epochs // 2), n_epochs)
     return {
         "lr": trial.suggest_float("lr", 1e-5, 1e-2, log=True),
         "weight_decay": trial.suggest_float("weight_decay", 1e-6, 1e-2, log=True),
@@ -192,14 +195,17 @@ def _dl_train_space(trial: optuna.Trial) -> dict:
         "label_smoothing": trial.suggest_float("label_smoothing", 0.0, 0.2),
         "mixup_alpha": trial.suggest_float("mixup_alpha", 0.0, 0.5),
         "mixup_prob": trial.suggest_float("mixup_prob", 0.0, 1.0),
-        "t_max": trial.suggest_int("t_max", 5, 30),
-        "n_epochs": trial.suggest_int("n_epochs", 20, 50),
+        "t_max": t_max,
+        "n_epochs": n_epochs,
         "patience": trial.suggest_int("patience", 5, 10),
     }
 
 
 def _transformer_train_space(trial: optuna.Trial) -> dict:
     """Transformer / PatchTST 專用訓練超參數（更多 epoch、更低 lr）。"""
+    n_epochs = trial.suggest_int("n_epochs", 40, 120)
+    # t_max ∈ [n_epochs//2, n_epochs]，確保 CosineAnnealingLR 最多 2 個週期
+    t_max = trial.suggest_int("t_max", max(15, n_epochs // 2), n_epochs)
     return {
         "lr": trial.suggest_float("lr", 1e-5, 3e-3, log=True),
         "weight_decay": trial.suggest_float("weight_decay", 1e-5, 1e-2, log=True),
@@ -207,9 +213,9 @@ def _transformer_train_space(trial: optuna.Trial) -> dict:
         "label_smoothing": trial.suggest_float("label_smoothing", 0.0, 0.15),
         "mixup_alpha": trial.suggest_float("mixup_alpha", 0.0, 0.4),
         "mixup_prob": trial.suggest_float("mixup_prob", 0.0, 0.8),
-        "t_max": trial.suggest_int("t_max", 30, 100),
-        "n_epochs": trial.suggest_int("n_epochs", 80, 200),
-        "patience": trial.suggest_int("patience", 10, 20),
+        "t_max": t_max,
+        "n_epochs": n_epochs,
+        "patience": trial.suggest_int("patience", 8, 15),
     }
 
 
@@ -239,6 +245,14 @@ def _transformer_arch_space(trial: optuna.Trial, in_features: int) -> dict:
         "ff_dim": trial.suggest_categorical("ff_dim", [256, 512, 1024, 2048]),
         "dropout": trial.suggest_float("dropout", 0.0, 0.3),
         "norm_first": norm_first,
+    }
+
+
+def _resnet_arch_space(trial: optuna.Trial) -> dict:
+    """ResNet1D_18 架構搜尋空間（固定深度，只搜 channels 與 dropout）。"""
+    return {
+        "channels": trial.suggest_categorical("channels", [32, 64, 128, 256]),
+        "dropout": trial.suggest_float("dropout", 0.0, 0.5),
     }
 
 
@@ -323,6 +337,11 @@ class TabularHPO:
             cv = StratifiedKFold(n_splits=self.n_folds, shuffle=True, random_state=SEED)
             folds = list(cv.split(X, y))
 
+        # HPO 評估折數：預設與 n_folds 相同，可由 global_cfg["hpo_n_folds"] 縮短
+        # （Final CV 仍使用完整 n_folds，此設定只影響 HPO objective 的評估速度）
+        hpo_n_folds = min(len(folds), global_cfg.get("hpo_n_folds", len(folds)))
+        hpo_folds = folds[:hpo_n_folds]
+
         # === 預先計算所有 feature_set × fold 組合，消除 objective 內的重複 FeatureBuilder ===
         _all_fs: set = set()
         for _n in self.model_names:
@@ -340,10 +359,10 @@ class TabularHPO:
                 _all_fs.update(CATBOOST_FEATURE_SETS)
             else:
                 _all_fs.update(TABULAR_FEATURE_SETS)
-        print(f"  [HPO] Pre-computing {len(_all_fs)} feature set(s) × {len(folds)} folds ...")
+        print(f"  [HPO] Pre-computing {len(_all_fs)} feature set(s) × {hpo_n_folds} folds ...")
         _feat_cache: dict = {}
         for _fs in sorted(_all_fs):
-            for _fi, (_tr, _vl) in enumerate(folds):
+            for _fi, (_tr, _vl) in enumerate(hpo_folds):
                 _fb = FeatureBuilder(feature_set=_fs, global_cfg=global_cfg)
                 _feat_cache[(_fs, _fi)] = (_fb.fit_transform(X[_tr]), _fb.transform(X[_vl]))
 
@@ -379,19 +398,19 @@ class TabularHPO:
                     merged = _tabular_space(_name, trial, _fs, global_cfg=_gcfg)
                 fs = merged.pop("feature_set")
                 model_params = merged
-                # KNN 防呆:n_neighbors 不得超過最小 fold 訓練樣本數
+                # KNN 防呆：n_neighbors 不得超過最小 fold 訓練樣本數
                 if _name == "knn" and "n_neighbors" in model_params:
                     model_params["n_neighbors"] = max(1, min(model_params["n_neighbors"], _min_train - 1))
 
                 scores = []
-                for _fi, (tr_idx, val_idx) in enumerate(folds):
+                for _fi, (tr_idx, val_idx) in enumerate(hpo_folds):
                     X_tr, X_val = _feat_cache[(fs, _fi)]
                     m = build_tabular_model(_name, model_params, device=_device, class_weight=_cw)
                     if _name == "lgbm":
                         import lightgbm as _lgb
                         m.fit(X_tr, y[tr_idx],
                               eval_set=[(X_val, y[val_idx])],
-                              callbacks=[_lgb.early_stopping(50, verbose=False),
+                              callbacks=[_lgb.early_stopping(100, verbose=False),
                                          _lgb.log_evaluation(-1)])
                     elif hasattr(m, "early_stopping_rounds") and m.early_stopping_rounds:
                         m.fit(X_tr, y[tr_idx], eval_set=[(X_val, y[val_idx])], verbose=False)
@@ -510,7 +529,7 @@ class TabularHPO:
             _scout_cw = "balanced" if self.metric != "accuracy" else None
 
             def objective(trial, _name=name, _fs=fs_candidates, _scout_cw=_scout_cw,
-                          _gcfg=global_cfg):
+                         _gcfg=global_cfg):
                 merged = _tabular_space(_name, trial, _fs, global_cfg=_gcfg)
                 fs = merged.pop("feature_set")
                 fold_scores = []
@@ -620,7 +639,7 @@ class DLHPO:
         else:
             fs_candidates = TRANSFORMER_FEATURE_SETS
 
-        # HPO 評估:使用前 n_hpo_folds 個 fold 平均分數,降低 selection bias
+        # HPO 評估：使用前 n_hpo_folds 個 fold 平均分數，降低 selection bias
         if is_ts:
             fold_splits = get_ts_folds(len(X), n_splits=5)
         else:
@@ -645,11 +664,13 @@ class DLHPO:
                 X_tr = fb.fit_transform(X[tr_idx])
                 X_val = fb.transform(X[val_idx])
 
-                # arch space 只在第一個 fold 確定 (in_features 跨 fold 穩定)
+                # arch space 只在第一個 fold 確定（in_features 跨 fold 穩定）
                 if i == 0:
                     cur_in = X_tr.shape[1]
-                    if self.model_name in ("cnn1d", "resnet1d"):
+                    if self.model_name == "cnn1d":
                         arch_p = _cnn_arch_space(trial)
+                    elif self.model_name == "resnet1d":
+                        arch_p = _resnet_arch_space(trial)
                     elif self.model_name == "tcn":
                         arch_p = _tcn_arch_space(trial)
                     elif self.model_name == "patchtst":

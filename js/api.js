@@ -74,10 +74,20 @@ const ApiClient = {
   },
 
   async preprocessTransform(payload) {
+    // 改用 multipart 是為了支援可選的 adversarialTestFile (Kaggle 風 test.csv)
+    // 觸發 daniel preprocess_for_training 的 adversarial validation
+    const fd = new FormData();
+    fd.append('datasetId', String(payload.datasetId));
+    fd.append('target', String(payload.target));
+    if (payload.testSize != null) fd.append('testSize', String(payload.testSize));
+    // useMice / useMiSelection 已被 daniel 新版內部接管,還是送過去當紀錄
+    if (payload.useMice != null) fd.append('useMice', String(!!payload.useMice));
+    if (payload.useMiSelection != null) fd.append('useMiSelection', String(!!payload.useMiSelection));
+    if (payload.miThreshold != null) fd.append('miThreshold', String(payload.miThreshold));
+    if (payload.adversarialTestFile) fd.append('adversarialTestFile', payload.adversarialTestFile);
     const r = await fetch(`${this.baseUrl}/api/preprocess/transform`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
+      body: fd,   // 不要設 Content-Type, fetch 會自動加 multipart boundary
     });
     if (!r.ok) throw new Error(`transform 失敗 (${r.status}): ${await r.text()}`);
     return r.json();
@@ -127,10 +137,13 @@ const ApiClient = {
   // ---- 3b. VISUALIZE (SHAP) — 隊友 AutoMLVisualizer ----
   // payload: { modelId, sampleIndex, targetFeature?, maxSamples? }
   async visualizeShap(payload) {
+    // signal 從 payload 抽出 → AbortController 控制取消
+    const { signal, ...body } = payload;
     const r = await fetch(`${this.baseUrl}/api/visualize/shap`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
+      body: JSON.stringify(body),
+      signal,
     });
     if (!r.ok) throw new Error(`SHAP 失敗 (${r.status}): ${await r.text()}`);
     return r.json();

@@ -21,6 +21,7 @@ import math
 import json
 import time
 import shutil
+import hashlib
 import numpy as np
 
 from src.config import DEVICE, ARTIFACTS_DIR
@@ -102,11 +103,12 @@ def get_cfg(fast: bool, n_samples: int = 10_000) -> dict:
         return {
             "tabular_trials": 5,  "tabular_top_k": 1,
             "scout_trials": 3,    "scout_val_size": 0.2, "scout_ratio": 2 / 3,
-            "nas_epochs": 5,      "nas_candidates": 5,   "nas_rounds": 2,
+            "nas_epochs": 5,      "nas_candidates": 5,   "nas_rounds": 1,
             "mlp_train_trials": 3,"mlp_top_k": 1,
-            "dl_trials": 3,       "transformer_trials": 15, "dl_top_k": 1,
+            "dl_trials": 3,       "transformer_trials": 5, "dl_top_k": 1,
             "meta_trials": 3,     "blend_restarts": 1,
             "n_repeats": 1,       "n_seeds": 1,
+            "hpo_n_folds": 3,     # HPO 評估 3-fold 兼顧速度與穩定性;Final CV 仍 5-fold
             "use_kpca": False,    "use_kmeans": False,
             "use_resnet18": False,"use_1d_aug": False,
             "is_fast": True,      "tabular_model_timeout": 1000,  # 每模型最多 ~17 分鐘
@@ -125,13 +127,14 @@ def get_cfg(fast: bool, n_samples: int = 10_000) -> dict:
         }
     if n_samples < 50_000:
         return {
-            "tabular_trials": 20, "tabular_top_k": 2,   # top_k=2 → 每模型保留兩組超參，增加 ensemble 多樣性
-            "scout_trials": 7,    "scout_val_size": 0.2, "scout_ratio": 2 / 3,
-            "nas_epochs": 10,     "nas_candidates": 8,   "nas_rounds": 2,
-            "mlp_train_trials": 8,"mlp_top_k": 1,
-            "dl_trials": 8,       "transformer_trials": 15, "dl_top_k": 1,
-            "meta_trials": 15,    "blend_restarts": 3,   # 更多 meta-learner 試次 + blend 重啟
+            "tabular_trials": 12, "tabular_top_k": 2,   # top_k=2 → 每模型保留兩組超參,增加 ensemble 多樣性
+            "scout_trials": 5,    "scout_val_size": 0.2, "scout_ratio": 2 / 3,
+            "nas_epochs": 10,     "nas_candidates": 8,   "nas_rounds": 1,
+            "mlp_train_trials": 5,"mlp_top_k": 1,
+            "dl_trials": 5,       "transformer_trials": 8, "dl_top_k": 1,
+            "meta_trials": 8,     "blend_restarts": 3,
             "n_repeats": 1,       "n_seeds": 1,
+            "hpo_n_folds": 3,     # HPO 評估 3-fold (跟 Scout 一致);Final CV 仍 5-fold
             "use_kpca": True,     "use_kmeans": True,
             "use_resnet18": True, "use_1d_aug": False,
         }
@@ -169,6 +172,14 @@ class PipelineResult:
 
 
 # ── 主引擎 ────────────────────────────────────────────────────────────────────
+
+def _cfg_hash(cfg: dict) -> str:
+    """P0-1: 依影響特徵維度的 global_cfg 欄位計算 6 位 hash,
+    防止 fast / standard / use_kpca on/off 等不同 cfg 共用同名 .npy 快取互相污染。"""
+    sig_keys = ("use_kpca", "use_kmeans", "n_components", "n_segments")
+    sig = {k: cfg.get(k) for k in sig_keys}
+    return hashlib.md5(json.dumps(sig, sort_keys=True).encode()).hexdigest()[:6]
+
 
 def run(
     X_train: np.ndarray,
@@ -231,16 +242,29 @@ def run(
             val_size=cfg["scout_val_size"],
             global_cfg=cfg,
         )
-        ranked     = sorted(scout_scores.items(), key=lambda kv: kv[1], reverse=True)
-        n_keep     = math.ceil(len(ranked) * cfg["scout_ratio"])
-        best_score = ranked[0][1] if ranked else 0.0
-        threshold  = best_score * (1.0 - cfg.get("scout_drop_tol", 0.07))
-        # 保留條件：同時滿足「前 2/3」與「不低於最佳 7%」
-        selected = [n for n, s in ranked[:n_keep] if s >= threshold]
-        dropped  = [n for n, _ in ranked if n not in selected]
-        print("  [Scout] 排名: " + "  ".join(f"{n}={s:.4f}" for n, s in ranked))
-        print(f"  [Scout] 閾值: {threshold:.4f} (best={best_score:.4f} × 93%)")
-        print(f"  [Scout] 保留 {len(selected)}/{len(ranked)}: {selected}  （淘汰: {dropped}）")
+        # P0-2: NaN 過濾 — NaN 分數比較行為未定義,sorted 會擾亂順序,
+        # 而且 NaN >= threshold 永遠 False → 該模型自動被淘汰但訊息不清楚。
+        # 先排除掉 NaN,讓 ranked / threshold 計算只看有效分數。
+        _nan_failed = [n for n, s in scout_scores.items() if isinstance(s, float) and math.isnan(s)]
+        valid_items = [(n, s) for n, s in scout_scores.items()
+                       if not (isinstance(s, float) and math.isnan(s))]
+        if _nan_failed:
+            print(f"  [Scout] 警告:{_nan_failed} 所有 trial 失敗 (score=NaN),已排除")
+        if not valid_items:
+            print("  [Scout] 所有模型均失敗,退化使用全部模型 (黃金預設值保底)")
+            selected = list(scout_scores.keys())
+            dropped  = []
+        else:
+            ranked     = sorted(valid_items, key=lambda kv: kv[1], reverse=True)
+            n_keep     = math.ceil(len(ranked) * cfg["scout_ratio"])
+            best_score = ranked[0][1]
+            threshold  = best_score * (1.0 - cfg.get("scout_drop_tol", 0.07))
+            # 保留條件:同時滿足「前 2/3」與「不低於最佳 7%」
+            selected = [n for n, s in ranked[:n_keep] if s >= threshold]
+            dropped  = [n for n, _ in ranked if n not in selected] + _nan_failed
+            print("  [Scout] 排名: " + "  ".join(f"{n}={s:.4f}" for n, s in ranked))
+            print(f"  [Scout] 閾值: {threshold:.4f} (best={best_score:.4f} × 93%)")
+            print(f"  [Scout] 保留 {len(selected)}/{len(ranked)}: {selected}  (淘汰: {dropped})")
 
         # 黃金預設值保底：Scout 結束後立即注入，確保時間不足時仍有可用模型
         _presets: dict = {}
@@ -272,7 +296,8 @@ def run(
                 for name in selected
             }
             actual_total = sum(per_model_trials.values())
-            print(f"\n[2b] Tabular Full HPO ({actual_total} trials ÷ {n_keep} models, 5-Fold CV) ...")
+            _hpo_nf = cfg.get("hpo_n_folds", 5)
+            print(f"\n[2b] Tabular Full HPO ({actual_total} trials ÷ {n_keep} models, {_hpo_nf}-Fold CV) ...")
             print("  [Alloc] " + "  ".join(f"{n}={t}" for n, t in per_model_trials.items()))
 
             # 從 Scout 結果鎖定每個模型的最佳 feature_set，讓 HPO 專注在超參數空間
@@ -422,24 +447,38 @@ def run(
         raise RuntimeError("沒有任何 model config！請確認 HPO 成功完成。")
 
     print(f"\n[7] 5-Fold CV — {len(all_configs)} 個模型 config ...")
+    # P0-1: cfg hash 防止 fast / standard / use_kpca on/off 等不同 cfg 用同名 .npy 互相污染
+    _ch = _cfg_hash(cfg)
     per_config_folds = []   # 每 config 一個 list of fold artifacts (cache hit 則為 None)
     for i, config in enumerate(all_configs):
-        tag      = f"{config['model_name']}_{config['feature_set']}_c{i}".replace("/", "_")
+        tag      = f"{config['model_name']}_{config['feature_set']}_c{i}_{_ch}".replace("/", "_")
         oof_path = os.path.join(artifacts_dir, f"{tag}_oof.npy")
         tst_path = os.path.join(artifacts_dir, f"{tag}_test.npy")
+        cache_valid = False
+        oof = test_pred = None
         if os.path.exists(oof_path) and os.path.exists(tst_path):
-            # 快取命中:OOF / test 不重算,但 fold model 也沒重訓 → bundle 缺這個 config
-            print(f"  [CV] 載入快取 {tag} (fold model 沒在快取裡 → ensemble bundle 會缺這個 config)")
-            oof      = np.load(oof_path)
+            oof       = np.load(oof_path)
             test_pred = np.load(tst_path)
-            per_config_folds.append(None)
-        else:
+            # 新版 (daniel f7089d9):shape 驗證 — 使用者改 dataset 大小但 artifacts dir 殘留
+            # 舊 .npy 時,直接 load 會炸 IndexError 或拼接 ensemble 時維度不符。
+            # 若 oof / test_pred 行數對不上 → 視為失效快取,重算
+            if oof.shape[0] == len(y_train) and test_pred.shape[0] == len(X_test):
+                print(f"  [CV] 載入快取 {tag} (fold model 沒在快取裡 → ensemble bundle 會缺這個 config)")
+                cache_valid = True
+                per_config_folds.append(None)
+            else:
+                print(f"  [CV] 快取 shape 不符 (oof={oof.shape[0]} vs y_train={len(y_train)}),"
+                      f"重新計算 {tag}")
+        if not cache_valid:
             fold_artifacts = []   # 收集這個 config 的 5 fold (fb, model)
             oof, test_pred = run_cv(
                 config, X_train, y_train, X_test, n_classes,
                 device=DEVICE, tag=tag, global_cfg=cfg, metric=metric,
                 collect_folds=fold_artifacts,
             )
+            # P0-1: 寫回 cache 到 per-dataset artifacts_dir,下次同一份資料才能跳過重訓
+            np.save(oof_path, oof)
+            np.save(tst_path, test_pred)
             per_config_folds.append(fold_artifacts)
         all_oof.append(oof)
         all_test.append(test_pred)
@@ -447,17 +486,27 @@ def run(
 
     # ── [7.5] 儲存最佳 Tabular 與 DL 模型 ────────────────────────────────────
     from src.metrics import calculate_score as _calc
-    _TABULAR = {"lgbm", "xgb", "catboost", "rf", "extra_trees", "logreg", "knn"}
-    _DL      = {"mlp", "cnn1d", "resnet1d", "tcn", "transformer", "patchtst", "tsnet"}
+    _TABULAR   = {"lgbm", "xgb", "catboost", "rf", "extra_trees", "logreg", "knn"}
+    _DL        = {"mlp", "cnn1d", "resnet1d", "tcn", "transformer", "patchtst", "tsnet"}
+    _ALL_NAMES = sorted(_TABULAR | _DL, key=len, reverse=True)
+
+    def _model_type(tag: str) -> str:
+        """從 tag (如 extra_trees_raw_stat_c0) 還原正確的 model_name。
+        舊版 tag.split('_')[0] 在 extra_trees 之類含底線的模型名會切錯。"""
+        for n in _ALL_NAMES:
+            if tag.startswith(n + "_"):
+                return n
+        return tag.split("_")[0]
+
     tab_candidates = [
         (_calc(y_train, oof.argmax(1), metric=metric), tag)
         for tag, oof in zip(model_tags, all_oof)
-        if tag.split("_")[0] in _TABULAR
+        if _model_type(tag) in _TABULAR
     ]
     dl_candidates = [
         (_calc(y_train, oof.argmax(1), metric=metric), tag)
         for tag, oof in zip(model_tags, all_oof)
-        if tag.split("_")[0] in _DL
+        if _model_type(tag) in _DL
     ]
     for candidates, ext, dst_name in [
         (tab_candidates, ".pkl", "best_tabular_model.pkl"),
@@ -472,7 +521,53 @@ def run(
             shutil.copy2(src, dst)
             print(f"  [Best Model] {best_tag} → {dst_name}")
         else:
-            print(f"  [Best Model] 模型檔未找到（已跳過快取？）:{src}")
+            print(f"  [Best Model] 模型檔未找到(已跳過快取?):{src}")
+
+    # Copy FeatureBuilder for the best tabular model (used by SHAP visualization)
+    if tab_candidates:
+        _, best_tab_tag = max(tab_candidates)
+        fb_src = os.path.join(ARTIFACTS_DIR, f"{best_tab_tag}_best_model_fb.pkl")
+        fb_dst = os.path.join(artifacts_dir, "best_tabular_model_fb.pkl")
+        if os.path.exists(fb_src):
+            shutil.copy2(fb_src, fb_dst)
+            print(f"  [Best Model] FeatureBuilder({best_tab_tag}) → best_tabular_model_fb.pkl")
+
+    # ── [7.5b] 每種模型類型各儲存一個最佳模型 ──────────────────────────────────
+    model_best: dict = {}  # model_name -> (score, tag)
+    for tag, oof in zip(model_tags, all_oof):
+        mname = _model_type(tag)
+        score = _calc(y_train, oof.argmax(1), metric=metric)
+        if mname not in model_best or score > model_best[mname][0]:
+            model_best[mname] = (score, tag)
+
+    print("\n  [Per-Model Best] 儲存各模型類型最佳版本:")
+    for mname, (score, best_tag) in sorted(model_best.items()):
+        ext = ".pkl" if mname in _TABULAR else ".pt"
+        src = os.path.join(ARTIFACTS_DIR, f"{best_tag}_best_model{ext}")
+        dst = os.path.join(artifacts_dir, f"{mname}_best_model{ext}")
+        if os.path.exists(src):
+            shutil.copy2(src, dst)
+            print(f"    {mname}_best_model{ext}  (OOF {metric}={score:.4f},來自 {best_tag})")
+        else:
+            print(f"    {mname}_best_model{ext}  ← 模型檔未找到(快取跳過?)")
+        if mname in _TABULAR:
+            fb_src = os.path.join(ARTIFACTS_DIR, f"{best_tag}_best_model_fb.pkl")
+            fb_dst = os.path.join(artifacts_dir, f"{mname}_best_model_fb.pkl")
+            if os.path.exists(fb_src):
+                shutil.copy2(fb_src, fb_dst)
+
+    # ── [7.6] 丟掉最差 DL 模型 ───────────────────────────────────────────────
+    # 注意:per_config_folds 跟 model_tags / all_oof / all_test 是 1-1 對應的,
+    # 一起 pop 才不會錯位讓 ensemble bundle 持久化撈錯 fold artifacts。
+    if len(dl_candidates) > 1:
+        worst_score, worst_tag = min(dl_candidates)
+        worst_idx = model_tags.index(worst_tag)
+        all_oof.pop(worst_idx)
+        all_test.pop(worst_idx)
+        model_tags.pop(worst_idx)
+        if worst_idx < len(per_config_folds):
+            per_config_folds.pop(worst_idx)
+        print(f"\n[7.6] Prune 最差 DL 模型 {worst_tag}(OOF {metric}={worst_score:.4f})")
 
     # ── [8] Ensemble A: Nelder-Mead Blending ──────────────────────────────────
     print("\n[8] Ensemble A — Nelder-Mead Weighted Blending ...")

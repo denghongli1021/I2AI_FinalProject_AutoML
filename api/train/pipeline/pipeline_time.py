@@ -17,6 +17,8 @@ pipeline_time.py — 時序專用 Pipeline 引擎（分類 + 回歸）
 """
 from __future__ import annotations
 
+import hashlib
+import json as _json_cfg
 import math
 import os
 import time
@@ -43,10 +45,12 @@ except ImportError:
 from scipy.optimize import minimize
 from scipy.special import softmax
 from sklearn.ensemble import ExtraTreesRegressor, RandomForestRegressor
+from sklearn.impute import SimpleImputer
 from sklearn.linear_model import Ridge
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from sklearn.model_selection import KFold
 from sklearn.neighbors import KNeighborsRegressor
+from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import RobustScaler, StandardScaler
 from tqdm import tqdm
 
@@ -211,9 +215,12 @@ def build_reg_tabular_model(name: str, params: dict, seed: int = SEED, device: s
     if name == "extra_trees":
         return ExtraTreesRegressor(**params, random_state=seed, n_jobs=-2)
     if name == "ridge":
-        return Ridge(**params, random_state=seed)
+        # NaN-safe wrapper:Ridge 不接 NaN,前面套 median imputer 避免 raw_stat_fft
+        # 特徵裡的 NaN 直接炸
+        return make_pipeline(SimpleImputer(strategy='median'), Ridge(**params, random_state=seed))
     if name == "knn":
-        return KNeighborsRegressor(**params, n_jobs=-2)
+        # 同樣:KNN 距離計算遇 NaN 會 ValueError
+        return make_pipeline(SimpleImputer(strategy='median'), KNeighborsRegressor(**params, n_jobs=-2))
     raise ValueError(f"Unknown regression tabular model: {name}")
 
 
@@ -707,7 +714,8 @@ class DLRegHPO:
 # ── 5-Fold CV ────────────────────────────────────────────────────────────────
 
 def run_reg_tabular_cv(config, X, y, X_test, device=None, tag=None, save_artifacts=True,
-                       global_cfg=None, metric="rmse"):
+                       global_cfg=None, metric="rmse", collect_folds=None):
+    """collect_folds: 傳 list 進來就把每 fold 的 (fb, model) 收進去供 ensemble 持久化。"""
     device = device or DEVICE
     global_cfg = global_cfg or {}
     tag = tag or f"{config['model_name']}_{config['feature_set']}"
@@ -739,6 +747,9 @@ def run_reg_tabular_cv(config, X, y, X_test, device=None, tag=None, save_artifac
         test_preds += m.predict(X_te) / len(folds)
         fold_pbar.set_postfix({f"fold_{metric}": f"{calc_reg_score(y[val_idx], m.predict(X_v), metric=metric):.4f}"})
 
+        if collect_folds is not None:
+            collect_folds.append({"fb": fb, "model": m})
+
     mask = oof_counts > 0
     oof[mask] /= oof_counts[mask]
     oof_score = calc_reg_score(y[mask], oof[mask], metric=metric)
@@ -751,7 +762,8 @@ def run_reg_tabular_cv(config, X, y, X_test, device=None, tag=None, save_artifac
 
 
 def run_reg_dl_cv(config, X, y, X_test, device=None, tag=None, save_artifacts=True,
-                  global_cfg=None, metric="rmse"):
+                  global_cfg=None, metric="rmse", collect_folds=None):
+    """collect_folds: 傳 list 進來就把每 fold 的 (fb, state_dict + arch + meta) 收進去。"""
     device = device or DEVICE
     global_cfg = global_cfg or {}
     tag = tag or f"{config['model_name']}_{config['feature_set']}"
@@ -827,6 +839,16 @@ def run_reg_dl_cv(config, X, y, X_test, device=None, tag=None, save_artifacts=Tr
             oof_counts[val_idx] += 1
             test_preds += model(X_te_t).squeeze(-1).cpu().numpy() / len(folds)
 
+        if collect_folds is not None and best_state is not None:
+            collect_folds.append({
+                "fb": fb,
+                "model_name": config["model_name"],
+                "arch_params": arch_p,
+                "state_dict": {k: v.cpu().clone() for k, v in best_state.items()},
+                "in_features": in_features,
+                "n_classes": 1,   # regression
+            })
+
         if device.startswith("cuda"):
             torch.cuda.empty_cache()
 
@@ -842,11 +864,13 @@ def run_reg_dl_cv(config, X, y, X_test, device=None, tag=None, save_artifacts=Tr
 
 
 def run_reg_cv(config, X, y, X_test, device=None, tag=None, save_artifacts=True,
-               global_cfg=None, metric="rmse"):
+               global_cfg=None, metric="rmse", collect_folds=None):
     dl = {"tsnet", "tcn", "patchtst"}
     if config["model_name"] in dl:
-        return run_reg_dl_cv(config, X, y, X_test, device, tag, save_artifacts, global_cfg, metric)
-    return run_reg_tabular_cv(config, X, y, X_test, device, tag, save_artifacts, global_cfg, metric)
+        return run_reg_dl_cv(config, X, y, X_test, device, tag, save_artifacts, global_cfg, metric,
+                             collect_folds=collect_folds)
+    return run_reg_tabular_cv(config, X, y, X_test, device, tag, save_artifacts, global_cfg, metric,
+                              collect_folds=collect_folds)
 
 
 # ── Ensemble A: 加權算術平均 Blender（最小化 RMSE / 最大化 R²） ────────────
@@ -922,6 +946,7 @@ class MetaLearnerRegStacker:
         self.n_samples = n_samples
         self.meta_model_ = None
         self.meta_name_: str = None
+        self._meta_imputer = None   # 對 meta-feature 補 NaN(KNN/Ridge fold OOF 可能有 NaN)
         self._x_scaler = None
 
     def _build_meta(self, oof_list, X_orig=None):
@@ -948,6 +973,12 @@ class MetaLearnerRegStacker:
         X_meta = self._build_meta(oof_list, X_orig_scaled)
         X_meta_eff = X_meta[common]
         y_eff = y[common]
+
+        # 對 meta-feature 補 NaN — KNN/Ridge OOF 在某些 fold 可能輸出 NaN,
+        # 不補的話 meta_model 會炸 ValueError。
+        if np.isnan(X_meta_eff).any():
+            self._meta_imputer = SimpleImputer(strategy='median')
+            X_meta_eff = self._meta_imputer.fit_transform(X_meta_eff)
 
         print(f"  [Stack] Meta-feature shape: {X_meta_eff.shape}  (effective)")
 
@@ -1023,13 +1054,17 @@ class MetaLearnerRegStacker:
         if X_orig is not None and self._x_scaler is not None:
             X_orig_scaled = self._x_scaler.transform(X_orig)
         X_meta = self._build_meta(test_list, X_orig_scaled)
+        # 跟 fit 對齊:推論時也用同一 imputer 補 NaN
+        if self._meta_imputer is not None:
+            X_meta = self._meta_imputer.transform(X_meta)
         return self.meta_model_.predict(X_meta)
 
 
 # ── 結果容器 ──────────────────────────────────────────────────────────────────
 
 class PipelineRegResult:
-    def __init__(self, test_blend, test_stack, all_oof, all_test, model_tags, blender, stacker):
+    def __init__(self, test_blend, test_stack, all_oof, all_test, model_tags, blender, stacker,
+                 per_config_folds=None, y_center=None, y_scale=None):
         self.test_blend = test_blend
         self.test_stack = test_stack
         self.all_oof = all_oof
@@ -1037,6 +1072,17 @@ class PipelineRegResult:
         self.model_tags = model_tags
         self.blender = blender
         self.stacker = stacker
+        # 跟分類版 PipelineResult 同樣的 schema:
+        # per_config_folds[i] = [{"fb": .., "model": ..}] (tabular)
+        #                     / [{"fb": .., "model_name": .., "arch_params": .., "state_dict": ..,
+        #                         "in_features": .., "n_classes": 1}] (DL)
+        # cache hit 沒重訓的 config 該位置為 None。給 ensemble 持久化 + batch predict 用。
+        self.per_config_folds = per_config_folds or []
+        # RobustScaler 的中位數跟 IQR — 推論時要 inverse-transform 把 fold model 的
+        # y_scaled 預測還原回原始尺度;同樣 blender/stacker 是在 y_scaled 上 fit 的,
+        # 推論結果一樣要 inverse-transform 才能跟原 y 同尺度。
+        self.y_center = y_center
+        self.y_scale = y_scale
 
 
 # ── 主引擎：回歸 ─────────────────────────────────────────────────────────────
@@ -1083,14 +1129,14 @@ def run_regression(
     if not skip_tabular:
         print(f"\n[2a] Tabular Scout ({cfg['scout_trials']} trials/model, 3-Fold TS CV) ...")
         print(f"  [Budget] {budget.status_str()}")
-        # CatBoost per-phase timeout（寬裕設定，防單一模型佔用過久）
-        _catboost_timeout = {"catboost": 600}   # Scout: 10 min
+        # 每模型 timeout — 不只 CatBoost,XGB / LGBM 在高維上也會單模型卡幾十分鐘 (daniel hotfix)
+        _scout_timeout = {"catboost": 600, "xgb": 600, "lgbm": 600}   # Scout: 10 min
         scout = TabularRegHPO(
             model_names=_ALL_REG_TABULAR_MODELS,
             n_trials=cfg["scout_trials"],
             top_k=1,
             metric=metric,
-            per_model_timeout=_catboost_timeout,
+            per_model_timeout=_scout_timeout,
         )
         scout_scores, scout_best_params = scout.scout(X_train, y_scaled,
                                                       scout_trials=cfg["scout_trials"],
@@ -1144,7 +1190,7 @@ def run_regression(
                 n_trials=cfg["tabular_trials"],
                 top_k=cfg["tabular_top_k"],
                 metric=metric,
-                per_model_timeout={"catboost": 1200},  # Full HPO: 20 min
+                per_model_timeout={"catboost": 1200, "xgb": 1200, "lgbm": 1200},  # Full HPO: 20 min
             )
             tabular_configs = hpo.run(X_train, y_scaled, global_cfg=cfg,
                                       warm_start=scout_best_params,
@@ -1226,23 +1272,32 @@ def run_regression(
         raise RuntimeError("沒有任何 model config 可供 CV！")
 
     print(f"\n[7] 5-Fold TimeSeries CV — {len(all_configs)} 個模型 config ...")
+    # P0-1: cfg hash 防止不同 global_cfg (fast/standard, use_kpca on/off) 的快取互相污染
+    _sig = {k: cfg.get(k) for k in ("use_kpca", "use_kmeans", "n_components", "n_segments")}
+    _ch = hashlib.md5(_json_cfg.dumps(_sig, sort_keys=True).encode()).hexdigest()[:6]
+    per_config_folds = []   # 每 config 一個 list of fold artifacts (cache hit 則為 None)
     for i, config in enumerate(all_configs):
         # _yrs suffix: robust-scaled predictions (RobustScaler); invalidates old StandardScaler cache
-        tag = f"reg_{config['model_name']}_{config['feature_set']}_c{i}_yrs".replace("/", "_")
+        tag = f"reg_{config['model_name']}_{config['feature_set']}_c{i}_{_ch}_yrs".replace("/", "_")
         oof_path = os.path.join(artifacts_dir, f"{tag}_oof.npy")
         tst_path = os.path.join(artifacts_dir, f"{tag}_test.npy")
         mask_path = os.path.join(artifacts_dir, f"{tag}_mask.npy")
         if os.path.exists(oof_path) and os.path.exists(tst_path) and os.path.exists(mask_path):
-            print(f"  [CV] 載入快取 {tag}")
+            # 快取命中:OOF / test 不重算,fold model 也沒重訓 → bundle 缺這個 config
+            print(f"  [CV] 載入快取 {tag} (fold model 沒在快取 → ensemble bundle 會缺這個 config)")
             oof = np.load(oof_path)
             test_pred = np.load(tst_path)
             counts = np.load(mask_path)
+            per_config_folds.append(None)
         else:
+            fold_artifacts = []   # 收集這個 config 的 5 fold (fb, model / fb, state_dict + meta)
             oof, test_pred, counts = run_reg_cv(
                 config, X_train, y_scaled, X_test,
                 device=DEVICE, tag=tag, global_cfg=cfg, metric=metric,
+                collect_folds=fold_artifacts,
             )
             np.save(mask_path, counts)
+            per_config_folds.append(fold_artifacts)
         all_oof.append(oof)
         all_test.append(test_pred)
         all_masks.append(counts)
@@ -1250,6 +1305,8 @@ def run_regression(
 
     # ── Quality filter: drop models with catastrophically bad OOF R² ────────
     # R² is scale-invariant, so we can compute it directly on y_scaled predictions.
+    # 注意:per_config_folds 跟 model_tags / all_oof / all_test / all_masks 是 1-1 對應的,
+    # 一起 pop 才不會錯位讓 ensemble bundle 持久化撈錯 fold artifacts。
     _MIN_OOF_R2 = -2.0
     _keep = []
     for _i, (_oof_i, _mask_i) in enumerate(zip(all_oof, all_masks)):
@@ -1261,10 +1318,11 @@ def run_regression(
         else:
             _keep.append(True)
     if not all(_keep):
-        all_oof    = [o for o, k in zip(all_oof,    _keep) if k]
-        all_test   = [t for t, k in zip(all_test,   _keep) if k]
-        all_masks  = [m for m, k in zip(all_masks,  _keep) if k]
-        model_tags = [t for t, k in zip(model_tags, _keep) if k]
+        all_oof          = [o for o, k in zip(all_oof,          _keep) if k]
+        all_test         = [t for t, k in zip(all_test,         _keep) if k]
+        all_masks        = [m for m, k in zip(all_masks,        _keep) if k]
+        model_tags       = [t for t, k in zip(model_tags,       _keep) if k]
+        per_config_folds = [f for f, k in zip(per_config_folds, _keep) if k]
     if not all_oof:
         raise RuntimeError("所有 model config 被 quality filter 排除！")
 
@@ -1297,6 +1355,9 @@ def run_regression(
         model_tags=model_tags,
         blender=blender,
         stacker=stacker,
+        per_config_folds=per_config_folds,
+        y_center=float(_center),
+        y_scale=float(_scale),
     )
 
 

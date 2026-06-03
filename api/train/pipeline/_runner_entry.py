@@ -56,11 +56,17 @@ def _prepare_xy(df, target_col, np, le=None):
 
 
 def _dump_ensemble_bundle(result, *, task_type, n_classes, target_col, label_encoder,
-                          global_cfg, feature_names_raw, bundle_path):
+                          global_cfg, feature_names_raw, bundle_path,
+                          y_center=None, y_scale=None):
     """
-    把 PipelineResult 組成完整 ensemble bundle pickle (含 fold models + blender + stacker),
-    dump 到 bundle_path。回傳 None 表示無法 persist (某些 config cache hit 沒 fold artifacts)。
+    把 PipelineResult / PipelineRegResult 組成完整 ensemble bundle pickle
+    (含 fold models + blender + stacker),dump 到 bundle_path。
+    回傳 None 表示無法 persist (某些 config cache hit 沒 fold artifacts)。
     回傳 bundle_path 表示成功。
+
+    回歸用法:傳 task_type="regression"、n_classes=1、label_encoder=None,
+            並用 y_center / y_scale 帶 RobustScaler 的中位數 + IQR 參數
+            (推論時要 inverse-transform 才能還原原 y 尺度)。
 
     Bundle 結構見 [設計] 文件:configs 是每 config 的 fold list,blender/stacker 是 fitted 物件。
     """
@@ -90,6 +96,9 @@ def _dump_ensemble_bundle(result, *, task_type, n_classes, target_col, label_enc
         "stacker": result.stacker,
         "model_tags": list(result.model_tags),
         "feature_names_raw": list(feature_names_raw),
+        # 回歸:RobustScaler 的中位數 + IQR (推論時 y_pred = y_pred_scaled * y_scale + y_center)
+        "y_center": float(y_center) if y_center is not None else None,
+        "y_scale": float(y_scale) if y_scale is not None else None,
     }
     os.makedirs(os.path.dirname(bundle_path) or ".", exist_ok=True)
     with open(bundle_path, "wb") as f:
@@ -103,9 +112,19 @@ def _extract_feature_importance(result, per_model_meta):
     回傳 list of [name, score] tuple (依 score 降冪)。沒抓到回 []。
     """
     TABULAR = {"lgbm", "xgb", "catboost", "rf", "extra_trees"}
+    # extra_trees 等含底線的 tag 用 longest-prefix 匹配,不能 split("_")[0] (會切成 "extra")
+    _SORTED_TAB = sorted(TABULAR, key=len, reverse=True)
+    def _tag_model_type(tag: str) -> str:
+        # 回歸的 tag 會有 "reg_" 前綴,先剝掉再看
+        t = tag[4:] if tag.startswith("reg_") else tag
+        for n in _SORTED_TAB:
+            if t.startswith(n + "_"):
+                return n
+        return t.split("_")[0]
+
     candidates = []
     for i, (tag, meta) in enumerate(zip(result.model_tags, per_model_meta)):
-        if tag.split("_")[0] not in TABULAR:
+        if _tag_model_type(tag) not in TABULAR:
             continue
         if meta.get("oofScore") is None:
             continue
@@ -147,9 +166,14 @@ def _prepare_xy_reg(df, target_col, np):
     return X, y
 
 
-def _run_ts_regression(X_tr, y_tr, X_te, y_te, target_col, source_tag, test_has_label, args, t0):
-    """時序回歸 pipeline (用 daniel 的 pipeline_time.run_regression)。
-    自己輸出 __RESULT_JSON__,回傳 exit code。"""
+def _run_regression(X_tr, y_tr, X_te, y_te, target_col, source_tag,
+                    test_has_label, args, t0, *, is_ts: bool,
+                    feature_names_raw=None):
+    """回歸 pipeline (用 daniel 的 pipeline_time.run_regression)。
+    支援 TS / 非 TS — is_ts 只影響 splitMode 標籤,run_regression 內部一律走 TS folds。
+    自己輸出 __RESULT_JSON__,回傳 exit code。
+    feature_names_raw:訓練時的原始欄名(給 bundle / SHAP / batch predict 對齊用)。
+    """
     import json as _json
     import numpy as _np
     from src.config import ARTIFACTS_DIR, DEVICE
@@ -160,11 +184,12 @@ def _run_ts_regression(X_tr, y_tr, X_te, y_te, target_col, source_tag, test_has_
     cfg = _pt.get_cfg_time(args.fast, n_samples=len(y_tr))
 
     # 每次跑用獨立 artifacts dir (timestamp 為後綴),防止快取命中跳過重訓
+    run_artifacts_dir = os.path.join(ARTIFACTS_DIR, "api", source_tag, str(int(t0)))
     result = _pt.run_regression(
         X_tr, y_tr, X_te, cfg, budget,
         skip_tabular=args.skip_tabular,
         skip_dl=args.skip_dl,
-        artifacts_dir=os.path.join(ARTIFACTS_DIR, "api", source_tag, str(int(t0))),
+        artifacts_dir=run_artifacts_dir,
         metric="rmse",
     )
 
@@ -181,13 +206,14 @@ def _run_ts_regression(X_tr, y_tr, X_te, y_te, target_col, source_tag, test_has_
         return rmse, r2, mae
 
     rmse = r2 = mae = None
+    rmse_blend = r2_blend = rmse_stack = r2_stack = None
     best_pred = stack  # 預設用 stack
     best_ensemble = "stack"
     if test_has_label and y_te is not None:
-        rmse_b, r2_b, _ = _reg_scores(y_te, blend)
-        rmse_s, r2_s, _ = _reg_scores(y_te, stack)
+        rmse_blend, r2_blend, _ = _reg_scores(y_te, blend)
+        rmse_stack, r2_stack, _ = _reg_scores(y_te, stack)
         # RMSE 越小越好
-        if rmse_b < rmse_s:
+        if rmse_blend < rmse_stack:
             best_pred, best_ensemble = blend, "blend"
             rmse, r2, mae = _reg_scores(y_te, blend)
         else:
@@ -195,6 +221,54 @@ def _run_ts_regression(X_tr, y_tr, X_te, y_te, target_col, source_tag, test_has_
             rmse, r2, mae = _reg_scores(y_te, stack)
 
     def _r(v): return round(v, 4) if v is not None else None
+
+    # ── per_model OOF score (給前端 Pipeline 詳細卡列各模型分數) ─────────────
+    # OOF 已 inverse-transform 回原 y 尺度,直接拿 y_tr 比即可
+    per_model = []
+    y_tr_arr = _np.asarray(y_tr, dtype=float).ravel()
+    for tag, oof_pred in zip(result.model_tags, result.all_oof):
+        try:
+            # OOF 可能有 NaN (mask=0 的位置);只用 valid 部分
+            oof_arr = _np.asarray(oof_pred, dtype=float).ravel()
+            valid = ~_np.isnan(oof_arr)
+            if valid.sum() >= 2:
+                _s = float(r2_score(y_tr_arr[valid], oof_arr[valid]))
+            else:
+                _s = None
+        except Exception as _e:
+            print(f"[OOF] R² 計算失敗 ({tag}): {_e}", flush=True)
+            _s = None
+        # 前端 perModel 卡顯示 tag 不要 "reg_" 前綴
+        clean_tag = tag[4:] if tag.startswith("reg_") else tag
+        per_model.append({"tag": clean_tag, "oofScore": _r(_s)})
+
+    # ── Ensemble bundle 持久化 (給 batch predict / re-login 用) ──────────
+    bundle_path = _dump_ensemble_bundle(
+        result,
+        task_type="regression",
+        n_classes=1,
+        target_col=target_col,
+        label_encoder=None,
+        global_cfg=cfg,
+        feature_names_raw=feature_names_raw or [],
+        bundle_path=os.path.join(run_artifacts_dir, "ensemble_bundle.pkl"),
+        y_center=getattr(result, "y_center", None),
+        y_scale=getattr(result, "y_scale", None),
+    )
+    print(f"[bundle] _dump_ensemble_bundle 回傳: {bundle_path!r}", flush=True)
+
+    # ── Insights / SHAP 用的圖表資料 ───────────────────────────────────────
+    fi_pairs = _extract_feature_importance(result, per_model)[:200]
+    _CAP = 5000
+    if test_has_label and y_te is not None:
+        test_true_out = [float(v) for v in _np.asarray(y_te[:_CAP]).tolist()]
+    else:
+        test_true_out = None
+    test_pred_out = [float(v) for v in best_pred[:_CAP].tolist()]
+    _SHAP_CAP = 50
+    x_test_sample = _np.asarray(X_te[:_SHAP_CAP]).tolist()
+
+    split_mode = "Chronological (TS regression)" if is_ts else "Random (regression)"
 
     out = {
         "ok": True,
@@ -204,24 +278,46 @@ def _run_ts_regression(X_tr, y_tr, X_te, y_te, target_col, source_tag, test_has_
         "rmse": _r(rmse),
         "r2": _r(r2),
         "mae": _r(mae),
+        # Pipeline 詳細卡片:Blend / Stack 各自的 R² (跟 bestScore 同單位,直接可比)
+        "scoreBlend": _r(r2_blend),
+        "scoreStack": _r(r2_stack),
+        "rmseBlend": _r(rmse_blend),
+        "rmseStack": _r(rmse_stack),
         # 給前端排行榜用:回歸用 R² 當 testScore (越大越好),沒 label 時 None
         "bestScore": _r(r2),
         "scoreSource": "test" if test_has_label else "none",
         "nTrain": int(len(y_tr)),
         "nTest": int(X_te.shape[0]),
+        "nClasses": 1,  # 給前端 hydration 統一介面 (分類版有這欄)
         "nFeatures": int(X_tr.shape[1]),
         "elapsedSec": round(time.time() - t0, 2),
-        "splitMode": "Chronological (TS regression)",
-        "isTimeSeries": True,
+        "splitMode": split_mode,
+        "isTimeSeries": bool(is_ts),
         "device": DEVICE,
+        "perModel": per_model,
         "target": target_col,
         "testHasLabel": bool(test_has_label),
         "predictions": [float(v) for v in best_pred.tolist()],
         "predictionsBlend": [float(v) for v in blend.tolist()],
         "predictionsStack": [float(v) for v in stack.tolist()],
+        # 新增:ensemble bundle + Insights 圖表資料
+        "ensembleBundlePath": bundle_path,
+        "featureNames": list(feature_names_raw or []),
+        "featureImportance": fi_pairs,
+        "testTrueDecoded": test_true_out,
+        "testPredDecoded": test_pred_out,
+        "xTestSample": x_test_sample,
     }
     print(f"__RESULT_JSON__:{_json.dumps(out, ensure_ascii=False)}")
     return 0
+
+
+# ── 兼容舊呼叫者:_run_ts_regression 是 _run_regression(is_ts=True) 的別名 ───
+def _run_ts_regression(X_tr, y_tr, X_te, y_te, target_col, source_tag,
+                       test_has_label, args, t0, feature_names_raw=None):
+    return _run_regression(X_tr, y_tr, X_te, y_te, target_col, source_tag,
+                           test_has_label, args, t0, is_ts=True,
+                           feature_names_raw=feature_names_raw)
 
 
 def main():
@@ -296,24 +392,28 @@ def main():
                 fit_target_series = df_tr[target_col]
 
             if task == "regression":
-                if args.ts:
-                    # 時序回歸 → 走 pipeline_time.run_regression
-                    X_tr_r, y_tr_r = _prepare_xy_reg(df_tr, target_col, np)
-                    if test_has_label:
-                        X_te_r, y_te_r = _prepare_xy_reg(df_te, target_col, np)
-                    else:
-                        X_te_r = (df_te.select_dtypes(include=[np.number]).fillna(0).values.astype(np.float32))
-                        y_te_r = None
-                    if X_tr_r.shape[1] != X_te_r.shape[1]:
-                        print(f"__RESULT_JSON__:{json.dumps({'ok': False, 'error': f'train ({X_tr_r.shape[1]}) / test ({X_te_r.shape[1]}) 特徵數不一致'})}")
-                        return 1
-                    src_tag = os.path.splitext(os.path.basename(args.train_csv))[0]
-                    print(f"[Pipeline] target={target_col} n_train={len(y_tr_r)} n_test={X_te_r.shape[0]} "
-                          f"task=regression(TS) device={DEVICE} test_has_label={test_has_label}")
-                    sys.stdout.flush()
-                    return _run_ts_regression(X_tr_r, y_tr_r, X_te_r, y_te_r, target_col, src_tag, test_has_label, args, t0)
-                print(f"__RESULT_JSON__:{json.dumps({'ok': False, 'error': '非時序回歸暫不支援 pipeline (請勾選時序模式,或改用 sklearn 引擎)'})}")
-                return 1
+                # TS / 非 TS 回歸都走 pipeline_time.run_regression (daniel 架構設計)
+                X_tr_r, y_tr_r = _prepare_xy_reg(df_tr, target_col, np)
+                if test_has_label:
+                    X_te_r, y_te_r = _prepare_xy_reg(df_te, target_col, np)
+                else:
+                    X_te_r = (df_te.select_dtypes(include=[np.number]).fillna(0).values.astype(np.float32))
+                    y_te_r = None
+                if X_tr_r.shape[1] != X_te_r.shape[1]:
+                    print(f"__RESULT_JSON__:{json.dumps({'ok': False, 'error': f'train ({X_tr_r.shape[1]}) / test ({X_te_r.shape[1]}) 特徵數不一致'})}")
+                    return 1
+                # 原始欄名 (給 SHAP / batch predict 對齊用) — 排除 target 後的數值欄
+                feat_names_reg = list(df_tr.drop(columns=[target_col])
+                                            .select_dtypes(include=[np.number]).columns)
+                src_tag = os.path.splitext(os.path.basename(args.train_csv))[0]
+                _kind = "TS" if args.ts else "non-TS"
+                print(f"[Pipeline] target={target_col} n_train={len(y_tr_r)} n_test={X_te_r.shape[0]} "
+                      f"task=regression({_kind}) device={DEVICE} test_has_label={test_has_label}")
+                sys.stdout.flush()
+                return _run_regression(X_tr_r, y_tr_r, X_te_r, y_te_r, target_col, src_tag,
+                                       test_has_label, args, t0,
+                                       is_ts=bool(args.ts),
+                                       feature_names_raw=feat_names_reg)
 
             le = LabelEncoder()
             le.fit(fit_target_series.astype(str).values)
@@ -349,22 +449,33 @@ def main():
             task = _detect_task(y_raw)
 
             if task == "regression":
+                # 共用:抽特徵 + 原始欄名
+                X_all_r, y_all_r = _prepare_xy_reg(df, target_col, np)
+                if X_all_r.shape[1] == 0:
+                    print(f"__RESULT_JSON__:{json.dumps({'ok': False, 'error': '沒有可用的數值欄位'})}")
+                    return 1
+                feat_names_reg = list(df.drop(columns=[target_col])
+                                        .select_dtypes(include=[np.number]).columns)
                 if args.ts:
-                    # 時序回歸 → 自己做 80/20 時序切分後走 pipeline_time
-                    X_all_r, y_all_r = _prepare_xy_reg(df, target_col, np)
-                    if X_all_r.shape[1] == 0:
-                        print(f"__RESULT_JSON__:{json.dumps({'ok': False, 'error': '沒有可用的數值欄位'})}")
-                        return 1
+                    # 時序回歸 → Chronological 80/20 (尊重時間順序,不能 shuffle)
                     idx = int(len(X_all_r) * 0.8)
                     X_tr_r, X_te_r = X_all_r[:idx], X_all_r[idx:]
                     y_tr_r, y_te_r = y_all_r[:idx], y_all_r[idx:]
-                    src_tag = os.path.splitext(os.path.basename(args.csv))[0]
-                    print(f"[Pipeline] target={target_col} n_train={len(y_tr_r)} n_test={len(y_te_r)} "
-                          f"task=regression(TS) device={DEVICE} split=Chronological")
-                    sys.stdout.flush()
-                    return _run_ts_regression(X_tr_r, y_tr_r, X_te_r, y_te_r, target_col, src_tag, True, args, t0)
-                print(f"__RESULT_JSON__:{json.dumps({'ok': False, 'error': '非時序回歸暫不支援 pipeline (請勾選時序模式,或改用 sklearn 引擎)'})}")
-                return 1
+                    split_label = "Chronological"
+                else:
+                    # 非時序回歸 → Random 80/20 (daniel 架構設計)
+                    X_tr_r, X_te_r, y_tr_r, y_te_r = train_test_split(
+                        X_all_r, y_all_r, test_size=0.2, random_state=SEED)
+                    split_label = "Random"
+                src_tag = os.path.splitext(os.path.basename(args.csv))[0]
+                _kind = "TS" if args.ts else "non-TS"
+                print(f"[Pipeline] target={target_col} n_train={len(y_tr_r)} n_test={len(y_te_r)} "
+                      f"task=regression({_kind}) device={DEVICE} split={split_label}")
+                sys.stdout.flush()
+                return _run_regression(X_tr_r, y_tr_r, X_te_r, y_te_r, target_col, src_tag,
+                                       True, args, t0,
+                                       is_ts=bool(args.ts),
+                                       feature_names_raw=feat_names_reg)
 
             X_all, y_all, le = _prepare_xy(df, target_col, np)
             feature_cols_classify = list(df.drop(columns=[target_col]).select_dtypes(include=[np.number]).columns)
@@ -373,7 +484,10 @@ def main():
                 print(f"__RESULT_JSON__:{json.dumps({'ok': False, 'error': '沒有可用的數值欄位 (pipeline 僅讀數值型,請先做 one-hot 或選只含數值欄的資料集)'})}")
                 return 1
 
-            is_forecasting = args.ts and task != "classification"
+            # NOTE: 不要再用 `args.ts and task != "classification"`,那會讓「單一 CSV + 勾時序 +
+            # 分類 target」的情境跑成 stratified random fold,破壞時序回測 → label leakage。
+            # Mode B 一律用 bool(args.ts),這裡跟它對齊。
+            is_forecasting = bool(args.ts)
             try:
                 if not is_forecasting:
                     X_tr, X_te, y_tr, y_te = train_test_split(
@@ -534,6 +648,7 @@ def main():
 
         out = {
             "ok": True,
+            "taskType": "classification",
             "metric": m_name,
             "scoreBlend": _r(score_blend),
             "scoreStack": _r(score_stack),

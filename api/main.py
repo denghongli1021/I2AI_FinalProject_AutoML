@@ -66,6 +66,40 @@ init_db()
 # 掛 auth router (/api/auth/*)
 app.include_router(auth_router, prefix="/api")
 
+# 前端入口 (for Claude in Chrome testing)
+import pathlib as _pl
+from fastapi.responses import HTMLResponse as _HTMLResponse
+@app.get("/ui", response_class=_HTMLResponse, include_in_schema=False)
+def _serve_ui():
+    return (_pl.Path(__file__).parent.parent / "index.html").read_text(encoding="utf-8")
+
+
+
+def _infer_task_type(y_series) -> str:
+    """跟 _runner_entry._detect_task 同一條 heuristic — 用在 create_training_run
+    前先把 task_type 推對,進行中也顯示正確的 metric/欄位。
+
+    object / bool → classification;
+    數值且 nunique <= 50 且佔比 < 30% → classification;
+    其它 → regression。
+
+    抓不到 / series 為 None → fallback "classification" (跟舊行為一致)。
+    """
+    try:
+        import pandas as _pd
+        if y_series is None:
+            return "classification"
+        s = y_series if isinstance(y_series, _pd.Series) else _pd.Series(y_series)
+        if s.dtype == object or s.dtype == bool:
+            return "classification"
+        n = len(s)
+        if n == 0:
+            return "classification"
+        n_unique = s.nunique(dropna=True)
+        return "classification" if (n_unique <= 50 and n_unique / n < 0.30) else "regression"
+    except Exception:
+        return "classification"
+
 
 @app.get("/api/health")
 def health() -> dict[str, Any]:
@@ -181,57 +215,79 @@ def preprocess_audit_endpoint(
     return {"auditReport": audit, "featureGroups": feature_groups}
 
 
-class TransformRequest(BaseModel):
-    datasetId: str
-    target: str
-    testSize: float = 0.2
-    useMice: bool = False           # MICE (IterativeImputer) 補值開關
-    useMiSelection: bool = False    # MI 互資訊特徵選擇開關
-    miThreshold: float = 0.01       # MI 篩選門檻
-
-
 @app.post("/api/preprocess/transform")
-def preprocess_transform_endpoint(
-    req: TransformRequest,
+async def preprocess_transform_endpoint(
+    datasetId: str = Form(...),
+    target: str = Form(...),
+    testSize: float = Form(0.2),
+    # 新版 daniel 已內部接管,留著當 schema 紀錄用,不影響 transform 行為
+    useMice: bool = Form(False),
+    useMiSelection: bool = Form(False),
+    miThreshold: float = Form(0.01),
+    # 對抗驗證測試集 — 可選 Kaggle 風 test.csv。傳了會啟動 daniel 的
+    # adversarial validation,偵測 train/test 分佈漂移的「間諜特徵」並剔除
+    adversarialTestFile: UploadFile | None = File(None),
     user = Depends(get_current_user),
     db: DbSession = Depends(get_db),
 ) -> dict[str, Any]:
-    """跑完整的 preprocess_for_training,把 fitted preprocessor 存起來。"""
-    bundle = storage.get_dataset(req.datasetId, user, db, include_df=True)
+    """跑完整的 preprocess_for_training,把 fitted preprocessor 存起來。
+    multipart 介面 — 支援可選的對抗驗證測試集上傳。
+    """
+    bundle = storage.get_dataset(datasetId, user, db, include_df=True)
     df = bundle["df"]
-    if req.target not in df.columns:
-        raise HTTPException(status_code=400, detail=f"target '{req.target}' 不在欄位中")
+    if target not in df.columns:
+        raise HTTPException(status_code=400, detail=f"target '{target}' 不在欄位中")
+
+    # 對抗驗證測試集 — 若有上傳就讀進 DataFrame 餵給 preprocess_for_training
+    adv_test_df = None
+    if adversarialTestFile is not None:
+        try:
+            import pandas as _pd
+            adv_bytes = await adversarialTestFile.read()
+            adv_test_df = _pd.read_csv(io.BytesIO(adv_bytes))
+            print(f"[adversarial] 對抗驗證測試集載入 {adv_test_df.shape}", flush=True)
+        except Exception as e:
+            raise HTTPException(status_code=400,
+                detail=f"對抗驗證測試集 CSV 解析失敗: {e}")
 
     try:
+        # 注意:daniel 最新版 preprocess_for_training 拿掉了 use_mice / use_mi_selection /
+        # mi_threshold 三個 flag — MICE 跟 MI selection 改成內部自動依資料特性決定。
+        # 若有 adv_test_df,enable_adv_val=True 才會跑;沒給就跳過。
         X_train, X_test, y_train, y_test, fitted = preprocess_for_training(
-            df, req.target, test_size=req.testSize,
-            use_mice=req.useMice,
-            use_mi_selection=req.useMiSelection,
-            mi_threshold=req.miThreshold,
+            df, target, test_size=testSize,
+            test_data_source=adv_test_df,
+            enable_adv_val=(adv_test_df is not None),
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"transform 失敗: {e}")
 
-    feature_names = list(X_train.columns)
+    # 新版 preprocess_for_training 回傳雙軌 dict；
+    # 取 tree 軌作為代表（feature_names / preview / shape 都用 tree 軌）
+    X_train_tree = X_train["tree"] if isinstance(X_train, dict) else X_train
+    X_test_tree  = X_test["tree"]  if isinstance(X_test,  dict) else X_test
+    fitted_tree  = fitted["tree"]  if isinstance(fitted,  dict) else fitted
+
+    feature_names = list(X_train_tree.columns)
     preprocessor_id = storage.save_preprocessor(
-        preprocessor=fitted, target=req.target, dataset_id=req.datasetId,
+        preprocessor=fitted_tree, target=target, dataset_id=datasetId,
         feature_names=feature_names,
-        X_train=X_train, X_test=X_test, y_train=y_train, y_test=y_test,
-        user=user, db=db, test_size=req.testSize,
-        use_mice=req.useMice,
-        use_mi_selection=req.useMiSelection,
-        mi_threshold=req.miThreshold,
+        X_train=X_train_tree, X_test=X_test_tree, y_train=y_train, y_test=y_test,
+        user=user, db=db, test_size=testSize,
+        use_mice=useMice,
+        use_mi_selection=useMiSelection,
+        mi_threshold=miThreshold,
     )
 
     # Router 分類預覽 (用於前端顯示哪些欄位被分到哪一桶)
-    scan_df = df.drop(columns=[req.target])
+    scan_df = df.drop(columns=[target])
     router = AutoRouter(categorical_threshold=50, text_length_threshold=20)
     feature_groups = router.fit_predict(scan_df)
 
-    audit = run_data_audit(df, req.target)
+    audit = run_data_audit(df, target)
 
     # 預覽前 10 列,float 轉乾淨 JSON
-    preview_rows = X_train.head(10).fillna(0).values.tolist()
+    preview_rows = X_train_tree.head(10).fillna(0).values.tolist()
     preview_rows = [[float(v) if isinstance(v, (int, float, np.floating)) else v for v in row]
                     for row in preview_rows]
 
@@ -244,13 +300,13 @@ def preprocess_transform_endpoint(
             "columns": feature_names,
             "rows": preview_rows,
         },
-        "trainSize": int(len(X_train)),
-        "testSize": int(len(X_test)),
+        "trainSize": int(len(X_train_tree)),
+        "testSize": int(len(X_test_tree)),
         "originalFeatureCount": int(df.shape[1] - 1),
-        "transformedFeatureCount": int(X_train.shape[1]),
+        "transformedFeatureCount": int(X_train_tree.shape[1]),
         # v3 透明度:實際自動觸發的進階特徵工程 + MI 篩選結果
-        "appliedFeatureSteps": getattr(fitted, "applied_feature_steps_", []),
-        "miSelection": getattr(fitted, "mi_selection_", None),
+        "appliedFeatureSteps": getattr(fitted_tree, "applied_feature_steps_", []),
+        "miSelection": getattr(fitted_tree, "mi_selection_", None),
     }
 
 
@@ -575,10 +631,22 @@ async def train_pipeline_stream_endpoint(
         "timeLimit": timeLimit, "skipTabular": skipTabular, "skipDl": skipDl, "noNas": noNas,
     }
     dataset_name_for_run = "(uploaded)"
+    # 為了在 create_training_run 之前推 task_type:三個 source 分支都會在這存一份 target 欄
+    # 的 sample (pandas Series),最後丟給 _infer_task_type 就拿到 classification/regression。
+    target_col_sample = None
 
     if direct_upload:
         raw = await file.read()
         dataset_name_for_run = file.filename or "uploaded.csv"
+        # 抽 target 欄推 task_type — 失敗 (CSV 壞 / target 不存在) 就吃掉,讓 fallback 走預設值
+        try:
+            import pandas as _pd_infer
+            _df_infer = _pd_infer.read_csv(_io.BytesIO(raw))
+            if target and target in _df_infer.columns:
+                target_col_sample = _df_infer[target]
+            del _df_infer
+        except Exception:
+            pass
         # 即使是 direct upload 也支援 predictFile (override 內部 split)
         if predict_csv_bytes:
             jobs.append({
@@ -605,6 +673,9 @@ async def train_pipeline_stream_endpoint(
             dataset_name_for_run = bundle.get("fileName") or "dataset.csv"
             if target and target not in df.columns:
                 raise HTTPException(status_code=400, detail=f"target '{target}' 不在 dataset 欄位中")
+            # raw source 直接從 df 抽 target → 推 task_type
+            if target_col_sample is None and target and target in df.columns:
+                target_col_sample = df[target]
             buf = _io.StringIO()
             df.to_csv(buf, index=False)
             train_csv = buf.getvalue().encode("utf-8")
@@ -643,6 +714,10 @@ async def train_pipeline_stream_endpoint(
             y_test = pp_entry["y_test"]
             pp_target = pp_entry["target"]
             pp_obj = pp_entry["preprocessor"]
+            # preprocessed source 沒有原 df,但 y_train 就是 target 欄;直接拿來推 task_type
+            if target_col_sample is None and y_train is not None:
+                import pandas as _pd_infer2
+                target_col_sample = _pd_infer2.Series(y_train)
 
             # 大寬矩陣 (高基數欄 One-Hot 後動輒數千欄) 直接 df.to_csv(檔案路徑) 串流寫到暫存檔,
             # 不要 .copy() / StringIO / .encode() — 那會把整份矩陣在記憶體裡多複製好幾份 → OOM
@@ -714,12 +789,15 @@ async def train_pipeline_stream_endpoint(
     multi = len(jobs) > 1
 
     # 建 TrainingRun (running 狀態,完成後再 update)
+    # task_type 從 target 欄推;subprocess 跑完 finish_training_run 還會用真正的 result 再覆寫一次,
+    # 但訓練 *進行中* hydration 用 r.taskType 推 metric label 就不會錯 (回歸顯示 R² 不是 Accuracy)
+    inferred_task_type = _infer_task_type(target_col_sample)
     pipeline_run_id = storage.create_training_run(
         dataset_id=datasetId or "uploaded",
         dataset_name=dataset_name_for_run,
         engine="pipeline",
         target=target or "(auto)",
-        task_type="classification",
+        task_type=inferred_task_type,
         sources=src_list if from_store else ["upload"],
         options={
             "metric": metric, "fast": fast, "timeSeries": timeSeries,
@@ -820,26 +898,37 @@ async def train_pipeline_stream_endpoint(
                                 size_mb = len(bundle_bytes) / 1024 / 1024
                                 print(f"[Pipeline] ensemble bundle = {size_mb:.1f}MB → 寫入 DB", flush=True)
                                 # Insights / Leaderboard 顯示用的 bundle (不含 estimator)
+                                _r_task = r.get("taskType", "classification")
+                                _is_reg = (_r_task == "regression")
                                 _ens_bundle = {
                                     "type": "daniel_pipeline_ensemble",
                                     "name": f"[{label}] Pipeline Ensemble",
                                     "dataSource": job["source"],
                                     "dataSourceLabel": label,
-                                    "taskType": "classification",
+                                    "taskType": _r_task,
                                     "target": r.get("target"),
+                                    "targetName": r.get("target"),
                                     "featureNames": r.get("featureNames", []),
                                     "featureImportance": r.get("featureImportance", []),
                                     "testTrue": r.get("testTrueDecoded"),
                                     "testPred": r.get("testPredDecoded"),
-                                    "classes": r.get("classes", []),
+                                    "classes": r.get("classes", []) if not _is_reg else [],
                                     "canPredict": True,
+                                    # U2:基模型 OOF 排名 — 排行榜可摺疊區塊用,hydration 後也看得到
+                                    "perModel": r.get("perModel", []),
                                     "metrics": {
                                         "testScore": r.get("bestScore"),
-                                        "testScoreLabel": (r.get("metric") or "F1").upper(),
-                                        "testAccuracy": r.get("accuracy"),
-                                        "f1": r.get("f1"),
+                                        "testScoreLabel": (r.get("metric") or
+                                                           ("R²" if _is_reg else "F1")).upper(),
                                         "scoreBlend": r.get("scoreBlend"),
                                         "scoreStack": r.get("scoreStack"),
+                                        # 分類指標 (回歸時為 None)
+                                        "testAccuracy": r.get("accuracy"),
+                                        "f1": r.get("f1"),
+                                        # 回歸指標 (分類時為 None)
+                                        "testR2": r.get("r2"),
+                                        "testRMSE": r.get("rmse"),
+                                        "testMAE": r.get("mae"),
                                     },
                                 }
                                 # 把 X_test 小切 50 筆包成 DataFrame,給 SHAP 當 background
@@ -853,25 +942,69 @@ async def train_pipeline_stream_endpoint(
                                         print(f"[Pipeline] xTestSample → DataFrame 失敗: {_xe}", flush=True)
 
                                 # estimator_pkl_bytes:bundle 已是 pickle bytes,直接給 save_model
-                                # 200MB cap (ensemble bundle 可能很大)
                                 # 一定要傳 training_run_id + dataset_id,不然 hydration
                                 # 的 modelsByRun[r.id] 找不到 → 前端 fallback 到 placeholder
+                                # 把 storage size 帶進 bundle JSON,前端 hydration 時就能顯示
+                                # 「模型大小: 1982MB (File)」而不是只看到一個神祕大檔
+                                _ens_bundle["estimatorBytes"] = int(len(bundle_bytes))
+                                _ens_bundle["estimatorMb"] = round(size_mb, 1)
+
+                                # Item 1:訓練時 SHAP 預計算 — 對最強 tabular + 最強 DL
+                                # 各跑 3 張 plotly (global / waterfall / dependence),序列化
+                                # 進 bundle JSON。Insights 頁就能秒開不用再等 SHAP 即時跑。
+                                try:
+                                    q.put({"type": "log", "level": "info",
+                                           "msg": f"[{label}] 計算 SHAP (tabular + DL 各最佳)..."})
+                                    import pickle as _pickle_shap
+                                    # bundle pickle 內參考 src.preprocess / src.ensemble 等模組,
+                                    # 主 API 預設不在 sys.path → unpickle 會 No module named 'src',
+                                    # 補上 sys.path 才能順利 loads
+                                    _ensure_pipeline_path_for_unpickle()
+                                    _bundle_obj = _pickle_shap.loads(bundle_bytes)
+                                    _shap_plots = _compute_shap_for_ensemble_bundle(
+                                        _bundle_obj,
+                                        per_model=r.get("perModel", []),
+                                        feature_names=r.get("featureNames", []),
+                                        x_test_sample=r.get("xTestSample", []),
+                                    )
+                                    if _shap_plots:
+                                        _ens_bundle["shapPlots"] = _shap_plots
+                                        _ens_bundle["bestTabularModel"] = (_shap_plots.get("tabular") or {}).get("modelTag")
+                                        _ens_bundle["bestDLModel"]     = (_shap_plots.get("dl") or {}).get("modelTag")
+                                        _families_done = [k for k in _shap_plots.keys()]
+                                        q.put({"type": "log", "level": "success",
+                                               "msg": f"[{label}] SHAP 完成 ({', '.join(_families_done)}),已存進 bundle"})
+                                    else:
+                                        q.put({"type": "log", "level": "warning",
+                                               "msg": f"[{label}] SHAP 預計算回空,Insights 頁仍可即時算"})
+                                    del _bundle_obj   # 釋放大物件
+                                except Exception as _se:
+                                    import traceback as _stb
+                                    print(f"[Pipeline] SHAP 預計算失敗 (不影響模型存檔): {_se}", flush=True)
+                                    _stb.print_exc()
+                                    q.put({"type": "log", "level": "warning",
+                                           "msg": f"[{label}] SHAP 預計算失敗,Insights 頁會 fallback 到即時算: {str(_se)[:120]}"})
+
+                                # Heartbeat:大 bundle 寫盤期間 SSE 會靜默 10-30 秒,
+                                # 沒這個 log 前端會以為 hang 住或斷線。
+                                q.put({"type": "log", "level": "info",
+                                       "msg": f"[{label}] 持久化 ensemble bundle ({size_mb:.0f}MB) 到{'檔案系統' if size_mb > 50 else 'DB'}..."})
                                 _mid = storage.save_model(
                                     bundle=_ens_bundle, estimator=None, scaler=None,
                                     X_test_df=_x_test_df, user=user, db=db,
                                     preprocessor_id=job.get("preprocessorId"),
                                     dataset_id=datasetId,
                                     training_run_id=pipeline_run_id,
-                                    blob_max_override=200 * 1024 * 1024,
                                     estimator_pkl_bytes=bundle_bytes,
                                 )
                                 r["bestModelId"] = _mid
+                                r["estimatorMb"] = round(size_mb, 1)
                                 print(f"[Pipeline] ensemble 存入 storage → modelId={_mid} "
                                       f"(run={pipeline_run_id})", flush=True)
-                                # 大 blob 在 SSE 不需要傳
-                                r.pop("featureImportance", None)
-                                r.pop("testTrueDecoded", None)
-                                r.pop("testPredDecoded", None)
+                                # xTestSample 是 50 列特徵矩陣,前端用不到 → 拋掉
+                                # featureImportance / testTrue/Pred 留著,讓「剛訓練完」就看得到圖表
+                                # (這兩個欄已經在 _run_regression / _run_classification 內 cap 上限,
+                                # featureImportance ≤ 200 對、testTrue/Pred ≤ 5000 列,SSE 不會爆)
                                 r.pop("xTestSample", None)
                             else:
                                 print(f"[Pipeline] ensembleBundlePath 不存在: {bundle_path}", flush=True)
@@ -879,6 +1012,14 @@ async def train_pipeline_stream_endpoint(
                             import traceback as _tb
                             print(f"[Pipeline] ensemble save_model 失敗 (不影響分數): {_me}", flush=True)
                             _tb.print_exc()
+                            # CRITICAL:save_model 失敗時 session 是 pending-rollback 狀態,
+                            # 不 rollback 後續 finish_training_run 用同 session 會炸 PendingRollbackError
+                            # → SSE stream crash → 瀏覽器 "network error"。一定要主動 rollback。
+                            try:
+                                db.rollback()
+                                print(f"[Pipeline] db.rollback() 完成,session 恢復可用", flush=True)
+                            except Exception as _re:
+                                print(f"[Pipeline] db.rollback() 也失敗: {_re}", flush=True)
                     elif r.get("ok"):
                         # subprocess 成功但沒回 bundle 路徑 — 通常是 _dump_ensemble_bundle 拒絕 persist
                         # (某 config 來自快取沒有 fold artifacts → bundle 沒被 dump)
@@ -962,11 +1103,17 @@ async def train_pipeline_stream_endpoint(
                 "perSource": [{
                     "source": r.get("dataSource"),
                     "label": r.get("dataSourceLabel"),
+                    "taskType": r.get("taskType", "classification"),
                     "bestScore": r.get("bestScore"),
                     "scoreBlend": r.get("scoreBlend"),
                     "scoreStack": r.get("scoreStack"),
+                    # 分類指標
                     "accuracy": r.get("accuracy"),
                     "f1": r.get("f1"),
+                    # 回歸指標 (TS regression 訓的會有)
+                    "rmse": r.get("rmse"),
+                    "r2": r.get("r2"),
+                    "mae": r.get("mae"),
                     "metric": r.get("metric"),
                     "elapsedSec": r.get("elapsedSec"),
                     "submissionAvailable": r.get("submissionAvailable", False),
@@ -975,10 +1122,15 @@ async def train_pipeline_stream_endpoint(
                 "datasetName": dataset_name_for_run,
             }
             has_predictions = any(r.get("submissionAvailable") for r in all_results)
+            # 從第一個成功 r 推 task_type (TS regression 跟 classification 的入口共用 endpoint)
+            inferred_task = next(
+                (r.get("taskType") for r in all_results if r.get("taskType")),
+                None,
+            )
             storage.finish_training_run(
                 pipeline_run_id, user, db, status="completed",
                 results_summary=summary, has_predictions=has_predictions,
-                elapsed_sec=elapsed,
+                elapsed_sec=elapsed, task_type=inferred_task,
             )
             yield f"data: {json.dumps({'type': 'done', 'results': all_results, 'runId': pipeline_run_id}, ensure_ascii=False, default=str)}\n\n"
 
@@ -1015,6 +1167,249 @@ def get_training_run_endpoint(
     db: DbSession = Depends(get_db),
 ) -> dict[str, Any]:
     return storage.get_training_run(run_id, user, db)
+
+
+# ============================================================
+# 2c. TRAIN (Autogluon engine) — SSE endpoint
+# ============================================================
+# 跟 pipeline 走同樣 SSE pattern,只是 worker 改成跑 autogluon_runner
+@app.post("/api/train/autogluon/stream")
+async def train_autogluon_stream_endpoint(
+    # 模式 A:直接上傳 CSV
+    file: UploadFile | None = File(None),
+    # 模式 B:從 stored dataset (autogluon MVP 只支援 raw source — 內建自家 preprocessing)
+    datasetId: str | None = Form(None),
+    sources: str | None = Form(None),
+    # 通用 options
+    target: str | None = Form(None),
+    timeLimit: float = Form(0),    # 0 = autogluon default (沒上限)
+    preset: str = Form("medium_quality"),
+    user = Depends(get_current_user),
+    db: DbSession = Depends(get_db),
+):
+    """Autogluon engine 訓練 — 跟 pipeline 同 SSE pattern (LogEvent + ProgressEvent + done)。
+
+    preset 對應 autogluon presets:
+      best_quality / high_quality / good_quality / medium_quality / experimental_quality
+    沒傳 timeLimit (或傳 0) → 用 autogluon 自己的 default (一般是 None = 不限時)。
+    """
+    from api.train.autogluon_runner import run_autogluon
+    import io as _io
+
+    direct_upload = file is not None
+    from_store = datasetId is not None
+    if not direct_upload and not from_store:
+        raise HTTPException(status_code=400, detail="需提供 file 或 datasetId")
+
+    # 解析 sources (跟 pipeline endpoint 同邏輯,簡化版)
+    src_list: list[str] = []
+    if sources:
+        try: src_list = json.loads(sources)
+        except Exception:
+            raise HTTPException(status_code=400, detail="sources 必須是 JSON list")
+    if not isinstance(src_list, list):
+        raise HTTPException(status_code=400, detail="sources 必須是 list")
+
+    base_options = {"target": target, "timeLimit": timeLimit, "preset": preset}
+    jobs: list[dict[str, Any]] = []
+    dataset_name_for_run = "(uploaded)"
+    target_col_sample = None
+
+    if direct_upload:
+        raw = await file.read()
+        dataset_name_for_run = file.filename or "uploaded.csv"
+        try:
+            import pandas as _pd_infer
+            _df = _pd_infer.read_csv(_io.BytesIO(raw))
+            if target and target in _df.columns:
+                target_col_sample = _df[target]
+            del _df
+        except Exception: pass
+        jobs.append({
+            "label": "上傳", "source": "upload",
+            "csv_bytes": raw, "file_name": dataset_name_for_run,
+            "options": base_options,
+        })
+    else:
+        if not src_list:
+            src_list = ["raw"]
+        if "raw" in src_list:
+            bundle = storage.get_dataset(datasetId, user, db, include_df=True)
+            df = bundle["df"]
+            dataset_name_for_run = bundle.get("fileName") or "dataset.csv"
+            if target and target not in df.columns:
+                raise HTTPException(status_code=400, detail=f"target '{target}' 不在 dataset 欄位中")
+            if target_col_sample is None and target and target in df.columns:
+                target_col_sample = df[target]
+            buf = _io.StringIO()
+            df.to_csv(buf, index=False)
+            jobs.append({
+                "label": "原始", "source": "raw",
+                "csv_bytes": buf.getvalue().encode("utf-8"),
+                "file_name": dataset_name_for_run,
+                "options": base_options,
+            })
+        # 預處理 source autogluon MVP 暫不接(autogluon 內建自己的 preprocessing,雙重處理沒意義)
+        if "preprocessed" in src_list and not jobs:
+            raise HTTPException(status_code=400,
+                detail="Autogluon engine 暫不支援 'preprocessed' source — autogluon 內建自己的 preprocessing,直接用 raw source 即可。")
+
+    if not jobs:
+        raise HTTPException(status_code=400, detail="沒有產生任何訓練任務")
+
+    inferred_task = _infer_task_type(target_col_sample)
+    run_id = storage.create_training_run(
+        dataset_id=datasetId or "uploaded",
+        dataset_name=dataset_name_for_run,
+        engine="autogluon",
+        target=target or "(auto)",
+        task_type=inferred_task,
+        sources=src_list if from_store else ["upload"],
+        options={"preset": preset, "timeLimit": timeLimit},
+        user=user, db=db,
+    )
+
+    t_start = time.time()
+    cancel_token = threading.Event()
+    q: queue.Queue = queue.Queue()
+    all_results: list[dict] = []
+    error_msg: str | None = None
+    multi = len(jobs) > 1
+
+    def _prefix(ev, label):
+        """單 source 不 prefix;多 source 把 label 塞進 log/progress 給前端對齊。"""
+        if not multi:
+            return ev
+        if ev.get("type") == "log":
+            return {**ev, "msg": f"[{label}] {ev.get('msg', '')}"}
+        if ev.get("type") == "progress":
+            return {**ev, "step": f"[{label}] {ev.get('step', '')}", "source": label}
+        return ev
+
+    def worker():
+        nonlocal error_msg
+        try:
+            for job in jobs:
+                if cancel_token.is_set(): break
+                label = job["label"]
+                on_prog = lambda ev, _label=label: q.put(_prefix(ev, _label))
+                r = run_autogluon(
+                    csv_bytes=job.get("csv_bytes"),
+                    file_name=job.get("file_name"),
+                    options=job["options"],
+                    on_progress=on_prog,
+                    cancel_token=cancel_token,
+                )
+                r["dataSource"] = job["source"]
+                r["dataSourceLabel"] = label
+                # 把 autogluon bundle (tar.gz) 寫進 file blob → 之後 hydration 可載回
+                if r.get("ok") and r.get("bundlePath") and os.path.exists(r["bundlePath"]):
+                    try:
+                        with open(r["bundlePath"], "rb") as _bf:
+                            bundle_bytes = _bf.read()
+                        size_mb = len(bundle_bytes) / 1024 / 1024
+                        q.put({"type": "log", "level": "info",
+                               "msg": f"[{label}] 持久化 autogluon bundle ({size_mb:.0f}MB) "
+                                      f"到{'檔案系統' if size_mb > 50 else 'DB'}..."})
+                        _ens_bundle = {
+                            "type": "autogluon_model",
+                            "name": f"[{label}] Autogluon ({r.get('bestModel', '?')})",
+                            "dataSource": job["source"],
+                            "dataSourceLabel": label,
+                            "taskType": r.get("taskType", "classification"),
+                            "target": r.get("target"),
+                            "targetName": r.get("target"),
+                            "featureNames": [],   # autogluon 內部自己處理
+                            "testTrue": r.get("testTrueDecoded"),
+                            "testPred": r.get("testPredDecoded"),
+                            "canPredict": False,   # MVP:autogluon 預測 endpoint 暫未實作
+                            "perModel": r.get("perModel", []),
+                            "leaderboardRaw": r.get("leaderboardRaw", []),
+                            "metrics": {
+                                "testScore": r.get("bestScore"),
+                                "testScoreLabel": r.get("metric", "Score").upper(),
+                                "testAccuracy": r.get("accuracy"),
+                                "f1": r.get("f1"),
+                                "testR2": r.get("r2"),
+                                "testRMSE": r.get("rmse"),
+                                "testMAE": r.get("mae"),
+                            },
+                            "estimatorBytes": int(len(bundle_bytes)),
+                            "estimatorMb": round(size_mb, 1),
+                            "presetUsed": r.get("presetUsed"),
+                        }
+                        _mid = storage.save_model(
+                            bundle=_ens_bundle, estimator=None, scaler=None,
+                            X_test_df=None, user=user, db=db,
+                            preprocessor_id=None, dataset_id=datasetId,
+                            training_run_id=run_id,
+                            estimator_pkl_bytes=bundle_bytes,
+                        )
+                        r["bestModelId"] = _mid
+                        r["estimatorMb"] = round(size_mb, 1)
+                        # 順手刪 tarball (已經進 file blob 了)
+                        try: os.unlink(r["bundlePath"])
+                        except Exception: pass
+                    except Exception as _me:
+                        import traceback as _tb
+                        print(f"[Autogluon] save_model 失敗 (不影響分數): {_me}", flush=True)
+                        _tb.print_exc()
+                        try: db.rollback()
+                        except Exception: pass
+                r.pop("bundlePath", None)
+                all_results.append(r)
+        except Exception as e:
+            error_msg = str(e)
+        finally:
+            q.put(None)
+
+    threading.Thread(target=worker, daemon=True).start()
+
+    async def event_stream():
+        nonlocal error_msg
+        try:
+            while True:
+                ev = q.get()
+                if ev is None: break
+                yield f"data: {json.dumps(ev, ensure_ascii=False)}\n\n"
+                try:
+                    if ev.get("type") == "progress":
+                        storage.update_training_progress(run_id, user, db,
+                            pct=ev.get("pct"), step=ev.get("step"))
+                    elif ev.get("type") == "log":
+                        storage.update_training_progress(run_id, user, db,
+                            log_line={"msg": ev.get("msg", ""), "level": ev.get("level", "info")})
+                except Exception: pass
+        except (GeneratorExit, asyncio.CancelledError):
+            cancel_token.set()
+            try: storage.finish_training_run(run_id, user, db,
+                                             status="failed", error_msg="使用者取消",
+                                             elapsed_sec=round(time.time() - t_start, 2))
+            except Exception: pass
+            raise
+
+        elapsed = round(time.time() - t_start, 2)
+        if error_msg:
+            storage.finish_training_run(run_id, user, db,
+                                        status="failed", error_msg=error_msg, elapsed_sec=elapsed)
+            yield f"data: {json.dumps({'type': 'error', 'message': error_msg}, ensure_ascii=False)}\n\n"
+        else:
+            summary = {"perSource": [{
+                "source": r.get("dataSource"), "label": r.get("dataSourceLabel"),
+                "taskType": r.get("taskType", "classification"),
+                "bestScore": r.get("bestScore"),
+                "accuracy": r.get("accuracy"), "f1": r.get("f1"),
+                "rmse": r.get("rmse"), "r2": r.get("r2"), "mae": r.get("mae"),
+                "metric": r.get("metric"), "elapsedSec": r.get("elapsedSec"),
+                "bestModel": r.get("bestModel"), "preset": r.get("presetUsed"),
+            } for r in all_results], "datasetName": dataset_name_for_run}
+            inferred = next((r.get("taskType") for r in all_results if r.get("taskType")), None)
+            storage.finish_training_run(run_id, user, db,
+                status="success", elapsed_sec=elapsed,
+                results_summary=summary, task_type=inferred)
+            yield f"data: {json.dumps({'type': 'done', 'runId': run_id, 'results': all_results}, ensure_ascii=False)}\n\n"
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream")
 
 
 @app.get("/api/training-runs/{run_id}/progress")
@@ -1298,45 +1693,30 @@ class ShapRequest(BaseModel):
 
 
 class _EnsembleSHAPAdapter:
-    """讓 AutoMLVisualizer 把 ensemble bundle 當成單一 sklearn 模型 — 暴露 predict/predict_proba。
-    SHAP 會走 PermutationExplainer (model-agnostic),所以只要有 predict_proba 就能算,
-    只是會比樹模型慢很多 (要 replay 整個 ensemble: fold-averaged → blender + stacker)。"""
+    """讓 AutoMLVisualizer 把 ensemble bundle 當成單一 sklearn 模型 — 暴露 predict / predict_proba。
+    SHAP 會走 PermutationExplainer (model-agnostic),只要 predict / predict_proba 能跑就能算,
+    只是會比樹模型慢很多 (要 replay 整個 ensemble: fold-averaged → blender + stacker)。
+
+    回歸 bundle:沒有 predict_proba,只暴露 predict (連續值,已 inverse-transform 回原 y 尺度)。
+    分類 bundle:predict 走 argmax(predict_proba)。
+    """
 
     def __init__(self, bundle: dict):
         self.bundle = bundle
-
-    def _ensemble_predict_proba(self, X):
-        all_test_preds = []
-        for cfg_entry in self.bundle["configs"]:
-            folds = cfg_entry.get("folds") or []
-            if not folds:
-                continue
-            fold_preds = []
-            for fold in folds:
-                fb = fold.get("fb")
-                X_fb = fb.transform(X) if fb is not None else X
-                if "model" in fold:
-                    pred = fold["model"].predict_proba(X_fb)
-                else:
-                    pred = _predict_dl_fold(fold, X_fb, int(self.bundle["n_classes"]))
-                fold_preds.append(pred)
-            all_test_preds.append(np.mean(fold_preds, axis=0))
-        if not all_test_preds:
-            raise RuntimeError("ensemble bundle 無 fold 可推論")
-        # 跟 _predict_batch_ensemble 一致:優先 stacker
-        try:
-            return self.bundle["stacker"].predict_proba(all_test_preds, X_orig=X)
-        except Exception:
-            try:
-                return self.bundle["blender"].predict_proba(all_test_preds)
-            except Exception:
-                return self.bundle["blender"].predict(all_test_preds)
-
-    def predict_proba(self, X):
-        return self._ensemble_predict_proba(np.asarray(X))
+        task_type = bundle.get("task_type", "classification")
+        self.is_regression = (task_type == "regression"
+                              or int(bundle.get("n_classes", 0)) <= 1)
 
     def predict(self, X):
-        return self._ensemble_predict_proba(np.asarray(X)).argmax(axis=1)
+        X = np.asarray(X)
+        if self.is_regression:
+            return _ensemble_replay(self.bundle, X, return_proba=False)
+        return _ensemble_replay(self.bundle, X, return_proba=False)
+
+    def predict_proba(self, X):
+        if self.is_regression:
+            raise AttributeError("regression ensemble has no predict_proba")
+        return _ensemble_replay(self.bundle, np.asarray(X), return_proba=True)
 
 
 @app.post("/api/visualize/shap")
@@ -1360,12 +1740,37 @@ def visualize_shap_endpoint(
 
     # Daniel ensemble → 包 adapter,讓 AutoMLVisualizer 用 Permutation 算 SHAP
     is_ensemble = bundle_meta.get("type") == "daniel_pipeline_ensemble"
+
+    # Item 1C:若 bundle 已預計算 SHAP 持久化,優先直接回(秒級;不用算)
+    if is_ensemble and isinstance(bundle_meta.get("shapPlots"), dict) and bundle_meta["shapPlots"]:
+        # 前端傳了 family 就只給該 family,沒傳就回整包
+        _sp = bundle_meta["shapPlots"]
+        # 兼容舊請求 (sampleIndex / targetFeature 對預計算版無作用),前端用 family field 切換
+        return {
+            "modelId":         req.modelId,
+            "source":          "precomputed",   # 標籤:前端可顯示「持久化」徽章
+            "shapPlots":       _sp,             # {"tabular": {...}, "dl": {...}} 各含 global/waterfall/dependence
+            "bestTabularModel": bundle_meta.get("bestTabularModel"),
+            "bestDLModel":     bundle_meta.get("bestDLModel"),
+            "featureNames":    (_sp.get("tabular") or {}).get("featureNames", []) or
+                               (_sp.get("dl") or {}).get("featureNames", []),
+        }
+
     if is_ensemble:
         if not (isinstance(estimator, dict) and estimator.get("version") == 1):
-            raise HTTPException(status_code=400,
-                detail="ensemble bundle 在儲存時超過大小上限,SHAP 不可用。請重訓 (fast mode 縮小)。")
+            _est_status = entry.get("estimatorStatus", "empty")
+            if _est_status == "file_missing":
+                _msg = "ensemble file blob 已不存在 (model_blobs/ 被清掉或換機器了),SHAP 不可用。請重訓。"
+            else:
+                _msg = "ensemble bundle 在 DB 沒有 estimator (舊 placeholder 或 pickle 失敗),SHAP 不可用。請重訓。"
+            raise HTTPException(status_code=400, detail=_msg)
         # ensemble 的 featureNames 用 bundle 內的 raw 特徵名
         feature_names = estimator.get("feature_names_raw", feature_names)
+        # Item 5 防禦性清洗:預處理 source 訓的舊 bundle 可能有 'num_pipeline__SalePrice'
+        # 這種 sklearn ColumnTransformer 前綴。daniel 新版會自動 split('__')[-1],這裡
+        # 補一層保險讓 SHAP 圖顯示乾淨名(如 'SalePrice')。OHE 欄會帶 '_NoRidge' 後綴,
+        # 這部分無解(訓練時就拼起來了),只能再做 mapping(本輪不做)。
+        feature_names = [str(n).split("__")[-1] for n in (feature_names or [])]
         estimator = _EnsembleSHAPAdapter(estimator)
 
     if estimator is None:
@@ -1418,11 +1823,29 @@ def predict_endpoint(
     user = Depends(get_current_user),
     db: DbSession = Depends(get_db),
 ) -> dict[str, Any]:
+    _ensure_pipeline_path_for_unpickle()
     entry = storage.get_model(req.modelId, user, db)
 
     estimator = entry["estimator"]
     scaler = entry["scaler"]
     feature_names = entry["featureNames"]
+    preprocessor_id = entry.get("preprocessorId")
+    bundle_meta = entry.get("bundle") or {}
+
+    # Daniel ensemble:走 fold-averaged → blender + stacker flow
+    if bundle_meta.get("type") == "daniel_pipeline_ensemble":
+        if not (isinstance(estimator, dict) and estimator.get("version") == 1 and "configs" in estimator):
+            _est_status = entry.get("estimatorStatus", "empty")
+            if _est_status == "file_missing":
+                _msg = "此 ensemble 模型的 file blob 已不存在 (model_blobs/ 被清掉或換機器了),無法預測。請重訓。"
+            else:
+                _msg = "此 ensemble 模型在 DB 沒有 estimator (舊 placeholder 或 pickle 失敗),無法預測。請重訓。"
+            raise HTTPException(status_code=410, detail=_msg)
+        if len(req.features) != len(feature_names):
+            raise HTTPException(status_code=400,
+                detail=f"features 長度 {len(req.features)} 不符 (應為 {len(feature_names)})")
+        return _predict_single_ensemble(estimator, req.features, feature_names,
+                                       preprocessor_id, user, db)
 
     if estimator is None:
         raise HTTPException(status_code=400, detail="此模型訓練失敗,無法預測")
@@ -1452,6 +1875,82 @@ def predict_endpoint(
             pass
 
     return {"prediction": pred, "proba": proba, "classes": classes}
+
+
+def _predict_single_ensemble(bundle: dict, features: list, feature_names: list,
+                             preprocessor_id: Optional[str], user, db) -> dict:
+    """單筆 ensemble 預測 — 給 What-If simulator 用。
+
+    feature_names 已經是 ensemble 訓練時看到的欄位順序:
+      - raw source ensemble → 原始欄名
+      - preprocessed source ensemble → transformed 欄名 (前端 What-If slider 顯示這些)
+    """
+    import pandas as pd
+
+    # 單筆 N×1 → DataFrame (column 名跟 model 訓練時看到的對齊)
+    one_row_df = pd.DataFrame([features], columns=feature_names)
+    X_raw = one_row_df.values.astype(np.float32)
+
+    task_type = bundle.get("task_type", "classification")
+    is_reg = task_type == "regression" or int(bundle.get("n_classes", 0)) <= 1
+
+    if is_reg:
+        # 回歸:回連續值 + 5 fold 的標準差當「不確定度」,前端可畫 ±1σ 區間。
+        # 直接收每 fold 預測值 (不走 blender/stacker,只是純不確定度估計)。
+        y_center = bundle.get("y_center")
+        y_scale  = bundle.get("y_scale")
+        per_fold_preds = []
+        for cfg_entry in bundle["configs"]:
+            folds = cfg_entry.get("folds") or []
+            for fold in folds:
+                fb = fold.get("fb")
+                X_fb = fb.transform(X_raw) if fb is not None else X_raw
+                if "model" in fold:
+                    p = fold["model"].predict(X_fb)
+                else:
+                    p = _predict_dl_fold(fold, X_fb, 1)
+                p = np.asarray(p, dtype=float).ravel()
+                # 逆 RobustScaler 還原回原 y 尺度
+                if y_center is not None and y_scale is not None:
+                    p = p * float(y_scale) + float(y_center)
+                per_fold_preds.append(float(p[0]))
+        # 走 ensemble blender/stacker 拿正式 prediction (跟 batch predict 一致)
+        pred_arr = _ensemble_replay(bundle, X_raw, return_proba=False)
+        val = float(np.asarray(pred_arr).ravel()[0])
+        std = float(np.std(per_fold_preds)) if len(per_fold_preds) >= 2 else 0.0
+        return {
+            "prediction": val,
+            "proba": None,
+            "classes": None,
+            # 回歸專屬欄位:讓 What-If UI 顯示 ±1σ 信心區間,以及單 fold 預測分布
+            "predictionStd": std,
+            "predictionCI68": [val - std, val + std],            # ±1σ ≈ 68% CI
+            "predictionCI95": [val - 1.96 * std, val + 1.96 * std],
+            "foldPredictions": per_fold_preds,
+            "isRegression": True,
+        }
+
+    # 分類
+    proba_arr = _ensemble_replay(bundle, X_raw, return_proba=True)
+    proba_row = np.asarray(proba_arr)[0]
+    pred_idx = int(np.argmax(proba_row)) if proba_row.ndim >= 1 else int(proba_row)
+
+    le = bundle.get("label_encoder")
+    n_classes = int(bundle.get("n_classes", 0))
+    if le is not None:
+        pred_label = le.inverse_transform([pred_idx])[0]
+        if hasattr(pred_label, "item"):
+            pred_label = pred_label.item()
+        classes = [c.item() if hasattr(c, "item") else c for c in le.classes_]
+    else:
+        pred_label = pred_idx
+        classes = list(range(n_classes))
+
+    return {
+        "prediction": pred_label,
+        "proba": proba_row.tolist() if hasattr(proba_row, "tolist") else [float(proba_row)],
+        "classes": classes,
+    }
 
 
 # ============================================================
@@ -1513,8 +2012,151 @@ def _ensure_pipeline_path_for_unpickle():
         sys.path.insert(0, _pipe)
 
 
+# 訓練時 SHAP 預先計算 — Item 1
+# ============================================================
+# 對 ensemble bundle 內 OOF 最強的 tabular + DL 基模型各跑 SHAP,
+# 各回 3 張 plotly figure JSON。失敗一個 family 不影響另一個。
+# 取代「按下分析才即時算」的延遲 — 訓練完就存進 bundle,Insights 頁秒開。
+# ============================================================
+_SHAP_TABULAR_NAMES = {"lgbm", "xgb", "catboost", "rf", "extra_trees", "logreg", "knn", "ridge"}
+_SHAP_DL_NAMES      = {"mlp", "cnn1d", "resnet1d", "tcn", "transformer", "patchtst", "tsnet"}
+_SHAP_ALL_NAMES     = sorted(_SHAP_TABULAR_NAMES | _SHAP_DL_NAMES, key=len, reverse=True)
+
+
+def _shap_family_of_tag(tag: str) -> Optional[str]:
+    """從 fold tag(例如 'reg_lgbm_raw_stat_c0_xxxxxx_yrs')還原家族。"""
+    t = tag[4:] if tag.startswith("reg_") else tag
+    for n in _SHAP_ALL_NAMES:
+        if t.startswith(n + "_"):
+            return "tabular" if n in _SHAP_TABULAR_NAMES else "dl"
+    return None
+
+
+def _compute_shap_for_ensemble_bundle(bundle: dict, per_model: list,
+                                       feature_names: list, x_test_sample: list) -> dict:
+    """對 ensemble 內最強的 tabular + DL 基模型各跑 3 張 SHAP plotly。
+
+    Args:
+        bundle: 已 unpickle 的 ensemble bundle dict (含 configs / blender / stacker)
+        per_model: SSE 回的 perModel list (含 tag + oofScore),index 對應 bundle["configs"]
+        feature_names: 訓練時的特徵名 (已 split('__')[-1] 清乾淨)
+        x_test_sample: 50 列 raw X 樣本 (從 subprocess r["xTestSample"])
+
+    Returns:
+        {"tabular": {modelTag, oofScore, global, waterfall, dependence},
+         "dl":      {modelTag, oofScore, global, waterfall, dependence}}
+        找不到該家族 / 計算失敗的 key 缺。
+    """
+    import pandas as pd
+    import plotly.io as pio
+    try:
+        from api.visualize import AutoMLVisualizer
+    except Exception as e:
+        print(f"[shap_precompute] AutoMLVisualizer 無法 import: {e}", flush=True)
+        return {}
+
+    # 按 OOF 分數選每家族第一名
+    best: dict = {"tabular": (None, -float("inf")), "dl": (None, -float("inf"))}
+    for i, m in enumerate(per_model or []):
+        score = m.get("oofScore")
+        if score is None:
+            continue
+        fam = _shap_family_of_tag(m.get("tag", ""))
+        if fam and score > best[fam][1]:
+            best[fam] = (i, float(score))
+
+    if best["tabular"][0] is None and best["dl"][0] is None:
+        print("[shap_precompute] 找不到任何 tabular / DL 基模型,跳過", flush=True)
+        return {}
+
+    # X sample → DataFrame(feature_names 對齊)
+    if not x_test_sample:
+        print("[shap_precompute] x_test_sample 空,跳過", flush=True)
+        return {}
+    X_arr = np.asarray(x_test_sample[:50])
+    if X_arr.ndim != 2:
+        return {}
+    # feature_names 可能跟 X_arr 欄數不一致(舊 bundle),fallback 用 f0/f1/...
+    if len(feature_names) == X_arr.shape[1]:
+        cols = list(feature_names)
+    else:
+        cols = [f"f{i}" for i in range(X_arr.shape[1])]
+    X_sample_df = pd.DataFrame(X_arr, columns=cols)
+
+    def _fig_to_json(fig):
+        return json.loads(pio.to_json(fig))
+
+    results: dict = {}
+    for family in ("tabular", "dl"):
+        idx, score = best[family]
+        if idx is None:
+            continue
+        try:
+            config_entry = bundle["configs"][idx]
+            folds = config_entry.get("folds") or []
+            if not folds:
+                print(f"[shap_precompute] {family} idx={idx} fold list 空", flush=True)
+                continue
+            fold = folds[0]  # 第一 fold 的 model 當代表
+
+            # FeatureBuilder transform 一次,讓 X 對齊 model 訓練時的維度
+            fb = fold.get("fb")
+            if fb is not None:
+                try:
+                    X_fb = fb.transform(X_arr)
+                except Exception as e:
+                    print(f"[shap_precompute] {family} fb.transform 失敗: {e}", flush=True)
+                    continue
+            else:
+                X_fb = X_arr
+
+            # feature names 對齊 transformed 後的維度(FeatureBuilder 會展開/壓縮)
+            tx_cols = cols if X_fb.shape[1] == len(cols) else [f"f{i}" for i in range(X_fb.shape[1])]
+            X_fb_df = pd.DataFrame(X_fb, columns=tx_cols)
+
+            if family == "tabular":
+                model = fold.get("model")
+                if model is None:
+                    print(f"[shap_precompute] tabular fold 沒 'model' key,跳過", flush=True)
+                    continue
+                viz = AutoMLVisualizer(model, X_fb_df, output_dir=None)
+            else:
+                # DL:包成有 .predict 的 wrapper 讓 AutoMLVisualizer 走 PermutationExplainer
+                n_classes = max(1, int(bundle.get("n_classes", 1)))
+                class _DLWrap:
+                    def predict(_self, X):
+                        Xn = X.values if hasattr(X, "values") else np.asarray(X)
+                        return _predict_dl_fold(fold, Xn, n_classes)
+                viz = AutoMLVisualizer(_DLWrap(), X_fb_df, output_dir=None)
+
+            # 三張圖
+            target_feat = tx_cols[0] if tx_cols else "f0"
+            fig_global = viz.generate_beeswarm_plot(return_fig=True)
+            fig_wf     = viz.generate_waterfall_plot(sample_index=0, return_fig=True)
+            fig_dep    = viz.generate_dependence_plot(target_feature=target_feat, return_fig=True)
+
+            results[family] = {
+                "modelTag": (per_model[idx] or {}).get("tag"),
+                "oofScore": (per_model[idx] or {}).get("oofScore"),
+                "featureNames": tx_cols,    # 給前端 dependence 切換用
+                "global":     _fig_to_json(fig_global),
+                "waterfall":  _fig_to_json(fig_wf),
+                "dependence": _fig_to_json(fig_dep),
+            }
+            print(f"[shap_precompute] ✓ {family} ({per_model[idx].get('tag')}, OOF={score:.4f})", flush=True)
+        except Exception as e:
+            print(f"[shap_precompute] {family} 失敗 (不影響其他): {e}", flush=True)
+            import traceback
+            traceback.print_exc()
+            continue
+
+    return results
+
+
 def _predict_dl_fold(fold: dict, X_fb: "np.ndarray", n_classes: int) -> "np.ndarray":
-    """重建 DL 模型 → load_state_dict → 推論。回 N×C 機率矩陣。"""
+    """重建 DL 模型 → load_state_dict → 推論。
+    分類:回 N×C 機率矩陣 (softmax)。
+    回歸:回 N 維 (model.forward 直接輸出,沒有 activation)。"""
     import torch
     _ensure_pipeline_path_for_unpickle()
     from src.train import _build_dl_model
@@ -1524,9 +2166,120 @@ def _predict_dl_fold(fold: dict, X_fb: "np.ndarray", n_classes: int) -> "np.ndar
     model.eval()
     X_t = torch.tensor(X_fb, dtype=torch.float32)
     with torch.no_grad():
-        logits = model(X_t)
-        probs  = torch.softmax(logits, dim=1).cpu().numpy()
-    return probs
+        out = model(X_t)
+        if n_classes == 1:
+            # 回歸:回 1D 預測值 (n_classes=1)
+            arr = out.squeeze(-1).cpu().numpy()
+        else:
+            arr = torch.softmax(out, dim=1).cpu().numpy()
+    return arr
+
+
+def _ensemble_replay(bundle: dict, X_raw: "np.ndarray", *, return_proba: bool = True,
+                     on_progress=None, cancel_token=None):
+    """重播 ensemble bundle:各 config 跑 5 fold 平均 → blender / stacker。
+
+    分類 (return_proba=True):回 N×C 機率矩陣 (取 stacker 優先,失敗回退 blender)。
+    回歸:回 N 維值 (已 inverse-transform 回原 y 尺度)。
+
+    on_progress(event: dict) → None:每完成一個 config / 進到 blender/stacker 階段都會呼叫;
+                                     event 結構見下面 dict literal,讓 endpoint 對應發 SSE event。
+    cancel_token:threading.Event。is_set() 為 True 時下次 config 迭代會 raise InterruptedError,
+                  讓上層 endpoint 把 CSV 結果丟掉直接回 cancel 狀態。
+    """
+    def _emit(event):
+        if on_progress is not None:
+            try: on_progress(event)
+            except Exception: pass
+
+    def _check_cancel():
+        if cancel_token is not None and cancel_token.is_set():
+            raise InterruptedError("使用者取消批次預測")
+
+    n_classes = int(bundle.get("n_classes", 0))
+    task_type = bundle.get("task_type", "classification")
+    is_reg = task_type == "regression" or n_classes <= 1
+
+    total_cfgs = sum(1 for c in bundle["configs"] if c.get("folds"))
+    _emit({"phase": "start", "totalConfigs": total_cfgs,
+           "nClasses": n_classes, "taskType": "regression" if is_reg else "classification",
+           "nSamples": int(X_raw.shape[0])})
+
+    all_test_preds = []
+    done = 0
+    for cfg_entry in bundle["configs"]:
+        folds = cfg_entry.get("folds") or []
+        if not folds:
+            continue
+        _check_cancel()
+        tag = cfg_entry.get("tag", "?")
+        _emit({"phase": "config_start", "tag": tag, "done": done, "total": total_cfgs,
+               "nFolds": len(folds)})
+        t0 = time.time()
+        fold_preds = []
+        for fold in folds:
+            _check_cancel()
+            fb = fold.get("fb")
+            try:
+                X_fb = fb.transform(X_raw) if fb is not None else X_raw
+            except Exception as e:
+                raise HTTPException(500, f"FeatureBuilder.transform 失敗 ({cfg_entry.get('tag')}): {e}")
+            if "model" in fold:
+                # tabular — 回歸用 predict,分類用 predict_proba
+                pred = fold["model"].predict(X_fb) if is_reg else fold["model"].predict_proba(X_fb)
+            else:
+                # DL — _predict_dl_fold 內部依 n_classes 自動分流
+                pred = _predict_dl_fold(fold, X_fb, max(1, n_classes))
+            fold_preds.append(np.asarray(pred))
+        all_test_preds.append(np.mean(fold_preds, axis=0))
+        done += 1
+        elapsed = round(time.time() - t0, 1)
+        _emit({"phase": "config_done", "tag": tag, "done": done, "total": total_cfgs,
+               "elapsedSec": elapsed})
+
+    if not all_test_preds:
+        raise HTTPException(500, "ensemble bundle 無 fold 可推論")
+
+    _check_cancel()
+    _emit({"phase": "ensemble_combine", "done": done, "total": total_cfgs})
+
+    blender = bundle["blender"]
+    stacker = bundle["stacker"]
+
+    if is_reg:
+        # 回歸:blender/stacker 一律走 .predict (沒有 _proba 概念)
+        # stacker 通常較強 → 失敗回退 blender
+        try:
+            pred_scaled = stacker.predict(all_test_preds, X_orig=X_raw)
+        except Exception:
+            pred_scaled = blender.predict(all_test_preds)
+        # RobustScaler inverse: y = y_scaled * IQR + median
+        y_center = bundle.get("y_center")
+        y_scale  = bundle.get("y_scale")
+        arr = np.asarray(pred_scaled, dtype=float).ravel()
+        if y_center is not None and y_scale is not None:
+            arr = arr * float(y_scale) + float(y_center)
+        return arr
+
+    # 分類
+    if return_proba:
+        try:
+            return stacker.predict_proba(all_test_preds, X_orig=X_raw)
+        except Exception:
+            try:
+                return blender.predict_proba(all_test_preds)
+            except Exception:
+                return blender.predict(all_test_preds)
+    # 純 predict 走 argmax
+    try:
+        proba = stacker.predict_proba(all_test_preds, X_orig=X_raw)
+    except Exception:
+        try:
+            proba = blender.predict_proba(all_test_preds)
+        except Exception:
+            proba = blender.predict(all_test_preds)
+    proba = np.asarray(proba)
+    return proba.argmax(axis=1) if proba.ndim == 2 else proba.astype(int)
 
 
 async def _predict_batch_ensemble(bundle: dict, file: UploadFile,
@@ -1551,28 +2304,63 @@ async def _predict_batch_ensemble(bundle: dict, file: UploadFile,
     # 2. 若有 preprocessor → 先套 transform → 對齊 ensemble 訓練時看到的 schema
     target_col = bundle.get("target", "")
     if preprocessor_id and user is not None and db is not None:
+        print(f"[batch_prep] preprocessor_id={preprocessor_id} test_rows={len(feat_df_raw)} cols={len(feat_df_raw.columns)}", flush=True)
         try:
             pp_entry = storage.get_preprocessor(preprocessor_id, user, db)
             preprocessor = pp_entry["preprocessor"]
             pp_target = pp_entry.get("target", "")
-            X_in = feat_df_raw.drop(columns=[pp_target], errors="ignore")
+            print(f"[batch_prep] preprocessor type={type(preprocessor).__name__}, pp_target='{pp_target}'", flush=True)
+
+            # 對齊裝甲:test.csv 缺的欄補 NaN,多的欄丟掉;sklearn 預設 transform 對欄序敏感
+            X_in = feat_df_raw.drop(columns=[pp_target], errors="ignore").copy()
+            # 抓 preprocessor fit 時看到的欄(若拿不到就跳過對齊,直接 transform 賭一賭)
+            fit_cols = None
+            if hasattr(preprocessor, "feature_names_in_"):
+                fit_cols = list(preprocessor.feature_names_in_)
+            elif hasattr(preprocessor, "_columns"):
+                fit_cols = list(preprocessor._columns)
+            if fit_cols:
+                missing_in_test = [c for c in fit_cols if c not in X_in.columns]
+                extra_in_test = [c for c in X_in.columns if c not in fit_cols]
+                if missing_in_test:
+                    print(f"[batch_prep] test 缺 {len(missing_in_test)} 個 train 看過的欄,補 NaN: {missing_in_test[:5]}...", flush=True)
+                    for c in missing_in_test:
+                        X_in[c] = np.nan
+                if extra_in_test:
+                    print(f"[batch_prep] test 多 {len(extra_in_test)} 個 train 沒看過的欄,丟掉: {extra_in_test[:5]}...", flush=True)
+                # 重排成 train 看到的順序
+                X_in = X_in[fit_cols]
+
+            print(f"[batch_prep] X_in shape: {X_in.shape}, 正在 transform...", flush=True)
             X_transformed = preprocessor.transform(X_in)
             if hasattr(X_transformed, "toarray"):
                 X_transformed = X_transformed.toarray()
+            print(f"[batch_prep] X_transformed shape: {X_transformed.shape}", flush=True)
+
             try:
-                tx_names = (list(preprocessor.get_feature_names_out())
-                            if hasattr(preprocessor, "get_feature_names_out")
-                            else [f"f{i}" for i in range(X_transformed.shape[1])])
+                _raw_names = (list(preprocessor.get_feature_names_out())
+                              if hasattr(preprocessor, "get_feature_names_out")
+                              else [f"f{i}" for i in range(X_transformed.shape[1])])
+                # daniel 訓練時把 'pipeline_name__feature' split('__')[-1] 簡化成 'feature',
+                # bundle.feature_names_raw 存的也是簡名 — 推論時必須做一樣的清理
+                tx_names = [str(n).split("__")[-1] for n in _raw_names]
             except Exception:
                 tx_names = [f"f{i}" for i in range(X_transformed.shape[1])]
             if len(tx_names) != X_transformed.shape[1]:
                 tx_names = [f"f{i}" for i in range(X_transformed.shape[1])]
             feat_df = pd.DataFrame(X_transformed, columns=tx_names)
+            print(f"[batch_prep] feat_df 完成,cols 範例: {list(feat_df.columns[:5])}", flush=True)
         except HTTPException:
             raise
         except Exception as e:
+            # 完整 traceback 印到 server console,讓使用者抓得到根因;
+            # 對前端只回精簡訊息,不暴露內部結構
+            import traceback as _tb
+            print(f"[batch_prep] preprocessor.transform 失敗:", flush=True)
+            _tb.print_exc()
             raise HTTPException(400,
-                f"套用預處理失敗 — test.csv 的欄位需與訓練時的原始欄位一致: {e}")
+                f"套用預處理失敗 — {type(e).__name__}: {str(e)[:300]} "
+                f"(完整 traceback 請看 server console)")
     else:
         feat_df = feat_df_raw
 
@@ -1584,57 +2372,20 @@ async def _predict_batch_ensemble(bundle: dict, file: UploadFile,
             f"CSV 缺少 {len(missing)} 個模型需要的特徵欄位: {missing[:10]}{'...' if len(missing) > 10 else ''}")
     X_raw = feat_df[cols_required].fillna(0).values.astype(np.float32)
 
-    # 3. 每 config: 5 fold 預測平均
-    n_classes = int(bundle["n_classes"])
-    all_test_preds = []
-    for cfg_entry in bundle["configs"]:
-        folds = cfg_entry.get("folds") or []
-        if not folds:
-            continue
-        fold_preds = []
-        for fold in folds:
-            fb = fold.get("fb")
-            try:
-                X_fb = fb.transform(X_raw) if fb is not None else X_raw
-            except Exception as e:
-                raise HTTPException(500, f"FeatureBuilder.transform 失敗 ({cfg_entry['tag']}): {e}")
-            if "model" in fold:
-                # tabular
-                model = fold["model"]
-                pred = model.predict_proba(X_fb)
-            else:
-                # DL
-                pred = _predict_dl_fold(fold, X_fb, n_classes)
-            fold_preds.append(pred)
-        avg = np.mean(fold_preds, axis=0)
-        all_test_preds.append(avg)
+    # 4. 重播 ensemble (回歸 vs 分類分流由 _ensemble_replay 內部處理)
+    task_type = bundle.get("task_type", "classification")
+    is_reg = task_type == "regression" or int(bundle.get("n_classes", 0)) <= 1
 
-    if not all_test_preds:
-        raise HTTPException(500, "ensemble bundle 無任何 config 有 fold 可推論")
-
-    # 4. blender + stacker
-    blender = bundle["blender"]
-    stacker = bundle["stacker"]
-    try:
-        blend_pred = blender.predict_proba(all_test_preds)
-    except Exception:
-        blend_pred = blender.predict(all_test_preds)
-    try:
-        stack_pred = stacker.predict_proba(all_test_preds, X_orig=X_raw)
-    except Exception:
-        stack_pred = stacker.predict(all_test_preds, X_orig=X_raw)
-
-    # 5. 取 stacker (通常較強);若失敗回退 blender
-    final = stack_pred if stack_pred is not None else blend_pred
-
-    # 6. 解碼 label
-    le = bundle.get("label_encoder")
-    final_arr = np.asarray(final)
-    if final_arr.ndim == 2:
-        idx = final_arr.argmax(axis=1)
+    if is_reg:
+        # 回歸:回連續值,直接寫進 CSV
+        preds = _ensemble_replay(bundle, X_raw, return_proba=False)
+        preds = np.asarray(preds, dtype=float).ravel()
     else:
-        idx = final_arr.astype(int)
-    preds = le.inverse_transform(idx) if le is not None else idx
+        # 分類:回 argmax 後再 inverse_transform 回原 label
+        idx_arr = _ensemble_replay(bundle, X_raw, return_proba=False)
+        idx_arr = np.asarray(idx_arr).astype(int).ravel()
+        le = bundle.get("label_encoder")
+        preds = le.inverse_transform(idx_arr) if le is not None else idx_arr
 
     # 7. submission / predicted CSV — ID 從 raw df 抓 (transformed df 沒這欄)
     if sample_file is not None:
@@ -1666,6 +2417,251 @@ async def _predict_batch_ensemble(bundle: dict, file: UploadFile,
     )
 
 
+# ── 共用:把 daniel ensemble 的 batch predict 拆成「prep」+「replay」+「write CSV」三段 ───
+async def _ensemble_batch_prep(bundle, file: UploadFile, sample_file,
+                               preprocessor_id, user, db):
+    """讀 CSV → (optional) 套 preprocessor → 對齊 feature_names_raw → X_raw + 一些 meta。"""
+    import pandas as pd
+    _ensure_pipeline_path_for_unpickle()
+    try:
+        raw = await file.read()
+        feat_df_raw = pd.read_csv(io.BytesIO(raw))
+    except Exception as e:
+        raise HTTPException(400, f"CSV 解析失敗: {e}")
+
+    if preprocessor_id and user is not None and db is not None:
+        print(f"[batch_prep] preprocessor_id={preprocessor_id} test_rows={len(feat_df_raw)} cols={len(feat_df_raw.columns)}", flush=True)
+        try:
+            pp_entry = storage.get_preprocessor(preprocessor_id, user, db)
+            preprocessor = pp_entry["preprocessor"]
+            pp_target = pp_entry.get("target", "")
+
+            # 優先用 daniel 的 preprocess_for_inference — 它有「特徵對齊裝甲」(missing → NaN,
+            # 多餘 → drop,順序重排),比直接 .transform() 對未知/缺欄健壯很多。
+            # cols_required 是訓練時 fit 出來的特徵名,用來給 inference 函式知道目標 schema。
+            cols_required = bundle.get("feature_names_raw", [])
+            X_in_raw = feat_df_raw.drop(columns=[pp_target], errors="ignore") if pp_target else feat_df_raw
+
+            try:
+                from api.preprocess import preprocess_for_inference
+                print(f"[batch_prep] 嘗試 daniel preprocess_for_inference (對齊到 {len(cols_required)} 個目標欄)", flush=True)
+                feat_df = preprocess_for_inference(
+                    X_in_raw,                        # data_source
+                    preprocessor,                    # fitted_preprocessor (tree-track)
+                    training_features=cols_required, # 對齊目標
+                )
+                print(f"[batch_prep] preprocess_for_inference OK,shape={feat_df.shape}", flush=True)
+            except Exception as _pf_e:
+                # Fallback:走老路 .transform(),配特徵對齊裝甲手動補
+                print(f"[batch_prep] preprocess_for_inference 不可用 / 失敗,fallback 直接 .transform(): {_pf_e}", flush=True)
+                X_in = X_in_raw.copy()
+                fit_cols = None
+                if hasattr(preprocessor, "feature_names_in_"):
+                    fit_cols = list(preprocessor.feature_names_in_)
+                elif hasattr(preprocessor, "_columns"):
+                    fit_cols = list(preprocessor._columns)
+                if fit_cols:
+                    missing_in_test = [c for c in fit_cols if c not in X_in.columns]
+                    if missing_in_test:
+                        print(f"[batch_prep] 對齊裝甲補 NaN ({len(missing_in_test)} 欄): {missing_in_test[:5]}...", flush=True)
+                        for c in missing_in_test:
+                            X_in[c] = np.nan
+                    X_in = X_in[fit_cols]   # 重排 + drop extras
+                X_transformed = preprocessor.transform(X_in)
+                if hasattr(X_transformed, "toarray"):
+                    X_transformed = X_transformed.toarray()
+                try:
+                    _raw_names = (list(preprocessor.get_feature_names_out())
+                                  if hasattr(preprocessor, "get_feature_names_out")
+                                  else [f"f{i}" for i in range(X_transformed.shape[1])])
+                    tx_names = [str(n).split("__")[-1] for n in _raw_names]
+                except Exception:
+                    tx_names = [f"f{i}" for i in range(X_transformed.shape[1])]
+                if len(tx_names) != X_transformed.shape[1]:
+                    tx_names = [f"f{i}" for i in range(X_transformed.shape[1])]
+                feat_df = pd.DataFrame(X_transformed, columns=tx_names)
+                print(f"[batch_prep] fallback transform OK,shape={feat_df.shape}", flush=True)
+        except HTTPException:
+            raise
+        except Exception as e:
+            import traceback as _tb
+            print(f"[batch_prep] preprocess_for_inference + fallback 都失敗:", flush=True)
+            _tb.print_exc()
+            raise HTTPException(400,
+                f"套用預處理失敗 — {type(e).__name__}: {str(e)[:300]} "
+                f"(完整 traceback 請看 server console)")
+    else:
+        feat_df = feat_df_raw
+
+    cols_required = bundle.get("feature_names_raw", [])
+    missing = [c for c in cols_required if c not in feat_df.columns]
+    if missing:
+        raise HTTPException(400,
+            f"CSV 缺少 {len(missing)} 個模型需要的特徵欄位: {missing[:10]}{'...' if len(missing) > 10 else ''}")
+    X_raw = feat_df[cols_required].fillna(0).values.astype(np.float32)
+
+    sample_bytes = None
+    if sample_file is not None:
+        try:
+            sample_bytes = await sample_file.read()
+        except Exception as e:
+            raise HTTPException(400, f"範本 submission 解析失敗: {e}")
+
+    return feat_df_raw, X_raw, sample_bytes
+
+
+def _ensemble_finalize_csv(bundle, feat_df_raw, preds, sample_bytes, out_filename):
+    """把 preds 寫成 CSV bytes。回 (csv_bytes, out_name)。"""
+    import pandas as pd
+    le = bundle.get("label_encoder")
+    is_reg = bundle.get("task_type") == "regression" or int(bundle.get("n_classes", 0)) <= 1
+
+    if not is_reg and le is not None and not isinstance(preds[0] if len(preds) else None, (str, bytes)):
+        # 已經是 idx 數字 → 解回原 label
+        try:
+            preds = le.inverse_transform(np.asarray(preds).astype(int))
+        except Exception:
+            pass
+
+    if sample_bytes is not None:
+        sub_df = pd.read_csv(io.BytesIO(sample_bytes))
+        if len(sub_df.columns) < 2:
+            raise HTTPException(400, "範本 submission 至少需要 2 欄 (ID 欄 + 預測欄)")
+        id_col   = sub_df.columns[0]
+        pred_col = sub_df.columns[1]
+        if id_col not in feat_df_raw.columns:
+            raise HTTPException(400, f"test.csv 缺少範本要求的 ID 欄位「{id_col}」")
+        out_df = pd.DataFrame({id_col: feat_df_raw[id_col], pred_col: preds})
+        out_name = "submission.csv"
+    else:
+        out_df = feat_df_raw.copy()
+        out_df["prediction"] = preds
+        out_name = out_filename or "_predicted.csv"
+
+    return out_df.to_csv(index=False, encoding="utf-8-sig").encode("utf-8-sig"), out_name
+
+
+# ── 新 SSE endpoint:邊跑邊 yield progress + 最終 base64 CSV + 支援 cancel ──────────
+@app.post("/api/predict/batch/stream")
+async def predict_batch_stream_endpoint(
+    modelId: str = Form(...),
+    file: UploadFile = File(...),
+    sampleFile: Optional[UploadFile] = File(None),
+    user = Depends(get_current_user),
+    db: DbSession = Depends(get_db),
+):
+    """SSE 版批次預測 — 邊推進度邊跑 ensemble replay。
+
+    事件流 (text/event-stream):
+      event: progress  data: {"phase": "config_start", "tag": "lgbm_raw_c0", "done": 0, "total": 5}
+      event: progress  data: {"phase": "config_done",  "tag": "lgbm_raw_c0", "done": 1, "total": 5, "elapsedSec": 8.3}
+      ...
+      event: done      data: {"filename": "submission.csv", "csvBase64": "..."}
+    瀏覽器斷線 (AbortController) → cancel_token.set() → 下次 config 迭代拋 InterruptedError → 收尾 cancelled 事件。
+    """
+    import threading, base64, asyncio
+    _ensure_pipeline_path_for_unpickle()
+    entry = storage.get_model(modelId, user, db)
+    estimator       = entry["estimator"]
+    preprocessor_id = entry.get("preprocessorId")
+    bundle_meta     = entry.get("bundle") or {}
+
+    if bundle_meta.get("type") != "daniel_pipeline_ensemble":
+        # sklearn 等小模型:SSE 沒意義,直接回退到一次性 endpoint
+        raise HTTPException(400, "SSE batch predict 只支援 daniel ensemble — 一般模型走 /api/predict/batch")
+    if not (isinstance(estimator, dict) and estimator.get("version") == 1 and "configs" in estimator):
+        _est_status = entry.get("estimatorStatus", "empty")
+        _msg = ("此 ensemble 模型的 file blob 已不存在 (model_blobs/ 被清掉或換機器了)"
+                if _est_status == "file_missing"
+                else "此 ensemble 模型在 DB 沒有 estimator (舊 placeholder 或 pickle 失敗)")
+        raise HTTPException(status_code=410, detail=_msg + ",無法批次預測。請重訓。")
+
+    bundle = estimator
+    feat_df_raw, X_raw, sample_bytes = await _ensemble_batch_prep(
+        bundle, file, sampleFile, preprocessor_id, user, db,
+    )
+
+    q: queue.Queue = queue.Queue()
+    cancel_token = threading.Event()
+    result_box: dict[str, Any] = {"preds": None, "error": None}
+
+    def worker():
+        try:
+            preds = _ensemble_replay(
+                bundle, X_raw, return_proba=False,
+                on_progress=lambda ev: q.put({"type": "progress", **ev}),
+                cancel_token=cancel_token,
+            )
+            result_box["preds"] = np.asarray(preds).ravel()
+        except InterruptedError as ie:
+            result_box["error"] = ("cancelled", str(ie))
+        except HTTPException as he:
+            result_box["error"] = ("http", f"{he.status_code}: {he.detail}")
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            result_box["error"] = ("error", str(e))
+        finally:
+            q.put(None)
+
+    threading.Thread(target=worker, daemon=True).start()
+
+    async def event_stream():
+        # 兩層 try:外層只擋 GeneratorExit/CancelledError(瀏覽器斷線觸發 cancel_token),
+        # 內層擋一切 — 真的炸時也吐 'error' event 不讓 ASGI reset 連線(瀏覽器看到網路錯誤).
+        try:
+            try:
+                loop = asyncio.get_event_loop()
+                while True:
+                    ev = await loop.run_in_executor(None, q.get)
+                    if ev is None:
+                        break
+                    yield f"event: progress\ndata: {json.dumps(ev, ensure_ascii=False)}\n\n"
+
+                if result_box["error"]:
+                    kind, msg = result_box["error"]
+                    yield f"event: error\ndata: {json.dumps({'kind': kind, 'msg': msg}, ensure_ascii=False)}\n\n"
+                    return
+
+                # 完成 → 寫 CSV + base64 一次性傳給前端
+                preds = result_box["preds"]
+                out_name_default = (file.filename.replace(".csv", "_predicted.csv")
+                                    if file.filename else "_predicted.csv")
+                try:
+                    csv_bytes, out_name = _ensemble_finalize_csv(
+                        bundle, feat_df_raw, preds, sample_bytes, out_name_default,
+                    )
+                except HTTPException as he:
+                    yield f"event: error\ndata: {json.dumps({'kind': 'http', 'msg': f'{he.status_code}: {he.detail}'}, ensure_ascii=False)}\n\n"
+                    return
+                except Exception as e:
+                    import traceback as _tb
+                    print("[SSE batch predict] _ensemble_finalize_csv 失敗:", flush=True)
+                    _tb.print_exc()
+                    yield f"event: error\ndata: {json.dumps({'kind': 'finalize', 'msg': f'{type(e).__name__}: {str(e)[:300]}'}, ensure_ascii=False)}\n\n"
+                    return
+                payload = {
+                    "filename": out_name,
+                    "csvBase64": base64.b64encode(csv_bytes).decode("ascii"),
+                    "rowCount": int(len(preds)),
+                }
+                yield f"event: done\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
+            except Exception as e:
+                # event_stream 本身的 bug 也吐成 SSE error,不讓 ASGI 重置連線
+                import traceback as _tb
+                print("[SSE batch predict] event_stream 內部 bug:", flush=True)
+                _tb.print_exc()
+                try:
+                    yield f"event: error\ndata: {json.dumps({'kind': 'stream', 'msg': f'{type(e).__name__}: {str(e)[:300]}'}, ensure_ascii=False)}\n\n"
+                except Exception:
+                    pass
+        except (GeneratorExit, asyncio.CancelledError):
+            cancel_token.set()
+            raise
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream")
+
+
 @app.post("/api/predict/batch")
 async def predict_batch_endpoint(
     modelId: str = Form(...),
@@ -1683,14 +2679,15 @@ async def predict_batch_endpoint(
     preprocessor_id = entry.get("preprocessorId")
     bundle_meta     = entry.get("bundle") or {}
 
-    # Daniel ensemble:bundle.type 是真相 (estimator 可能因 size cap 沒存進 DB)
+    # Daniel ensemble:bundle.type 是真相 (estimator 可能因 pickle 失敗沒存進 DB)
     if bundle_meta.get("type") == "daniel_pipeline_ensemble":
         if not (isinstance(estimator, dict) and estimator.get("version") == 1 and "configs" in estimator):
-            raise HTTPException(
-                status_code=410,
-                detail="此 ensemble 模型在儲存時 pickle 超過大小上限 (>200MB),estimator 沒進 DB,"
-                       "無法批次預測。請重訓 (建議 --fast 或減少 trials 讓 bundle 縮小)。",
-            )
+            _est_status = entry.get("estimatorStatus", "empty")
+            if _est_status == "file_missing":
+                _msg = "此 ensemble 模型的 file blob 已不存在 (model_blobs/ 被清掉或換機器了),無法批次預測。請重訓。"
+            else:
+                _msg = "此 ensemble 模型在 DB 沒有 estimator (舊 placeholder 或 pickle 失敗),無法批次預測。請重訓。"
+            raise HTTPException(status_code=410, detail=_msg)
         # preprocessor_id / user / db 傳下去 — preprocessed source 訓的 ensemble
         # 需要先把 raw test.csv 套同樣的 ColumnTransformer
         return await _predict_batch_ensemble(estimator, file, sampleFile,
@@ -1721,9 +2718,13 @@ async def predict_batch_endpoint(
                 X_transformed = X_transformed.toarray()
             # \u9084\u539f\u6210 DataFrame,column \u5c0d\u9f4a preprocessor \u7684 transformed names
             try:
-                tx_names = (list(preprocessor.get_feature_names_out())
-                            if hasattr(preprocessor, "get_feature_names_out")
-                            else [f"f{i}" for i in range(X_transformed.shape[1])])
+                _raw_names = (list(preprocessor.get_feature_names_out())
+                              if hasattr(preprocessor, "get_feature_names_out")
+                              else [f"f{i}" for i in range(X_transformed.shape[1])])
+                # daniel 訓練時把 'pipeline_name__feature' split('__')[-1] 簡化成 'feature',
+                # bundle.feature_names_raw 存的也是簡名 — 推論時必須做一樣的清理,
+                # 否則 cols_required 對不上 → 觸發「缺 N 個欄」假錯誤
+                tx_names = [str(n).split("__")[-1] for n in _raw_names]
             except Exception:
                 tx_names = [f"f{i}" for i in range(X_transformed.shape[1])]
             if len(tx_names) != X_transformed.shape[1]:

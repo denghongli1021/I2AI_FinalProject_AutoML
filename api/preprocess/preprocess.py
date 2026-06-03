@@ -34,7 +34,7 @@ import pandas as pd
 # ============================================================
 # Public entry
 # ============================================================
-MAX_BYTES = 50 * 1024 * 1024  # 50 MB 上限,避免大檔案直接 OOM
+MAX_BYTES = 100 * 1024 * 1024  # 50 MB 上限,避免大檔案直接 OOM
 
 
 def run(file_bytes: bytes, filename: str) -> tuple[pd.DataFrame, dict[str, Any]]:

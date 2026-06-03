@@ -4,6 +4,62 @@ import pandas as pd
 from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.preprocessing import QuantileTransformer
 
+from sklearn.feature_selection import mutual_info_classif, mutual_info_regression
+import numpy as np
+import scipy.sparse as sp
+
+class MIFeatureSelector(BaseEstimator, TransformerMixin):
+    """
+    將 Mutual Information 特徵選擇包裝成 Pipeline 元件。
+    確保訓練時篩選的特徵，測試時能精準對齊。
+    """
+    def __init__(self, threshold: float = 0.01, top_k: int = 300, is_classification: bool = True):
+        self.threshold = threshold
+        self.top_k = top_k
+        self.is_classification = is_classification
+        self.selected_mask_ = None # 用來記憶保留了哪些特徵
+
+    # 🚀 補上這一段：讓它能跟 Pipeline 溝通特徵名稱
+    def get_feature_names_out(self, input_features=None):
+        """
+        Scikit-Learn Pipeline 會自動把上一層 (Assembler) 的 1280 個特徵名稱傳進來 (input_features)。
+        我們只要用 mask 篩選出保留的那 300 個名稱回傳即可！
+        """
+        if input_features is None:
+            raise ValueError("無法取得輸入的特徵名稱。")
+        
+        # 使用我們在 fit 階段記錄下來的 selected_mask_ 來過濾名稱
+        return np.array(input_features)[self.selected_mask_]
+
+    def fit(self, X, y):
+        print(f"  [MI Selector] 正在計算特徵重要性 (目標保留 top_{self.top_k})...")
+        X_arr = X.toarray() if sp.issparse(X) else np.asarray(X)
+        
+        # 依據任務類型選擇 MI 演算法
+        mi_fn = mutual_info_classif if self.is_classification else mutual_info_regression
+        scores = mi_fn(X_arr, y, random_state=42)
+        
+        # 決定要保留的特徵
+        if self.top_k is not None and self.top_k < len(scores):
+            # 取分數最高的 top_k 個
+            top_k_idx = np.argsort(scores)[-self.top_k:]
+            self.selected_mask_ = np.zeros(len(scores), dtype=bool)
+            self.selected_mask_[top_k_idx] = True
+        else:
+            # 依據 threshold 篩選
+            self.selected_mask_ = scores >= self.threshold
+            
+        n_kept = self.selected_mask_.sum()
+        n_dropped = len(self.selected_mask_) - n_kept
+        print(f"  [MI Selector] 保留 {n_kept} 個特徵，過濾 {n_dropped} 個冗餘特徵。")
+        
+        return self
+
+    def transform(self, X):
+        # 套用訓練時記憶的 mask，過濾掉不重要的特徵
+        X_arr = X.toarray() if sp.issparse(X) else np.asarray(X)
+        return X_arr[:, self.selected_mask_]
+
 # =====================================================================
 # 🛡️ 新增：Phase 0 防禦盾牌 (向模型組借鏡的極限防呆機制)
 # =====================================================================
@@ -75,10 +131,8 @@ class RobustDataCleaner(BaseEstimator, TransformerMixin):
 
         # 紀錄輸出欄位名稱供 get_feature_names_out 使用
         self._out_columns = df.columns.tolist()
-
-        # 回傳 DataFrame(保留欄位名稱)。下一步是用「欄位名稱」選欄的 ColumnTransformer,
-        # 若回傳 numpy array 會失去欄名 → ColumnTransformer 直接報錯
-        # (Specifying the columns using strings is only supported for dataframes)。
+        
+        # 維持 Scikit-learn 慣例，回傳 numpy array
         return df
 
     def get_feature_names_out(self, input_features=None):
@@ -262,49 +316,3 @@ class NonLinearScaler(BaseEstimator, TransformerMixin):
             elif self.strategy == 'log':
                 out_features.append(f"{col}_log1p")
         return np.array(out_features)
-
-
-# =====================================================================
-# 🎯 MI 特徵選擇 (放在管線最後一步,讓 train/test/推論套用同一組篩選)
-# =====================================================================
-class MISelector(BaseEstimator, TransformerMixin):
-    """
-    依互資訊 (Mutual Information) 過濾低資訊量特徵。
-    - fit:用 y 算每個特徵對 target 的 MI,保留 MI >= threshold 的(分類用 mutual_info_classif,
-           迴歸用 mutual_info_regression)。
-    - transform:套用 fit 時學到的 mask。
-    放在 Pipeline 最後一步,確保訓練/測試/推論用的是同一組特徵,不會錯位。
-    """
-    def __init__(self, threshold: float = 0.01):
-        self.threshold = threshold
-        self.mask_ = None
-        self.n_in_ = 0
-        self.n_kept_ = 0
-
-    def fit(self, X, y=None):
-        from sklearn.feature_selection import mutual_info_classif, mutual_info_regression
-        X_arr = np.asarray(X.values if hasattr(X, "values") else X)
-        self.n_in_ = X_arr.shape[1]
-        if y is None:
-            self.mask_ = np.ones(self.n_in_, dtype=bool)
-        else:
-            y_ser = pd.Series(np.asarray(y).ravel())
-            is_clf = y_ser.nunique() <= 50
-            mi_fn = mutual_info_classif if is_clf else mutual_info_regression
-            scores = mi_fn(X_arr, y_ser, random_state=42)
-            mask = scores >= self.threshold
-            if not mask.any():                 # 全被砍 → 至少保留分數最高的,避免空矩陣
-                mask = scores >= np.nanmax(scores)
-            self.mask_ = mask
-        self.n_kept_ = int(self.mask_.sum())
-        print(f"[MI 特徵選擇] 保留 {self.n_kept_}/{self.n_in_} 個特徵 (threshold={self.threshold})")
-        return self
-
-    def transform(self, X):
-        X_arr = X.values if hasattr(X, 'values') else np.asarray(X)
-        return X_arr[:, self.mask_]
-
-    def get_feature_names_out(self, input_features=None):
-        if input_features is None:
-            return np.array([f'f{i}' for i in range(self.n_kept_)])
-        return np.asarray(input_features)[self.mask_]

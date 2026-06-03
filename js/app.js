@@ -423,28 +423,44 @@ async function hydrateUserHistoryFromDb() {
       let modelList = runModels;
       if (r.engine === 'pipeline' && modelList.length === 0 && r.resultsSummary?.perSource) {
         // pipeline run → 用 summary 假造 bundle (跟既有 danielResultToModel 邏輯一致)
-        modelList = r.resultsSummary.perSource.map((p, i) => ({
-          id: `daniel_db_${r.id}_${i}`,
-          name: `[${p.label || p.source}] Pipeline (${(p.bestScore != null && p.scoreStack === p.bestScore) ? 'Stack' : 'Blend'})`,
-          type: 'daniel_pipeline',
-          taskType: 'classification',
-          targetName: r.target,
-          dataSource: p.source,
-          dataSourceLabel: p.label,
-          metrics: {
-            taskType: 'classification',
-            testAccuracy: p.accuracy ?? 0,
-            f1: p.f1 ?? 0,
-            precision: p.f1 ?? 0,
-            recall: p.f1 ?? 0,
-            testScore: p.bestScore ?? 0,
-            testScoreLabel: (p.metric || 'F1').toUpperCase(),
-            scoreBlend: p.scoreBlend,
-            scoreStack: p.scoreStack,
-          },
-          trainTime: (p.elapsedSec || 0) * 1000,
-          _fromDb: true,
-        }));
+        modelList = r.resultsSummary.perSource.map((p, i) => {
+          // 優先用 perSource.taskType (新 schema),沒有就 fallback 到 run.taskType
+          const _tt = p.taskType || r.taskType || 'classification';
+          const _isReg = _tt === 'regression';
+          // metric label:回歸用 R²,分類用 F1
+          const _metricLabel = (p.metric || (_isReg ? 'R²' : 'F1')).toUpperCase();
+          return {
+            id: `daniel_db_${r.id}_${i}`,
+            name: `[${p.label || p.source}] Pipeline (${(p.bestScore != null && p.scoreStack === p.bestScore) ? 'Stack' : 'Blend'})`,
+            type: 'daniel_pipeline',
+            taskType: _tt,
+            targetName: r.target,
+            dataSource: p.source,
+            dataSourceLabel: p.label,
+            metrics: _isReg ? {
+              taskType: 'regression',
+              testR2:   p.r2   ?? p.bestScore ?? 0,
+              testRMSE: p.rmse ?? 0,
+              testMAE:  p.mae  ?? 0,
+              testScore: p.bestScore ?? p.r2 ?? 0,
+              testScoreLabel: _metricLabel,
+              scoreBlend: p.scoreBlend,
+              scoreStack: p.scoreStack,
+            } : {
+              taskType: 'classification',
+              testAccuracy: p.accuracy ?? 0,
+              f1: p.f1 ?? 0,
+              precision: p.f1 ?? 0,
+              recall: p.f1 ?? 0,
+              testScore: p.bestScore ?? 0,
+              testScoreLabel: _metricLabel,
+              scoreBlend: p.scoreBlend,
+              scoreStack: p.scoreStack,
+            },
+            trainTime: (p.elapsedSec || 0) * 1000,
+            _fromDb: true,
+          };
+        });
       }
       if (modelList.length === 0) continue;  // 沒模型沒法顯示,跳過
 
@@ -770,9 +786,12 @@ function renderHistoryCascade(container) {
   const runSelect = container.querySelector('.cascade-run');
   const infoBtn   = container.querySelector('.history-info-btn');
 
-  const fmtScore = (r) => r.taskType === 'regression'
-    ? `R²=${r.bestModel.score.toFixed(4)}`
-    : `Acc=${(r.bestModel.score * 100).toFixed(1)}%`;
+  const fmtScore = (r) => {
+    // bestModel.score 在 hydration / pushTrainingHistory 兩條路徑都可能是 undefined
+    const s = r.bestModel?.score;
+    if (typeof s !== 'number' || !isFinite(s)) return r.taskType === 'regression' ? 'R²=—' : 'Acc=—';
+    return r.taskType === 'regression' ? `R²=${s.toFixed(4)}` : `Acc=${(s * 100).toFixed(1)}%`;
+  };
   const fmtTime = (ts) => {
     const d = new Date(ts);
     return `${String(d.getMonth()+1).padStart(2,'0')}/${String(d.getDate()).padStart(2,'0')} ${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`;
@@ -1234,6 +1253,9 @@ const PAGE_NAMES = {
 };
 
 function navigateTo(page) {
+  // ⚠ 不要在換頁時 abort SHAP — 後端 sklearn PermutationExplainer 無法被取消,
+  // abort 只會讓 client 丟掉 response,server 還在算;切回來又會 fire 新請求 →
+  // 兩個並行。改用 reqKey 防重入(loadShapFigures 開頭擋),server 算完就回。
   document.querySelectorAll('.page-section').forEach(s => s.classList.add('hidden'));
   const target = document.getElementById(`page-${page}`);
   if (target) target.classList.remove('hidden');
@@ -2843,6 +2865,33 @@ function renderPreprocessingPage() {
     document.getElementById('btn-pp-run').addEventListener('click', runPreprocessTransform);
     document.getElementById('btn-pp-inference').addEventListener('click', runPreprocessInference);
     document.getElementById('btn-export-audit-html')?.addEventListener('click', exportAuditReportHtml);
+    document.getElementById('btn-export-audit-json')?.addEventListener('click', exportAuditReportJson);
+    // 對抗驗證 file input — change 顯示檔名,clear 鈕清掉
+    const advInput = document.getElementById('pp-adv-file');
+    const advLabel = document.getElementById('pp-adv-file-label');
+    const advClear = document.getElementById('pp-adv-file-clear');
+    advInput?.addEventListener('change', () => {
+      const f = advInput.files?.[0];
+      if (f && advLabel) {
+        const short = f.name.length > 22 ? f.name.slice(0, 20) + '…' : f.name;
+        advLabel.textContent = `已選 ${short}`;
+        advLabel.classList.add('text-success-400');
+        advClear?.classList.remove('hidden');
+      } else if (advLabel) {
+        advLabel.textContent = '選擇 test.csv';
+        advLabel.classList.remove('text-success-400');
+        advClear?.classList.add('hidden');
+      }
+    });
+    advClear?.addEventListener('click', (e) => {
+      e.preventDefault();
+      if (advInput) advInput.value = '';
+      if (advLabel) {
+        advLabel.textContent = '選擇 test.csv';
+        advLabel.classList.remove('text-success-400');
+      }
+      advClear.classList.add('hidden');
+    });
     ppListenersBound = true;
   }
 }
@@ -2896,9 +2945,16 @@ async function runPreprocessTransform() {
   const testSize = parseFloat(document.getElementById('pp-test-size').value);
   const useMice = document.getElementById('pp-opt-mice')?.checked || false;
   const useMiSelection = document.getElementById('pp-opt-mi')?.checked || false;
-  ppSetStatus(true, '執行完整預處理管線...');
+  // 對抗驗證測試集 — 上傳 Kaggle 風 test.csv 觸發 daniel 的 adv val 防護
+  const advFile = document.getElementById('pp-adv-file')?.files?.[0] || null;
+  ppSetStatus(true, advFile
+    ? `執行完整預處理管線 + 對抗驗證 (${advFile.name})...`
+    : '執行完整預處理管線...');
   try {
-    const res = await ApiClient.preprocessTransform({ datasetId: ds.id, target, testSize, useMice, useMiSelection });
+    const res = await ApiClient.preprocessTransform({
+      datasetId: ds.id, target, testSize, useMice, useMiSelection,
+      adversarialTestFile: advFile,
+    });
     renderAuditReport(res.auditReport);
     renderFeatureGroups(res.featureGroups);
     renderTransformResult(res);
@@ -3996,15 +4052,23 @@ function renderRealExperimentsPage() {
     const engineRadio = document.querySelector('input[name="exp-engine"]:checked');
     const engine = engineRadio ? engineRadio.value : 'sklearn';
     const danielOpts = document.getElementById('exp-daniel-options');
+    const autogluonOpts = document.getElementById('exp-autogluon-options');
     const algoSection = algoBox.closest('.md\\:col-span-2');
     const featSection = featBox.closest('.md\\:col-span-2');
+    // 預設都隱藏
+    danielOpts?.classList.add('hidden');
+    autogluonOpts?.classList.add('hidden');
     if (engine === 'daniel') {
       danielOpts?.classList.remove('hidden');
       algoSection?.classList.add('hidden');
       featSection?.classList.add('opacity-50');
       featSection?.setAttribute('title', 'Pipeline 引擎不使用此選項 — 自己挑特徵');
+    } else if (engine === 'autogluon') {
+      autogluonOpts?.classList.remove('hidden');
+      algoSection?.classList.add('hidden');
+      featSection?.classList.add('opacity-50');
+      featSection?.setAttribute('title', 'Autogluon 內建自家 preprocessing + 自家挑模型,此選項不適用');
     } else {
-      danielOpts?.classList.add('hidden');
       algoSection?.classList.remove('hidden');
       featSection?.classList.remove('opacity-50');
       featSection?.removeAttribute('title');
@@ -4069,6 +4133,24 @@ function renderRealExperimentsPage() {
       return;
     }
 
+    if (engine === 'autogluon') {
+      // Autogluon 引擎:走 /api/train/autogluon/stream
+      if (typeof ApiClient === 'undefined' || !ApiClient.enabled) {
+        alert('Autogluon 引擎需要 Python 後端 API,請先在系統設定開啟「使用 Python 後端 API」'); return;
+      }
+      if (sources.includes('preprocessed')) {
+        alert('Autogluon 內建自家 preprocessing,請只勾「原始資料」。'); return;
+      }
+      const agOptions = {
+        preset: document.getElementById('exp-autogluon-preset')?.value || 'medium_quality',
+        timeLimit: parseFloat(document.getElementById('exp-autogluon-time-limit')?.value) || 0,
+        target: targetSel.value,
+        sources: sources,
+      };
+      startAutogluonExperimentTraining(ds, targetSel.value, agOptions);
+      return;
+    }
+
     // === sklearn 引擎(原本流程) ===
     const selectedFeatures = [...featBox.querySelectorAll('.exp-feat-cb:checked')].map(cb => cb.value);
     const selectedAlgos = [...algoBox.querySelectorAll('.exp-algo-cb:checked')].map(cb => cb.value);
@@ -4125,6 +4207,10 @@ window.cancelCurrentTraining = cancelCurrentTraining;
 
 function setTrainBtnState(state) {
   _trainingState = state;
+  // 任何非 training/cancelling 的最終態 → 停 elapsed timer(訓練結束/失敗/取消)
+  if (state !== 'training' && state !== 'cancelling') {
+    if (typeof _trainingTimerStop === 'function') _trainingTimerStop();
+  }
   const btn = document.getElementById('btn-real-train');
   if (!btn) return;
   const spinner = '<div class="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin inline-block mr-2"></div>';
@@ -4167,6 +4253,8 @@ async function startRealTraining(ds, targetCol, options = {}) {
   const resultsCard = document.getElementById('exp-results');
   progressCard.classList.remove('hidden');
   resultsCard.classList.add('hidden');
+  // sklearn 沒 time_limit 概念,只顯示 elapsed
+  _trainingTimerStart_();
 
   const logEl = document.getElementById('exp-training-log');
   logEl.innerHTML = '';
@@ -4278,9 +4366,10 @@ async function startRealTraining(ds, targetCol, options = {}) {
     const best = models[0];
     const isReg = (data.taskType === 'regression');
     const metricKey = isReg ? 'R²' : 'Accuracy';
-    const scoreStr = isReg
-      ? `${metricKey}=${best.metrics.testR2.toFixed(4)}`
-      : `Acc=${(best.metrics.testAccuracy * 100).toFixed(2)}%`;
+    // 防 undefined:hydration 後 metrics 可能缺欄,fallback '—'
+    const _bestR2 = typeof best.metrics?.testR2 === 'number' ? best.metrics.testR2.toFixed(4) : '—';
+    const _bestAc = typeof best.metrics?.testAccuracy === 'number' ? (best.metrics.testAccuracy * 100).toFixed(2) + '%' : '—';
+    const scoreStr = isReg ? `${metricKey}=${_bestR2}` : `Acc=${_bestAc}`;
     const datasetName = ds.fileName || 'Dataset';
     notify(
       '訓練完成 ✓',
@@ -4326,6 +4415,198 @@ async function startRealTraining(ds, targetCol, options = {}) {
 // DANIEL PIPELINE training (in 實驗室) — 走 /api/train/pipeline/stream
 // 支援多 source (raw / preprocessed),每個 source 跑一次,結果合併進 leaderboard
 // ============================================================
+// Autogluon engine training — 跟 daniel 同個 SSE 解析框架,只是 endpoint 跟 options 不同。
+// 訓練完用 hydration 拉回 DB 上的 autogluon_model bundle 放進 leaderboard 顯示。
+async function startAutogluonExperimentTraining(ds, targetCol, options) {
+  setTrainBtnState('training');
+  setGlobalStatus('running', `Autogluon 訓練中 — ${ds.fileName || 'Dataset'}`);
+
+  const progressCard = document.getElementById('exp-training-progress');
+  const resultsCard = document.getElementById('exp-results');
+  progressCard.classList.remove('hidden');
+  resultsCard.classList.add('hidden');
+  _trainingTimerStart_(options.timeLimit || 0);
+
+  const logEl = document.getElementById('exp-training-log');
+  logEl.innerHTML = '';
+
+  const addLog = (msg, level = 'info') => {
+    const colorMap = { info: 'text-dark-500', muted: 'text-dark-600', success: 'text-success-400', warning: 'text-warning-400', error: 'text-danger-400' };
+    const now = new Date();
+    const ts = `${String(now.getHours()).padStart(2,'0')}:${String(now.getMinutes()).padStart(2,'0')}:${String(now.getSeconds()).padStart(2,'0')}`;
+    const p = document.createElement('p');
+    p.className = colorMap[level] || 'text-dark-400';
+    p.textContent = `[${ts}] ${msg}`;
+    logEl.appendChild(p);
+    logEl.scrollTop = logEl.scrollHeight;
+    if (logEl.children.length > 800) {
+      while (logEl.children.length > 600) logEl.removeChild(logEl.firstChild);
+    }
+  };
+
+  try {
+    addLog(`啟動 Autogluon (preset=${options.preset}, time_limit=${options.timeLimit > 0 ? options.timeLimit + 's' : 'autogluon default'})...`, 'info');
+
+    const form = new FormData();
+    form.append('datasetId', ds.id);
+    form.append('sources', JSON.stringify(options.sources));
+    form.append('target', options.target);
+    form.append('preset', options.preset);
+    form.append('timeLimit', String(options.timeLimit || 0));
+
+    const headers = {};
+    if (typeof AuthClient !== 'undefined' && AuthClient.token) {
+      headers['Authorization'] = `Bearer ${AuthClient.token}`;
+    }
+
+    _trainingAbort = new AbortController();
+    const resp = await fetch(`${ApiClient.baseUrl}/api/train/autogluon/stream`, {
+      method: 'POST', body: form, headers, signal: _trainingAbort.signal,
+    });
+    if (!resp.ok) throw new Error(`HTTP ${resp.status} ${resp.statusText}`);
+
+    const reader = resp.body.getReader();
+    const decoder = new TextDecoder('utf-8');
+    let buf = '';
+    let finalResults = null;
+    let runId = null;
+    let errorMsg = null;
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      let idx;
+      while ((idx = buf.indexOf('\n\n')) !== -1) {
+        const chunk = buf.slice(0, idx);
+        buf = buf.slice(idx + 2);
+        for (const line of chunk.split('\n')) {
+          if (!line.startsWith('data: ')) continue;
+          let ev;
+          try { ev = JSON.parse(line.slice(6)); } catch { continue; }
+          if (ev.type === 'log') addLog(ev.msg, ev.level || 'info');
+          else if (ev.type === 'progress') {
+            document.getElementById('exp-progress-bar').style.width = ev.pct + '%';
+            document.getElementById('exp-progress-step').textContent = ev.step;
+          } else if (ev.type === 'done') {
+            finalResults = ev.results || [];
+            runId = ev.runId || null;
+          } else if (ev.type === 'error') {
+            errorMsg = ev.message;
+          }
+        }
+      }
+    }
+
+    if (errorMsg) throw new Error(errorMsg);
+    if (!finalResults || finalResults.length === 0) throw new Error('未收到 autogluon 結果');
+
+    const okResults = finalResults.filter(r => r.ok !== false);
+    if (okResults.length === 0) {
+      const reasons = finalResults.map(r => `${r.dataSourceLabel || r.dataSource}: ${r.error || 'unknown'}`).join('\n');
+      throw new Error(`autogluon 失敗:\n${reasons}`);
+    }
+
+    // Autogluon result → fake model bundle (跟 danielResultToModel 同型)
+    const agTaskType = okResults[0]?.taskType === 'regression' ? 'regression' : 'classification';
+    const models = okResults.map((r, i) => {
+      const isReg = r.taskType === 'regression';
+      const label = r.dataSourceLabel || (r.dataSource === 'preprocessed' ? '預處理' : '原始');
+      return {
+        id: `autogluon_${i}_${Date.now()}`,
+        name: `[${label}] Autogluon (${r.bestModel || '?'})`,
+        type: 'autogluon_model',
+        taskType: r.taskType || 'classification',
+        targetName: r.target,
+        featureNames: [],
+        metrics: isReg ? {
+          taskType: 'regression',
+          testR2: r.r2 ?? 0, testRMSE: r.rmse ?? 0, testMAE: r.mae ?? 0,
+          testScore: r.bestScore ?? r.r2 ?? 0,
+          testScoreLabel: 'R²',
+        } : {
+          taskType: 'classification',
+          testAccuracy: r.accuracy ?? 0, f1: r.f1 ?? 0,
+          testScore: r.bestScore ?? 0,
+          testScoreLabel: (r.metric || 'F1').toUpperCase(),
+        },
+        featureImportance: [],
+        testTrue: r.testTrueDecoded || [],
+        testPred: r.testPredDecoded || [],
+        trainTime: (r.elapsedSec || 0) * 1000,
+        inferLatency: 0,
+        trainSize: r.nTrain || 0,
+        testSize: r.nTest || 0,
+        means: [], stds: [], featureStats: [],
+        dataSource: r.dataSource,
+        dataSourceLabel: label,
+        preprocessorId: null,
+        estimatorMb: r.estimatorMb,
+        // 把 autogluon 內部 leaderboard 當成 perModel 給排行榜可摺疊區塊用
+        danielPerModel: r.perModel || [],
+        presetUsed: r.presetUsed,
+      };
+    });
+    const sortedModels = models.sort((a, b) => (b.metrics.testScore || 0) - (a.metrics.testScore || 0));
+    MLEngine.trainedModels = sortedModels;
+
+    resultsCard.classList.remove('hidden');
+    renderExperimentResults(sortedModels, { taskType: agTaskType, target: targetCol });
+
+    setTrainBtnState('completed');
+    setGlobalStatus('success', `Autogluon 完成 — ${finalResults.length} 個 source`);
+
+    const best = sortedModels[0];
+    pushTrainingHistory({
+      timestamp: Date.now(),
+      datasetId: ds.id,
+      datasetName: ds.fileName || 'Dataset',
+      target: targetCol,
+      taskType: agTaskType,
+      sources: options.sources,
+      modelCount: sortedModels.length,
+      metric: best.metrics.testScoreLabel || (agTaskType === 'regression' ? 'R²' : 'F1'),
+      bestModel: { name: best.name, score: best.metrics.testScore },
+      options: { engine: 'autogluon', preset: options.preset, timeLimit: options.timeLimit },
+      models: sortedModels,
+      engine: 'autogluon',
+    });
+
+    // 從 DB re-hydrate 拿真正的 autogluon_model bundle (含 estimatorMb 跟 perModel)
+    try {
+      await hydrateUserHistoryFromDb();
+      const dbRun = _trainingHistory.find(h => h.id === runId) || _trainingHistory[0];
+      if (dbRun && dbRun.models && dbRun.models.length > 0) {
+        _activeHistoryRunId = dbRun.id;
+        MLEngine.trainedModels = dbRun.models.sort(
+          (a, b) => (b.metrics?.testScore || 0) - (a.metrics?.testScore || 0)
+        );
+        renderExperimentResults(MLEngine.trainedModels, { taskType: agTaskType, target: targetCol });
+      }
+    } catch (e) {
+      console.warn('[autogluon] re-hydrate 失敗:', e.message);
+    }
+
+    notify('Autogluon 完成 ✓',
+      `${ds.fileName || 'Dataset'} — 最佳: ${best.name} (${best.metrics.testScoreLabel}=${best.metrics.testScore.toFixed(4)})`,
+      'success');
+  } catch (err) {
+    if (err.name === 'AbortError' || /aborted|abort/i.test(err.message || '')) {
+      addLog('已取消訓練 — 後端 subprocess 已終止', 'warning');
+      setTrainBtnState('idle');
+      setGlobalStatus('idle', '已取消訓練');
+      notify('Autogluon 已取消', '訓練被使用者中止', 'warning');
+      return;
+    }
+    addLog(`✗ Autogluon 失敗: ${err.message}`, 'error');
+    setTrainBtnState('idle');
+    setGlobalStatus('error', `Autogluon 失敗: ${err.message}`);
+    notify('Autogluon 失敗', err.message || String(err), 'error');
+  } finally {
+    _trainingAbort = null;
+  }
+}
+
+
 async function startDanielExperimentTraining(ds, targetCol, options) {
   setTrainBtnState('training');
   setGlobalStatus('running', `Pipeline 訓練中 — ${ds.fileName || 'Dataset'}`);
@@ -4334,6 +4615,7 @@ async function startDanielExperimentTraining(ds, targetCol, options) {
   const resultsCard = document.getElementById('exp-results');
   progressCard.classList.remove('hidden');
   resultsCard.classList.add('hidden');
+  _trainingTimerStart_(options.timeLimit || 0);
 
   const logEl = document.getElementById('exp-training-log');
   logEl.innerHTML = '';
@@ -4619,9 +4901,11 @@ function danielResultToModel(r, rank) {
       oofBestScore: r.oofBestScore,
       classes: r.classes || [],
     },
-    featureImportance: [],
-    testTrue: [],
-    testPred: [],
+    // 新版後端會回 featureImportance / testTrueDecoded / testPredDecoded,沒有就 fallback 空陣列
+    // 讓 Insights 散布圖 / 殘差圖 / 特徵重要性 同訓練完馬上看得到
+    featureImportance: r.featureImportance || [],
+    testTrue: r.testTrueDecoded || [],
+    testPred: r.testPredDecoded || [],
     trainTime: (r.elapsedSec || 0) * 1000,
     inferLatency: 0,
     trainSize: r.nTrain || 0,
@@ -4632,6 +4916,8 @@ function danielResultToModel(r, rank) {
     dataSource: r.dataSource,
     dataSourceLabel: sourceLabel,
     preprocessorId: r.preprocessorId,
+    // 模型大小 (MB) — > 50MB 會落到 model_blobs/ 檔案,排行榜列會標 File
+    estimatorMb: r.estimatorMb,
     // Daniel-specific
     danielPerModel: r.perModel || [],
     danielSplitMode: r.splitMode,
@@ -4765,6 +5051,11 @@ function renderExperimentResults(models, data) {
   // Daniel pipeline 跑出來的 model 沒有 per-feature importance / per-sample 預測 / 後端 estimator,
   // 顯示這些區塊只會看到「不支援」訊息或空下拉,直接隱藏更乾淨。
   const isPipelineRun = models.length > 0 && models.every(m => m.type === 'daniel_pipeline');
+  // daniel ensemble (hydrated 後 type='daniel_pipeline_ensemble') 或 autogluon_model
+  // 同樣的:訓練結果表的 3 個指標欄+訓練時間 跟「Pipeline 詳細」「排行榜」重複,隱藏整張表
+  const isEnsembleish = models.length > 0 && models.every(m =>
+    m.type === 'daniel_pipeline_ensemble' || m.type === 'autogluon_model'
+  );
   const togglePipelineSections = (hidden) => {
     ['exp-chart-model-selector-wrap', 'exp-charts-row', 'exp-batch-predict-card'].forEach(id => {
       const el = document.getElementById(id);
@@ -4772,6 +5063,9 @@ function renderExperimentResults(models, data) {
     });
   };
   togglePipelineSections(isPipelineRun);
+  // 訓練結果表本身:ensemble / autogluon 隱藏(資訊在 Pipeline 詳細 + 排行榜)
+  const resultsTableCard = document.getElementById('exp-results-table-card');
+  if (resultsTableCard) resultsTableCard.classList.toggle('hidden', isPipelineRun || isEnsembleish);
 
   // Table headers
   if (isReg) {
@@ -4849,7 +5143,10 @@ function renderExperimentResults(models, data) {
       const srcTag = m.dataSource === 'preprocessed' ? '🟦 預處理 · '
                    : m.dataSource === 'raw' ? '🔵 原始 · ' : '';
       const cleanName = m.name.replace(/^\[(原始|預處理)\]\s*/, '');
-      const sc = isReg ? `R²=${m.metrics.testR2.toFixed(3)}` : `Acc=${(m.metrics.testAccuracy*100).toFixed(1)}%`;
+      // 防 undefined:hydration 後的 daniel ensemble bundle 萬一沒 testR2/testAccuracy 不要炸
+      const _r2 = typeof m.metrics?.testR2 === 'number' ? m.metrics.testR2.toFixed(3) : '—';
+      const _ac = typeof m.metrics?.testAccuracy === 'number' ? (m.metrics.testAccuracy * 100).toFixed(1) + '%' : '—';
+      const sc = isReg ? `R²=${_r2}` : `Acc=${_ac}`;
       opt.textContent = `${idx === 0 ? '⭐ ' : ''}${srcTag}${cleanName} (${sc})`;
       chartSel.appendChild(opt);
     });
@@ -4863,10 +5160,23 @@ function renderExperimentResults(models, data) {
       const sub = `— ${cleanName}${srcLabel ? ` · ${srcLabel}` : ''}`;
       document.getElementById('exp-chart-importance-sub').textContent = sub;
       document.getElementById('exp-chart-scatter-sub').textContent = sub;
+
+      // 對 daniel ensemble:沒實際資料就隱藏整張 card,不要顯示「Pipeline 不揭露 / placeholder」
+      // 提示文字。判斷:
+      //   - featureImportance 空 → 隱藏特徵重要性 card
+      //   - testTrue 空 → 隱藏 預測 vs 實際 card
+      // 一般 sklearn 模型 (有資料的) → 兩張都正常顯示
+      const hasFI = Array.isArray(m.featureImportance) && m.featureImportance.length > 0;
+      const hasScatter = Array.isArray(m.testTrue) && m.testTrue.length > 0;
+      document.getElementById('exp-importance-card')?.classList.toggle('hidden', !hasFI);
+      document.getElementById('exp-scatter-card')?.classList.toggle('hidden', !hasScatter);
+      // 兩個都隱藏 → 整 row 也藏,把版面空間還給下方
+      document.getElementById('exp-charts-row')?.classList.toggle('hidden', !hasFI && !hasScatter);
+
       requestAnimationFrame(() => {
         requestAnimationFrame(() => {
-          renderExpFeatureImportance(m);
-          renderExpPredictionChart(m, data);
+          if (hasFI) renderExpFeatureImportance(m);
+          if (hasScatter) renderExpPredictionChart(m, data);
         });
       });
     };
@@ -5006,15 +5316,27 @@ function renderExpPredictionChart(model, data) {
   const chart = initChart('chart-exp-scatter');
   if (!chart) return;
 
-  // Daniel pipeline 不回 testTrue/testPred per-sample,沒法畫散佈圖
-  if (model.type === 'daniel_pipeline' || !model.testTrue || model.testTrue.length === 0) {
+  // Daniel pipeline 現在(回歸 + 分類)都會回 testTrueDecoded / testPredDecoded 給前端;
+  // 只剩 testTrue 真的空才退化到「不畫」。舊版 daniel_pipeline placeholder (從 resultsSummary
+  // 假造的 fake model row,沒實際 perSample 資料) 仍然顯示文字提示。
+  const _isLegacyDanielPlaceholder = model.type === 'daniel_pipeline'
+                                     && (!model.testTrue || model.testTrue.length === 0);
+  if (_isLegacyDanielPlaceholder) {
     chart.clear();
-    if (model.type === 'daniel_pipeline') {
-      chart.setOption({
-        title: { text: 'Pipeline 不回傳 per-sample 預測', subtext: '只回最終 ensemble 的 OOF + 測試分數', left: 'center', top: '40%', textStyle: { color: '#94a3b8', fontSize: 12 }, subtextStyle: { color: '#64748b', fontSize: 10 } },
-      });
-      return;
-    }
+    chart.setOption({
+      title: {
+        text: 'Pipeline placeholder',
+        subtext: '此記錄沒存 per-sample 預測 (舊資料 / 訓練中斷)。重訓即可看圖。',
+        left: 'center', top: '40%',
+        textStyle: { color: '#94a3b8', fontSize: 12 },
+        subtextStyle: { color: '#64748b', fontSize: 10 },
+      },
+    });
+    return;
+  }
+  if (!model.testTrue || model.testTrue.length === 0) {
+    chart.clear();
+    return;
   }
 
   if (data.taskType === 'regression') {
@@ -5220,14 +5542,29 @@ function renderRealLeaderboard() {
       srcBadge = '<span class="text-dark-500 text-xs">—</span>';
     }
 
+    // 訓練時間自適應格式: < 1s 用 ms,< 60s 用 s,< 60min 用 mm:ss,大於 1h 用 hh:mm
     const trainTimeStr = (typeof m.trainTime === 'number' && isFinite(m.trainTime))
-      ? `${m.trainTime.toFixed(0)}ms`
+      ? _fmtTrainTime(m.trainTime)
       : '<span class="text-dark-500">—</span>';
+    // 模型大小:小於 1MB 不顯示 (sklearn 大多 < 1MB);> 100MB 改成 File 標籤提醒
+    // 是 daniel ensemble 才有,sklearn 模型不會帶這欄
+    const _mbVal = (typeof m.estimatorMb === 'number') ? m.estimatorMb : null;
+    let sizeBadge = '';
+    if (_mbVal !== null && _mbVal >= 1) {
+      const isFile = _mbVal > 50;   // 對應 bootstrap.MODEL_BLOB_FILE_THRESHOLD_MB
+      const cls = isFile
+        ? 'bg-warning-500/15 text-warning-400 border-warning-500/30'
+        : 'bg-dark-700/40 text-dark-400 border-dark-600/40';
+      const tip = isFile
+        ? `存在 model_blobs/ 檔案 (${_mbVal}MB) — 刪掉檔案模型就不能 batch predict / SHAP`
+        : `存在 DB bytea 欄 (${_mbVal}MB)`;
+      sizeBadge = `<span class="inline-block ml-2 px-1.5 py-0.5 rounded text-[9px] font-mono border ${cls}" title="${tip}">${_mbVal}MB${isFile ? ' · File' : ''}</span>`;
+    }
     tr.innerHTML = `
       <td class="py-3 px-4"><input type="checkbox" class="model-select-cb" data-idx="${i}"></td>
       <td class="py-3 px-4">${rankEl}</td>
       <td class="py-3 px-4">${srcBadge}</td>
-      <td class="py-3 px-4"><span class="font-medium">${escapeHtml(cleanName)}</span></td>
+      <td class="py-3 px-4"><span class="font-medium">${escapeHtml(cleanName)}</span>${sizeBadge}</td>
       ${extraCols}
       <td class="py-3 px-4 font-mono text-xs">${trainTimeStr}</td>
       <td class="py-3 px-4 font-mono text-xs">${lat}</td>
@@ -5253,6 +5590,46 @@ function renderRealLeaderboard() {
         </td>
       `;
       tbody.appendChild(hpTr);
+    }
+
+    // U2:Daniel pipeline ensemble 額外展開「每個基模型的 OOF」可摺疊區塊。
+    // perModel 在 bundle JSON 裡有,但目前只藏在 Pipeline 詳細卡;這裡讓使用者
+    // 在主排行榜就能直接掃 5-7 個基模型的 OOF 排名,點任何一列也能對應到 algo 名稱。
+    const perModel = m.danielPerModel || m.perModel || (m.metrics && m.metrics.perModel) || [];
+    if (perModel.length > 0) {
+      const sorted = [...perModel]
+        .filter(pm => pm.oofScore != null)
+        .sort((a, b) => (b.oofScore || 0) - (a.oofScore || 0));
+      if (sorted.length > 0) {
+        const bmTr = document.createElement('tr');
+        bmTr.className = 'bg-dark-900/20 border-b border-dark-700/30';
+        const rows = sorted.map((pm, j) => {
+          const cleanTag = (pm.tag || '').replace(/^reg_/, '');
+          const algo = cleanTag.split('_')[0];
+          const algoUpper = algo.length > 8 ? algo : algo.toUpperCase();
+          return `<div class="flex items-center justify-between text-[11px] py-0.5 ${j === 0 ? 'text-warning-300 font-semibold' : 'text-dark-300'}">
+            <span class="flex items-center gap-2">
+              <span class="font-mono text-[9px] text-dark-500 w-4 text-right">${j + 1}</span>
+              <span class="font-mono">${escapeHtml(algoUpper)}</span>
+              <span class="text-[9px] text-dark-600">${escapeHtml(cleanTag)}</span>
+            </span>
+            <span class="font-mono">${pm.oofScore.toFixed(4)}</span>
+          </div>`;
+        }).join('');
+        bmTr.innerHTML = `
+          <td></td>
+          <td colspan="10" class="py-1.5 px-4">
+            <details>
+              <summary class="text-[11px] text-dark-400 cursor-pointer hover:text-primary-300 select-none inline-flex items-center gap-1">
+                <span>📊</span><span>基模型 OOF 排名 (${sorted.length})</span>
+                <span class="text-[10px] text-dark-600 ml-1">— ensemble 由這幾個基模型合成</span>
+              </summary>
+              <div class="mt-1.5 pl-6 max-h-48 overflow-y-auto">${rows}</div>
+            </details>
+          </td>
+        `;
+        tbody.appendChild(bmTr);
+      }
     }
   });
 
@@ -5379,8 +5756,8 @@ function renderRealInsights() {
   document.getElementById('insight-best-model').textContent = best.name;
   document.getElementById('insight-score-label').textContent = isReg ? 'R² 分數' : '準確率';
   document.getElementById('insight-best-score').textContent = isReg
-    ? best.metrics.testR2.toFixed(4)
-    : (best.metrics.testAccuracy * 100).toFixed(2) + '%';
+    ? (typeof best.metrics?.testR2 === 'number' ? best.metrics.testR2.toFixed(4) : '—')
+    : (typeof best.metrics?.testAccuracy === 'number' ? (best.metrics.testAccuracy * 100).toFixed(2) + '%' : '—');
   document.getElementById('insight-feature-count').textContent = best.featureNames.length;
   document.getElementById('insight-model-count').textContent = models.length;
 
@@ -5495,6 +5872,98 @@ async function _renderPipelineShapOnly(modelId) {
 // ===== SHAP SECTION (Plotly figures from /api/visualize/shap) =====
 let _shapInitialized = false;
 let _shapRequestedModelId = null;   // 排行榜「分析」按鈕指定要看的模型
+let _shapLastResponse = null;       // 預計算模式:存上一次 response,給 family 切換用
+
+
+// 從 fold tag (如 'reg_xgb_raw_stat_c0_ccb08f_yrs') 還原乾淨演算法名 'XGB'
+function _shapExtractAlgoName(tag) {
+  if (!tag) return '?';
+  const t = tag.startsWith('reg_') ? tag.slice(4) : tag;
+  // 跟後端 _shap_family_of_tag 同一份名單,longest-prefix 匹配,跟 daniel 命名對齊
+  const KNOWN = [
+    // Tabular(ML)
+    ['extra_trees', 'ExtraTrees'],
+    ['catboost', 'CatBoost'],
+    ['logreg', 'LogReg'],
+    ['xgb', 'XGB'],
+    ['lgbm', 'LGBM'],
+    ['ridge', 'Ridge'],
+    ['knn', 'KNN'],
+    ['rf', 'RF'],
+    // DL
+    ['resnet1d', 'ResNet1D'],
+    ['patchtst', 'PatchTST'],
+    ['transformer', 'Transformer'],
+    ['cnn1d', 'CNN1D'],
+    ['tcn', 'TCN'],
+    ['tsnet', 'TSNet'],
+    ['mlp', 'MLP'],
+  ];
+  for (const [key, label] of KNOWN) {
+    if (t.startsWith(key + '_')) return label;
+  }
+  return (t.split('_')[0] || '?').toUpperCase();
+}
+
+
+// 預計算 SHAP — ML + DL 並列顯示 (6 張 = 2×3),不打後端
+// ML 在上、DL 在下;沒 DL 就只顯示 ML section。Header 各自顯示演算法 + OOF 分數
+function _renderShapPrecomputed() {
+  if (!_shapLastResponse || !_shapLastResponse.shapPlots) return;
+  const sp = _shapLastResponse.shapPlots;
+  const cfg = { responsive: true, displaylogo: false };
+
+  // ── ML (tabular) section ──
+  const mlSection = document.getElementById('shap-section-ml');
+  const mlHeader  = document.getElementById('shap-ml-header');
+  if (sp.tabular) {
+    const algoName = _shapExtractAlgoName(sp.tabular.modelTag);
+    const score = sp.tabular.oofScore != null ? sp.tabular.oofScore.toFixed(4) : '?';
+    document.getElementById('shap-ml-algo').textContent = `最佳 ML: ${algoName}`;
+    document.getElementById('shap-ml-meta').innerHTML =
+      `OOF=${score} <span class="text-dark-600 ml-1" title="${escapeHtml(sp.tabular.modelTag || '')}">${escapeHtml((sp.tabular.modelTag || '').slice(0, 32))}</span>`;
+    mlHeader?.classList.remove('hidden');
+    if (sp.tabular.global)     Plotly.newPlot('shap-fig-global',     sp.tabular.global.data,     sp.tabular.global.layout,     cfg);
+    if (sp.tabular.waterfall)  Plotly.newPlot('shap-fig-waterfall',  sp.tabular.waterfall.data,  sp.tabular.waterfall.layout,  cfg);
+    if (sp.tabular.dependence) Plotly.newPlot('shap-fig-dependence', sp.tabular.dependence.data, sp.tabular.dependence.layout, cfg);
+    mlSection?.classList.remove('hidden');
+  } else {
+    mlSection?.classList.add('hidden');
+    mlHeader?.classList.add('hidden');
+  }
+
+  // ── DL section ──
+  const dlSection = document.getElementById('shap-section-dl');
+  if (sp.dl) {
+    const algoName = _shapExtractAlgoName(sp.dl.modelTag);
+    const score = sp.dl.oofScore != null ? sp.dl.oofScore.toFixed(4) : '?';
+    document.getElementById('shap-dl-algo').textContent = `最佳 DL: ${algoName}`;
+    document.getElementById('shap-dl-meta').innerHTML =
+      `OOF=${score} <span class="text-dark-600 ml-1" title="${escapeHtml(sp.dl.modelTag || '')}">${escapeHtml((sp.dl.modelTag || '').slice(0, 32))}</span>`;
+    if (sp.dl.global)     Plotly.newPlot('shap-fig-global-dl',     sp.dl.global.data,     sp.dl.global.layout,     cfg);
+    if (sp.dl.waterfall)  Plotly.newPlot('shap-fig-waterfall-dl',  sp.dl.waterfall.data,  sp.dl.waterfall.layout,  cfg);
+    if (sp.dl.dependence) Plotly.newPlot('shap-fig-dependence-dl', sp.dl.dependence.data, sp.dl.dependence.layout, cfg);
+    dlSection?.classList.remove('hidden');
+  } else {
+    dlSection?.classList.add('hidden');
+  }
+
+  // 交互特徵下拉:用 ML section 的 featureNames(優先);DL 沒有就用 DL 的
+  const featSel = document.getElementById('shap-target-feature');
+  const featList = (sp.tabular?.featureNames) || (sp.dl?.featureNames) || [];
+  if (featSel && featList.length) {
+    featSel.innerHTML = '';
+    featList.forEach(fn => {
+      const o = document.createElement('option');
+      o.value = fn; o.textContent = fn;
+      featSel.appendChild(o);
+    });
+  }
+}
+
+// 舊 API 名稱保留 — 內部直接轉呼新版(沒 family 切換概念了)
+function _renderShapForFamily(_unused) { _renderShapPrecomputed(); }
+
 
 // 排行榜 / 結果表的「分析」按鈕呼叫:跳到洞察頁並指定 SHAP 要顯示哪個模型
 function analyzeModel(modelId) {
@@ -5519,7 +5988,100 @@ function _lbSetStatus(msg, level) {
   el.classList.toggle('hidden', !msg);
 }
 
+// ── 訓練 elapsed timer ────────────────────────────────────────────────
+// 對所有引擎(sklearn / daniel / autogluon)通用 — setInterval 1s 更新顯示。
+// 用全域 _trainingTimerId 確保任何時候只有一個 timer 在跑。
+let _trainingTimerId = null;
+let _trainingTimerStart = null;
+
+function _trainingTimerStart_(timeLimitSec) {
+  _trainingTimerStop();   // 防重入,先清舊的
+  _trainingTimerStart = Date.now();
+  const wrap = document.getElementById('exp-elapsed-timer');
+  const sep  = document.getElementById('exp-time-limit-sep');
+  const lim  = document.getElementById('exp-time-limit-value');
+  if (!wrap) return;
+  wrap.classList.remove('hidden');
+  if (typeof timeLimitSec === 'number' && timeLimitSec > 0) {
+    sep?.classList.remove('hidden');
+    lim?.classList.remove('hidden');
+    if (lim) lim.textContent = _fmtMmSs(timeLimitSec);
+  } else {
+    sep?.classList.add('hidden');
+    lim?.classList.add('hidden');
+  }
+  // 立刻更新一次 + 每秒推
+  _trainingTimerTick(timeLimitSec);
+  _trainingTimerId = setInterval(() => _trainingTimerTick(timeLimitSec), 1000);
+}
+
+function _trainingTimerTick(timeLimitSec) {
+  const valEl = document.getElementById('exp-elapsed-value');
+  if (!valEl || _trainingTimerStart == null) return;
+  const elapsed = Math.floor((Date.now() - _trainingTimerStart) / 1000);
+  valEl.textContent = _fmtMmSs(elapsed);
+  // 超過 time_limit 改紅色提醒(訓練應該快結束了)
+  if (timeLimitSec && elapsed > timeLimitSec) {
+    valEl.className = 'text-danger-400';
+  } else if (timeLimitSec && elapsed > timeLimitSec * 0.8) {
+    valEl.className = 'text-warning-300';
+  } else {
+    valEl.className = 'text-dark-200';
+  }
+}
+
+function _trainingTimerStop() {
+  if (_trainingTimerId != null) {
+    clearInterval(_trainingTimerId);
+    _trainingTimerId = null;
+  }
+  _trainingTimerStart = null;
+}
+
+function _fmtMmSs(sec) {
+  sec = Math.max(0, Math.floor(sec));
+  const m = Math.floor(sec / 60);
+  const s = sec % 60;
+  return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+}
+
+// 訓練時間 (ms) 自適應顯示 — sklearn 通常秒級,daniel/autogluon 分鐘起跳,
+// 純 'XXXXXms' 太難讀
+function _fmtTrainTime(ms) {
+  if (!ms || ms < 0) return '—';
+  if (ms < 1000) return `${Math.round(ms)}ms`;
+  const sec = ms / 1000;
+  if (sec < 60) return `${sec.toFixed(1)}s`;
+  const minutes = sec / 60;
+  if (minutes < 60) {
+    const m = Math.floor(minutes);
+    const s = Math.round(sec - m * 60);
+    return `${m}m ${s}s`;
+  }
+  const h = Math.floor(minutes / 60);
+  const m = Math.round(minutes - h * 60);
+  return `${h}h ${m}m`;
+}
+
+// 批次預測 SSE 進度條 helpers
+function _lbProgressShow() {
+  document.getElementById('lb-predict-progress-wrap')?.classList.remove('hidden');
+}
+function _lbProgressHide() {
+  document.getElementById('lb-predict-progress-wrap')?.classList.add('hidden');
+  _lbProgressSet(0, '');
+}
+function _lbProgressSet(pct, label) {
+  const bar = document.getElementById('lb-predict-progress-bar');
+  const pctEl = document.getElementById('lb-predict-progress-pct');
+  const lblEl = document.getElementById('lb-predict-progress-label');
+  if (bar) bar.style.width = Math.max(0, Math.min(100, pct)) + '%';
+  if (pctEl) pctEl.textContent = Math.round(pct) + '%';
+  if (lblEl && label != null) lblEl.textContent = label;
+}
+
 // 排行榜每列的「預測」按鈕觸發 — 用上面 file input 的測試 CSV + 範本跑批次預測
+// Daniel ensemble 走 SSE 版 (邊跑邊推進度 + 可取消);非 ensemble 走舊版一次性 endpoint
 async function leaderboardPredict(modelId, btnEl) {
   const testFile   = _lbPredictTestFile();
   const sampleFile = _lbPredictSampleFile();
@@ -5531,31 +6093,183 @@ async function leaderboardPredict(modelId, btnEl) {
     _lbSetStatus('✗ 批次預測需要開啟「使用 Python 後端 API」', 'error');
     return;
   }
-  const origLabel = btnEl?.textContent;
-  if (btnEl) { btnEl.disabled = true; btnEl.textContent = '預測中…'; }
-  _lbSetStatus(`處理中 — 模型 ${modelId} × ${testFile.name}`, 'info');
-  setGlobalStatus('running', `批次預測中 — ${testFile.name}`);
-  try {
-    const blob = await ApiClient.predictBatch(modelId, testFile, sampleFile);
-    const outName = sampleFile
-      ? 'submission.csv'
-      : `${testFile.name.replace(/\.[^.]+$/, '')}_predicted.csv`;
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url; a.download = outName;
-    document.body.appendChild(a); a.click(); a.remove();
-    URL.revokeObjectURL(url);
-    const note = sampleFile ? '(已套用範本 submission 格式)' : '(新增 prediction 欄)';
-    _lbSetStatus(`✓ 預測完成,已下載 ${outName} ${note}`, 'success');
-    setGlobalStatus('success', `預測完成 — ${outName}`);
-    notify('批次預測完成 ✓', `${testFile.name} → ${outName}`, 'success');
-  } catch (e) {
-    _lbSetStatus(`✗ 預測失敗: ${e.message}`, 'error');
-    setGlobalStatus('error', '預測失敗');
-    notify('批次預測失敗', e.message, 'error');
-  } finally {
-    if (btnEl) { btnEl.disabled = false; btnEl.textContent = origLabel || '預測'; }
+
+  // 判斷:Daniel ensemble (canPredict=true 且 type=daniel_pipeline_ensemble) → SSE 版
+  // 從 _trainingHistory 找 model 看 type
+  let useSSE = false;
+  for (const h of (_trainingHistory || [])) {
+    const m = (h.models || []).find(mm => mm.id === modelId);
+    if (m && (m.type === 'daniel_pipeline_ensemble' || m.canPredict)) {
+      useSSE = true; break;
+    }
   }
+
+  const origLabel = btnEl?.textContent;
+  const setPredictingBtn = (txt) => {
+    if (btnEl) { btnEl.disabled = true; btnEl.textContent = txt; }
+  };
+  const resetBtn = () => {
+    if (btnEl) { btnEl.disabled = false; btnEl.textContent = origLabel || '預測'; }
+  };
+
+  if (!useSSE) {
+    // 舊版一次性 path (sklearn 模型用,通常很快)
+    setPredictingBtn('預測中…');
+    _lbSetStatus(`處理中 — 模型 ${modelId} × ${testFile.name}`, 'info');
+    setGlobalStatus('running', `批次預測中 — ${testFile.name}`);
+    try {
+      const blob = await ApiClient.predictBatch(modelId, testFile, sampleFile);
+      const outName = sampleFile
+        ? 'submission.csv'
+        : `${testFile.name.replace(/\.[^.]+$/, '')}_predicted.csv`;
+      _triggerDownload(blob, outName);
+      _lbSetStatus(`✓ 預測完成,已下載 ${outName}`, 'success');
+      setGlobalStatus('success', `預測完成 — ${outName}`);
+      notify('批次預測完成 ✓', `${testFile.name} → ${outName}`, 'success');
+    } catch (e) {
+      _lbSetStatus(`✗ 預測失敗: ${e.message}`, 'error');
+      setGlobalStatus('error', '預測失敗');
+      notify('批次預測失敗', e.message, 'error');
+    } finally {
+      resetBtn();
+    }
+    return;
+  }
+
+  // SSE 版:可顯示 per-config 進度 + 可取消
+  setPredictingBtn('取消');
+  const controller = new AbortController();
+  // 把取消綁到按鈕 — 點按鈕第二次 = abort fetch = 後端 cancel_token
+  const cancelHandler = (ev) => {
+    ev.preventDefault();
+    ev.stopPropagation();
+    controller.abort();
+  };
+  if (btnEl) {
+    btnEl.removeAttribute('onclick');
+    btnEl.addEventListener('click', cancelHandler);
+  }
+
+  _lbSetStatus(`啟動中 — 模型 ${modelId} × ${testFile.name}`, 'info');
+  setGlobalStatus('running', `批次預測中 — ${testFile.name}`);
+
+  try {
+    const fd = new FormData();
+    fd.append('modelId', modelId);
+    fd.append('file', testFile);
+    if (sampleFile) fd.append('sampleFile', sampleFile);
+    const apiBase = (typeof ApiClient !== 'undefined' && ApiClient.baseUrl) ? ApiClient.baseUrl : '';
+    // 跟既有 training stream 對齊 — 不要 credentials='include' (後端 CORS 是 *,
+    // credentials 模式下瀏覽器會擋),改用 Bearer token 傳 auth
+    const headers = {};
+    if (typeof AuthClient !== 'undefined' && AuthClient.token) {
+      headers['Authorization'] = `Bearer ${AuthClient.token}`;
+    }
+    const resp = await fetch(`${apiBase}/api/predict/batch/stream`, {
+      method: 'POST', body: fd, headers, signal: controller.signal,
+    });
+    if (!resp.ok) {
+      const err = await resp.text().catch(() => `HTTP ${resp.status}`);
+      throw new Error(err.slice(0, 300));
+    }
+
+    // SSE 解析:event: + data: ...  雙換行為界
+    const reader = resp.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    let finalEvent = null;
+
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      // 拆 SSE chunks
+      let sep;
+      while ((sep = buffer.indexOf('\n\n')) >= 0) {
+        const chunk = buffer.slice(0, sep);
+        buffer = buffer.slice(sep + 2);
+        const ev = _parseSSE(chunk);
+        if (!ev) continue;
+        if (ev.event === 'progress') {
+          const p = ev.data;
+          if (p.phase === 'start') {
+            _lbSetStatus(`開始 — ${p.totalConfigs} 個 config × N 個 fold,N=${p.nSamples} 樣本`, 'info');
+            _lbProgressShow();
+            _lbProgressSet(0, `等待 ${p.totalConfigs} 個 config 跑完`);
+          } else if (p.phase === 'config_start') {
+            _lbSetStatus(`[${p.done}/${p.total}] 跑 ${p.tag} (${p.nFolds} folds)...`, 'info');
+            _lbProgressSet(Math.round((p.done / Math.max(p.total, 1)) * 95),
+              `跑 ${p.tag}`);   // 進度條進到「該 config 開始前」的位置;留 5% 給 ensemble combine
+          } else if (p.phase === 'config_done') {
+            _lbSetStatus(`[${p.done}/${p.total}] ${p.tag} 完成 (${p.elapsedSec}s)`, 'info');
+            _lbProgressSet(Math.round((p.done / Math.max(p.total, 1)) * 95),
+              `${p.done}/${p.total} configs 完成`);
+          } else if (p.phase === 'ensemble_combine') {
+            _lbSetStatus(`所有 config 跑完,blender + stacker 合併中...`, 'info');
+            _lbProgressSet(97, 'blender + stacker 合併中');
+          }
+        } else if (ev.event === 'error') {
+          throw new Error(`${ev.data.kind}: ${ev.data.msg}`);
+        } else if (ev.event === 'done') {
+          finalEvent = ev.data;
+        }
+      }
+    }
+
+    if (!finalEvent) throw new Error('SSE 流結束但沒收到 done 事件');
+
+    // base64 → blob → 觸發下載
+    const bin = atob(finalEvent.csvBase64);
+    const arr = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
+    const blob = new Blob([arr], { type: 'text/csv;charset=utf-8' });
+    _triggerDownload(blob, finalEvent.filename);
+    _lbProgressSet(100, '✓ 完成');
+    _lbSetStatus(`✓ 預測完成 (${finalEvent.rowCount} 列) — 已下載 ${finalEvent.filename}`, 'success');
+    setGlobalStatus('success', `預測完成 — ${finalEvent.filename}`);
+    notify('批次預測完成 ✓', `${testFile.name} → ${finalEvent.filename}`, 'success');
+    // 3 秒後自動收起進度條
+    setTimeout(() => _lbProgressHide(), 3000);
+  } catch (e) {
+    _lbProgressHide();
+    if (e.name === 'AbortError') {
+      _lbSetStatus('✗ 已取消批次預測', 'warning');
+      setGlobalStatus('warning', '預測已取消');
+    } else {
+      _lbSetStatus(`✗ 預測失敗: ${e.message}`, 'error');
+      setGlobalStatus('error', '預測失敗');
+      notify('批次預測失敗', e.message, 'error');
+    }
+  } finally {
+    if (btnEl) {
+      btnEl.removeEventListener('click', cancelHandler);
+      // 還原原 onclick (inline)
+      btnEl.setAttribute('onclick', `leaderboardPredict('${modelId}', this)`);
+    }
+    resetBtn();
+  }
+}
+
+// SSE chunk 解析:`event: <name>\ndata: <json>` → {event, data}
+function _parseSSE(chunk) {
+  const lines = chunk.split('\n');
+  let event = 'message';
+  const dataLines = [];
+  for (const line of lines) {
+    if (line.startsWith('event:')) event = line.slice(6).trim();
+    else if (line.startsWith('data:')) dataLines.push(line.slice(5).trim());
+  }
+  if (dataLines.length === 0) return null;
+  try { return { event, data: JSON.parse(dataLines.join('\n')) }; }
+  catch { return { event, data: dataLines.join('\n') }; }
+}
+
+function _triggerDownload(blob, filename) {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = filename;
+  document.body.appendChild(a); a.click(); a.remove();
+  URL.revokeObjectURL(url);
 }
 
 // 排行榜 header 中的緊湊 file picker — change 時把 label 文字換成檔名 + 顯示清除鈕
@@ -5688,7 +6402,17 @@ function initShapSection(models, best) {
   };
 
   if (!_shapInitialized) {
-    btn.addEventListener('click', loadShapFigures);
+    // 「重新計算」按鈕走強制 path:先清 lastLoadedKey 讓 reqKey 防禦失效,確保真的重發
+    btn.addEventListener('click', () => {
+      _shapLastLoadedKey = null;
+      loadShapFigures();
+    });
+    // Item 1D:family 切換按鈕 (Tabular / DL) — 只在 source='precomputed' 時顯示
+    document.getElementById('shap-family-tabular')?.addEventListener('click', () => _renderShapForFamily('tabular'));
+    document.getElementById('shap-family-dl')?.addEventListener('click', (e) => {
+      if (e.currentTarget.disabled) return;
+      _renderShapForFamily('dl');
+    });
     _shapInitialized = true;
   }
 
@@ -5698,7 +6422,9 @@ function initShapSection(models, best) {
 
 // 清空 SHAP 三張 Plotly 圖 — 切換歷史 / 模型時先清,避免使用者看到舊圖以為沒更新
 function _clearShapFigures() {
-  ['shap-fig-global', 'shap-fig-waterfall', 'shap-fig-dependence'].forEach(id => {
+  // 6 個 figure div 都清(ML + DL)
+  ['shap-fig-global', 'shap-fig-waterfall', 'shap-fig-dependence',
+   'shap-fig-global-dl', 'shap-fig-waterfall-dl', 'shap-fig-dependence-dl'].forEach(id => {
     const el = document.getElementById(id);
     if (el && typeof Plotly !== 'undefined') {
       try { Plotly.purge(el); } catch (e) {}
@@ -5706,6 +6432,11 @@ function _clearShapFigures() {
     }
   });
 }
+
+// SHAP 重入防護:1) 同參數的 in-flight 請求不再發 2) 切頁觸發新的會 abort 舊的
+let _shapInFlightController = null;
+let _shapInFlightKey = null;
+let _shapLastLoadedKey = null;
 
 async function loadShapFigures() {
   if (typeof Plotly === 'undefined') {
@@ -5725,16 +6456,68 @@ async function loadShapFigures() {
     _clearShapFigures();
     return;
   }
+
+  // 重入防護:
+  //   ① 同 model + 同 sample + 同 feature 已經 in-flight → 跳過(避免雙開 explainer)
+  //   ② 同參數剛載完 + 圖還在 DOM → 跳過(換頁回來會誤觸,後端 sklearn 無法取消,
+  //                                   會在 server 真的跑兩遍)
+  //   ③ 「重新計算」按鈕走另一個 path,會直接呼叫 loadShapFigures 強制重發 → 不擋
+  const reqKey = `${modelId}|${sampleIndex}|${targetFeature || ''}`;
+  if (_shapInFlightKey === reqKey) {
+    console.log('[shap] 同參數已 in-flight,跳過重發');
+    return;
+  }
+  // 圖還在 DOM (Plotly 會塞個 .plotly 子元素) + 上次成功載入是同 key → 不重發
+  const globalDiv = document.getElementById('shap-fig-global');
+  if (_shapLastLoadedKey === reqKey && globalDiv && globalDiv.querySelector('.plotly')) {
+    console.log('[shap] 同參數已載入,跳過重發 (要 refresh 請按「重新計算」)');
+    return;
+  }
+  // 切到不同 model/params:abort 舊的 client-side fetch (server 還在算,但我們不再等回應)
+  if (_shapInFlightController) {
+    console.log('[shap] abort 上一個 fetch (server 端可能還在算)');
+    try { _shapInFlightController.abort(); } catch (_) {}
+  }
+
   errEl.classList.add('hidden');
   loadEl.classList.remove('hidden');
   // 先清空舊圖,讓使用者看到 loading 狀態,避免誤以為沒切換
   _clearShapFigures();
 
+  _shapInFlightController = new AbortController();
+  _shapInFlightKey = reqKey;
+  const myController = _shapInFlightController;
   try {
     const res = await ApiClient.visualizeShap({
       modelId, sampleIndex, targetFeature, maxSamples: getSettings().shapSamples,
+      signal: myController.signal,
     });
+    // 自己被別人 abort 了 → 不要繼續 render
+    if (myController.signal.aborted) return;
     const cfg = { responsive: true, displaylogo: false };
+
+    // ── 新格式:訓練時預計算的雙 family SHAP (source='precomputed')──
+    // ML + DL 並列同時顯示 (6 張 = 2×3),不再用 family selector 切換
+    if (res.source === 'precomputed' && res.shapPlots) {
+      _shapLastResponse = res;
+      // 持久化徽章(取代 family selector)
+      document.getElementById('shap-family-wrap')?.classList.add('hidden');   // 不再需要切換按鈕
+      document.getElementById('shap-best-tag')?.classList.add('hidden');      // 標題改在 section header
+      document.getElementById('shap-source-badge')?.classList.remove('hidden');
+      // 兩個 section 一起渲染
+      _renderShapPrecomputed();
+      return;
+    }
+
+    // ── 舊格式:即時計算的單組 SHAP ──
+    // 顯示 ML section(沒 header),隱藏 DL section
+    _shapLastResponse = null;
+    document.getElementById('shap-family-wrap')?.classList.add('hidden');
+    document.getElementById('shap-source-badge')?.classList.add('hidden');
+    document.getElementById('shap-best-tag')?.classList.add('hidden');
+    document.getElementById('shap-ml-header')?.classList.add('hidden');   // 即時版沒分 family,不顯示「ML XGB」標題
+    document.getElementById('shap-section-ml')?.classList.remove('hidden');
+    document.getElementById('shap-section-dl')?.classList.add('hidden');
     Plotly.newPlot('shap-fig-global',     res.global.data,     res.global.layout,     cfg);
     Plotly.newPlot('shap-fig-waterfall',  res.waterfall.data,  res.waterfall.layout,  cfg);
     Plotly.newPlot('shap-fig-dependence', res.dependence.data, res.dependence.layout, cfg);
@@ -5752,6 +6535,11 @@ async function loadShapFigures() {
       if (fcEl && fcEl.textContent === '—') fcEl.textContent = res.featureNames.length;
     }
   } catch (e) {
+    // AbortError 不算錯誤,是我們主動取消的(切到別模型)
+    if (e.name === 'AbortError' || /abort/i.test(e.message || '')) {
+      console.log('[shap] 請求被 abort (正常)');
+      return;
+    }
     errEl.classList.remove('hidden');
     // 訊息明顯一點 — 通常是後端 model 找不到 (重啟過 / 歷史紀錄但 model 沒持久化)
     const msg = e.message.includes('404') || e.message.includes('不存在')
@@ -5761,6 +6549,12 @@ async function loadShapFigures() {
     _clearShapFigures();
   } finally {
     loadEl.classList.add('hidden');
+    // 只清掉「自己」的 in-flight 標記;若中間又有新請求進來,別誤清新的
+    if (_shapInFlightController === myController) {
+      _shapInFlightController = null;
+      _shapInFlightKey = null;
+      _shapLastLoadedKey = reqKey;
+    }
   }
 }
 
@@ -5920,6 +6714,7 @@ async function updateRealWhatIfPrediction() {
 
   let pred = NaN, baseline = NaN;
   let predProba = null, baseProba = null;
+  let predRespStd = null;   // 回歸用:5 fold std → ±1σ 區間
 
   if (isApi) {
     // API 模式: raw scale 值直接傳給後端,後端內部做 scaler.transform
@@ -5934,6 +6729,10 @@ async function updateRealWhatIfPrediction() {
       if (myToken !== _whatIfReqToken) return;
       pred     = predResp.prediction;
       baseline = baseResp.prediction;
+      // 回歸:接 predictionStd (5 fold std) → 給 UI 畫 ±1σ 信心區間
+      if (isReg && typeof predResp.predictionStd === 'number') {
+        predRespStd = predResp.predictionStd;
+      }
       // 分類機率：取 pred 對應的 class 的機率
       if (!isReg && Array.isArray(predResp.proba) && Array.isArray(predResp.classes)) {
         const idx = predResp.classes.indexOf(pred);
@@ -5965,7 +6764,16 @@ async function updateRealWhatIfPrediction() {
     return label + pct;
   };
 
-  if (predEl) predEl.textContent = isReg ? formatRwifVal(pred) : fmtCls(pred, predProba);
+  // 回歸:顯示預測值 + ±1σ 信心區間 (從 5 fold std 來)
+  if (predEl) {
+    if (isReg && typeof predRespStd === 'number' && predRespStd > 0) {
+      const main = formatRwifVal(pred);
+      const stdStr = formatRwifVal(predRespStd);
+      predEl.innerHTML = `${main}<span class="ml-2 text-[11px] text-dark-400">±${stdStr}</span>`;
+    } else {
+      predEl.textContent = isReg ? formatRwifVal(pred) : fmtCls(pred, predProba);
+    }
+  }
   document.getElementById('real-whatif-target-label').textContent = m.targetName || '目標變數';
   if (baseEl) baseEl.textContent = isReg ? formatRwifVal(baseline) : fmtCls(baseline, baseProba);
   document.getElementById('real-whatif-model-name').textContent = m.name;
@@ -5974,7 +6782,14 @@ async function updateRealWhatIfPrediction() {
     const delta = pred - baseline;
     const sign = delta >= 0 ? '+' : '';
     if (deltaEl) {
-      deltaEl.textContent = `${sign}${formatRwifVal(delta)}`;
+      // 多顯示一個信心區間提示 (66% / 95% CI)
+      let ciHint = '';
+      if (typeof predRespStd === 'number' && predRespStd > 0) {
+        const lo = formatRwifVal(pred - 1.96 * predRespStd);
+        const hi = formatRwifVal(pred + 1.96 * predRespStd);
+        ciHint = ` <span class="text-[10px] text-dark-500 ml-1">95% CI: [${lo}, ${hi}]</span>`;
+      }
+      deltaEl.innerHTML = `${sign}${formatRwifVal(delta)}${ciHint}`;
       deltaEl.className = `font-mono ${delta > 0 ? 'text-success-400' : delta < 0 ? 'text-danger-400' : 'text-dark-300'}`;
     }
   } else if (!isReg && predProba != null && baseProba != null) {
@@ -6512,6 +7327,37 @@ function renderSystemNotificationsCard() {
 
 // 全域:當前的最近實驗 filter (空字串 = 不篩選)
 let _recentExpFilter = { datasetName: '', target: '' };
+
+// Audit JSON 匯出 — 把 DataEngine.lastAuditReport 直接序列化下載,
+// 供外部工具(pandas / R / 自家 dashboard)讀取分析。daniel run_data_audit 結構:
+//   { health_score?, warnings: [...], info: [...], missing_summary: {...},
+//     sentinel_summary: [...], schema_inferred: {...}, ... }
+function exportAuditReportJson() {
+  const audit = DataEngine.lastAuditReport;
+  if (!audit || audit.error) {
+    showToast('請先執行健檢', { type: 'warning' });
+    return;
+  }
+  const ds = DataEngine.currentDataset;
+  const dsName = ds?.fileName?.replace(/\.[^.]+$/, '') || 'dataset';
+  const now = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+
+  const payload = {
+    exportedAt: new Date().toISOString(),
+    dataset: { fileName: ds?.fileName, target: ds?.target || null,
+               rowCount: ds?.rowCount, colCount: ds?.colCount },
+    audit: audit,
+  };
+  const blob = new Blob([JSON.stringify(payload, null, 2)],
+                        { type: 'application/json;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = `audit_${dsName}_${now}.json`;
+  document.body.appendChild(a); a.click(); a.remove();
+  URL.revokeObjectURL(url);
+  showToast('已下載 JSON 報告', { type: 'success' });
+}
+
 
 function exportAuditReportHtml() {
   const audit = DataEngine.lastAuditReport;

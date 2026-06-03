@@ -74,7 +74,7 @@ python -m uvicorn api.main:app --reload --port 8000
 - **Google OAuth**
 - **GitHub OAuth**
 
-> 不設定也能用 — 匯名訪客可以使用所有功能,只是資料不會跨裝置同步。
+> 不設定也能用 — 匿名訪客可以使用所有功能,只是資料不會跨裝置同步。
 
 ### A. Email / 密碼
 
@@ -112,6 +112,21 @@ python -c "import secrets; print(secrets.token_urlsafe(48))"
 
 > 不設這個 → fallback 用本機 SQLite (`api/auth.db`),Render 重啟就清空。
 
+#### 臨時切回本地 SQLite(不動 .env)
+
+開發時想避開雲端 DB 的延遲 / quota / statement_timeout,設環境變數 `DB_LOCAL=1` 就會**強制**走本地 SQLite,完全忽略 `.env` 裡的 `DATABASE_URL`:
+
+```powershell
+# PowerShell (一個 session 有效)
+$env:DB_LOCAL='1'
+python -m uvicorn api.main:app --reload --port 8000
+
+# 或一行
+$env:DB_LOCAL='1'; python -m uvicorn api.main:app --reload --port 8000
+```
+
+啟動 log 會看到 `[db] DB_LOCAL=1 → 強制使用本機 SQLite: ...api/auth.db`。關掉 terminal 或新開一個就回 Supabase。
+
 ### E. FRONTEND_URL / OAUTH_REDIRECT_BASE
 
 - `OAUTH_REDIRECT_BASE`:後端對外網址(本機 `http://localhost:8000`,Render 是 onrender.com 那個)
@@ -124,12 +139,20 @@ python -c "import secrets; print(secrets.token_urlsafe(48))"
 ## 第四步:前端啟動
 
 ```powershell
-# 4.1 啟動本地 HTTP 服務器 (終端 2)
+# 4.1 (改 index.html 的 Tailwind class 時才需要) 重新編譯 Tailwind CSS
+# 沒裝過 node 依賴 → 先 `npm install`
+npm run build:css       # 一次性編譯
+# 或開發時持續監聽
+npm run watch:css
+
+# 4.2 啟動本地 HTTP 服務器 (終端 2)
 python -m http.server 5500
 
-# 4.2 訪問前端
+# 4.3 訪問前端
 # 打開瀏覽器 → http://localhost:5500
 ```
+
+> Tailwind CSS 改用 CI 預編譯(舊版 CDN 已移除)。沒跑 `build:css` 之前新加的 class 不會生效。`tailwind.config.js` 的 `content` 設定會掃 `index.html` 跟 `js/**/*.js`。
 
 ---
 
@@ -155,27 +178,53 @@ python -m http.server 5500
 2. 前端上傳下載的 CSV 文件
 3. 完整執行工作流程
 
+### 測試用例 4 — 排行榜批次預測
+
+1. 完成「實驗室 → 訓練」拿到模型
+2. 切到「模型排行榜」
+3. **header 中央**點「測試 CSV」上傳 test.csv,(選填)再點「submission 範本」
+4. 任一列點「**預測**」按鈕 → 後端跑 batch predict → 自動下載 `submission.csv`(有範本)或 `{原檔名}_predicted.csv`(沒範本)
+5. Pipeline ensemble / sklearn 引擎都支援。Pipeline 預處理 source 的 model 會自動套同個 ColumnTransformer 把 raw test → transformed → predict
+6. 顯示「預測 (需重訓)」的灰字按鈕是舊版 placeholder Pipeline,DB 沒 estimator → 重訓一次就有
+
+### 測試用例 5 — Daniel pipeline ensemble 持久化
+
+1. 實驗室選「Pipeline 引擎」訓練(任務類型 + 資料來源任選)
+2. 訓練完成自動 re-hydrate from DB → 排行榜出現「[原始/預處理] Pipeline Ensemble」
+3. **重新登入 / 換瀏覽器** → ensemble 還在,可以繼續批次預測 / 跑 SHAP
+4. Insights 頁的 SHAP 區塊對 ensemble 走 PermutationExplainer(慢但能用,約 30s~3min)
+
 ---
 
 ## 主要模組
 
-```
+```text
 api/
 ├── main.py                  # FastAPI 應用程序入口
+├── bootstrap.py             # 集中環境設定:UTF-8 console / load_dotenv / subprocess env helper
 ├── requirements.txt         # Python 依賴
 ├── storage.py               # 統一 storage 層 (guest in-memory / authed DB)
 ├── store.py                 # in-memory dict (guest 用)
 ├── auth/                    # 登入 / OAuth / DB schema
-│   └── db.py                # SQLAlchemy models
+│   └── db.py                # SQLAlchemy models (含 idempotent 線上 migration)
 ├── preprocess/              # 數據預處理模組
+│   ├── interface.py         # 對外:run_data_audit / preprocess_for_training / preprocess_for_inference
+│   ├── preprocess.py        # 給 /api/preprocess (CSV → analysis) 用
+│   └── processors/feature_generator.py   # MISelector + RobustDataCleaner 等
 ├── train/                   # 模型訓練模組
 │   ├── train.py             # sklearn 多模型訓練
 │   ├── daniel_runner.py     # Daniel pipeline subprocess wrapper
 │   └── pipeline/            # Daniel pipeline 完整原始碼
-└── visualize/               # 可視化模組 (SHAP)
+│       ├── pipeline.py / pipeline_time.py  # 分類 / 時序回歸主引擎
+│       ├── src/             # hpo, train, nas, preprocess, models, ensemble
+│       └── _runner_entry.py # subprocess 入口 (含 ensemble bundle dump)
+└── visualize/               # 可視化模組 (SHAP + Plotly)
 
 前端:
-├── index.html               # 前端主頁
+├── index.html               # 前端主頁 (Tailwind 預編譯)
+├── tailwind.config.js       # Tailwind 設定 (掃 index.html + js/**/*.js)
+├── package.json             # npm run build:css / watch:css
+├── css/tailwind.css         # 預編譯產物 (git tracked)
 ├── js/                      # JavaScript 邏輯
 │   ├── app.js
 │   ├── api.js
@@ -183,7 +232,10 @@ api/
 │   ├── charts.js
 │   ├── ml-engine.js
 │   └── data-engine.js
-└── css/style.css
+└── new-ui/                  # React 新介面 (Babel Standalone)
+    ├── app.jsx
+    ├── page-*.jsx
+    └── api-client.js
 
 數據收集:
 ├── data_collect.py          # OpenML 數據收集
@@ -192,6 +244,12 @@ api/
 開發者工具:
 └── tools/
     └── wipe_data.py         # DB 資料清理 (dev only)
+
+訓練產出 (Daniel pipeline 中間檔,可清):
+└── api/train/pipeline/artifacts/api/<csv_name>/<timestamp>/
+    ├── ensemble_bundle.pkl  # 整套 ensemble (folds + blender + stacker)
+    ├── {tag}_oof.npy / _test.npy
+    └── {tag}_best_model.pkl / .pt
 ```
 
 ---
@@ -273,6 +331,12 @@ python tools/wipe_data.py --all
 | 前端無法連接後端 | 確認後端服務已啟動、檢查防火牆設定、確保 CORS 已配置 |
 | 數據集下載失敗 | 檢查網路連接、手動下載數據到 `Dataset/`、或使用本地 CSV |
 | DB 連線失敗 | 確認 `.env` 的 `DATABASE_URL` 正確;沒設會 fallback 到 SQLite |
+| Supabase `statement_timeout` (ALTER TABLE / DROP) | `preprocessors` 大 blob 表會撞時限。臨時開發改用 `$env:DB_LOCAL='1'` 走本地 SQLite |
 | `LogisticRegression is not JSON serializable` | 訓練 bundle 內藏了 sklearn estimator,已用 `default=str` 防禦 |
-| Voting / Stacking 模型存不進 DB | pickle 太大時自動跳過(>20MB),洞察頁仍正常顯示 |
+| Voting / Stacking 模型存不進 DB | pickle 太大時自動跳過(>20MB,Daniel ensemble 是 200MB),洞察頁仍正常顯示 |
+| Daniel Pipeline 顯示「預測 (需重訓)」 | 舊版 placeholder(DB 沒 estimator)。重新訓練一次即可拿到完整 ensemble bundle |
+| 批次預測 `model 不存在` | 點到 placeholder model 的 fake id (`daniel_db_*`)。同上,重訓即可 |
+| 批次預測 `CSV 缺少 N 個欄位` | test.csv 欄位要跟訓練時的「原始欄位」一致。預處理 source 訓的模型會自動套 transform,raw source 訓的就直接用原欄 |
+| Tailwind 新加的 class 沒效果 | `npm run build:css` 重編,或 `npm run watch:css` 開發時 auto rebuild |
 | 切換瀏覽器登入後看不到舊資料 | hydration 會自動從 DB 抓 — 若還是空,確認 `/api/training-runs` 跟 `/api/models` 200 回覆 |
+| 時間顯示偏 8 小時 | 已修(`storage._utc_naive_to_epoch`);還有偏就 hard refresh 撈最新 JS |

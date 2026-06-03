@@ -16,7 +16,10 @@ from sklearn.feature_selection import (
 )
 
 from ..processors.numeric_processor import build_numeric_pipeline
-from ..processors.category_processor import build_category_pipeline
+from ..processors.category_processor import (
+    build_category_pipeline,
+    build_tree_category_pipeline,
+)
 from ..processors.text_processor import build_text_pipeline
 from ..processors.time_processor import build_time_pipeline
 
@@ -75,31 +78,32 @@ def _build_text_column_pipeline() -> Pipeline:
     ])
 
 
+# 🚀 引入防洩漏的 TargetEncoder (需要 scikit-learn >= 1.3)
+from sklearn.preprocessing import TargetEncoder
+
 def _build_high_cardinality_pipeline() -> Pipeline:
     """
-    建立高基數類別欄位的安全編碼管線。
+    建構高基數類別欄位的進階編碼管線 (Target Encoding)。
 
-    為什麼用 OrdinalEncoder 而非 OneHotEncoder？
-    高基數類別（如 500 種郵遞區號）若用 OHE，一欄會展開成 500 欄，
-    1000 種產品代碼 → 1000 欄 → 記憶體爆炸（Memory OutOfBounds）。
+    為什麼現在敢用 Target Encoding 了？
+    Scikit-learn 1.3+ 的 TargetEncoder 內建了 K-Fold Cross-fitting 機制。
+    它在 fit_transform 訓練集時，不會直接拿自己的標籤來算平均，
+    而是用 out-of-fold 的標籤來計算，完美防堵了「目標洩漏 (Target Leakage)」。
 
-    OrdinalEncoder 將每個類別映射為一個整數，欄位數保持不變（仍然 1 欄）。
-    handle_unknown='use_encoded_value' + unknown_value=-1：
-        當測試集遇到訓練集未見過的新類別時，
-        用 -1 代替而不崩潰，確保推論時的健壯性。
-
-    為什麼不用 Target Encoding？
-    Target Encoding 需要在 fit 時用到目標欄 y，若直接在 Pipeline 中使用，
-    訓練集會被「洩漏」自身的標籤資訊，違反防洩漏原則。
-    OrdinalEncoder 不需要 y，安全且簡單。
+    Parameters
+    ----------
+    is_classification : bool
+        用來決定 TargetEncoder 的 target_type。
+        分類任務設為 "binary" (多分類會自動轉為 one-vs-all)，迴歸任務設為 "continuous"。
     """
     return Pipeline([
         ("imputer", SimpleImputer(strategy="most_frequent")),
-        ("encoder", OrdinalEncoder(
-            handle_unknown="use_encoded_value",
-            unknown_value=-1,
-            encoded_missing_value=-1,
-        )),
+        
+        ("encoder", TargetEncoder(
+            target_type="auto",  # 🤖 讓 sklearn 自動根據 y 判斷是迴歸還是分類
+            smooth="auto",       # 🤖 自動平滑化，防止少數極端值導致的 overfitting
+            cv=5                 # 🛡️ 內建 5-Fold 交叉計算，防禦目標洩漏
+        ))
     ])
 
 
@@ -180,13 +184,12 @@ class PipelineAssembler:
         self.use_mice = use_mice                                      # 新增：MICE 開關（功能 1）
         self.add_missing_indicators = add_missing_indicators  # 新增：缺失指示器開關（功能 1）
         self._transformers: list = []
-        # build() 過程中記錄「實際自動觸發了哪些進階特徵工程」,給前端 UI 透明顯示。
-        # 每筆: {"type": "grouped_agg"|"polynomial"|"nonlinear_scale", "label", "detail", "columns"}
-        self.applied_feature_steps: list = []
 
-    def build(self) -> ColumnTransformer:
+    def build(self, track = 'tree') -> ColumnTransformer:
         """
         組裝並回傳 ColumnTransformer。
+
+        param track: "tree" (生肉：不補值、不縮放) 或 "dl" (熟肉：中位數補值、標準化)
 
         Returns
         -------
@@ -199,37 +202,68 @@ class PipelineAssembler:
             若所有群組均為空，無法建立任何管線。
         """
         transformers = []
-        self.applied_feature_steps = []   # 每次 build 重置
 
-        # ── 1. 數值特徵 ───────────────────────────────────────────
+        # ── 1. 數值特徵 (雙軌制分流核心) ──────────────────────────────────
         numeric_cols = self.feature_groups.get("numeric", [])
         if numeric_cols:
-            if self.add_missing_indicators:
-                # 新增（功能 1）：含缺失指示器的管線（MICE 或 median 填補 + was_missing 欄）
-                num_pipe = _build_numeric_pipeline_with_indicators(use_mice=self.use_mice)
+            if track == "tree":
+                # 🌳 軌道 A：樹狀模型 (XGBoost/LightGBM)
+                # 強制關閉補值與縮放，保留 NaN 與數值大小
+                num_pipe = build_numeric_pipeline(
+                    impute_strategy="none", 
+                    scaler_type="none", 
+                    handle_outliers=False
+                )
+                print(f"  [Assembler] 數值管線 (Tree生肉) ← {len(numeric_cols):2d} 欄: {numeric_cols[:5]}...")
+                
+            elif track == "dl":
+                # 🧠 軌道 B：深度學習/線性模型 (NAS/MLP/SVM)
+                if self.add_missing_indicators:
+                    # 缺失指示器
+                    num_pipe = _build_numeric_pipeline_with_indicators(use_mice=self.use_mice)
+                else:
+                    # 使用標準的補值與縮放
+                    num_pipe = build_numeric_pipeline(
+                        impute_strategy="median", 
+                        scaler_type="standard", 
+                        handle_outliers=True
+                    )
+                print(f"  [Assembler] 數值管線 (DL 熟肉)  ← {len(numeric_cols):2d} 欄: {numeric_cols[:5]}...")
             else:
-                # 維持原本行為（不改動現有邏輯）
-                num_pipe = build_numeric_pipeline()
-            transformers.append(("num_pipeline", num_pipe, numeric_cols))
-            print(f"  [Assembler] 數值管線       ← {len(numeric_cols):2d} 欄: {numeric_cols[:5]}...")
+                raise ValueError(f"未知的軌道類型: {track}")
 
-        # ── 2. 低基數類別特徵（OHE）─────────────────────────────────
+            transformers.append(("num_pipeline", num_pipe, numeric_cols))
+
+
+        # ── 2. 低基數類別特徵 ────────────────────────────────────────
+        # Tree 軌道：OrdinalEncoder（單欄整數，LGBM/XGB 原生支援，節省維度）
+        # DL  軌道：OHE + RareCategoryGrouper（one-hot，合併低頻類別防稀疏爆維）
         categorical_cols = self.feature_groups.get("categorical", [])
         if categorical_cols:
-            transformers.append((
-                "cat_pipeline", build_category_pipeline(), categorical_cols
-            ))
-            print(f"  [Assembler] 類別管線(OHE)  ← {len(categorical_cols):2d} 欄: {categorical_cols[:5]}...")
+            if track == "tree":
+                cat_pipe = build_tree_category_pipeline()
+                print(f"  [Assembler] 類別管線(Ordinal) ← {len(categorical_cols):2d} 欄: {categorical_cols[:5]}...")
+            else:
+                cat_pipe = build_category_pipeline()
+                print(f"  [Assembler] 類別管線(OHE)     ← {len(categorical_cols):2d} 欄: {categorical_cols[:5]}...")
+            transformers.append(("cat_pipeline", cat_pipe, categorical_cols))
 
         # ── 3. 高基數類別特徵（OrdinalEncoder，防 OHE 維度爆炸）────
+        # ── 3. 高基數類別特徵（TargetEncoder，防 OHE 維度爆炸 + 提升預測力）────
         high_card_cols = self.feature_groups.get("high_cardinality", [])
         if high_card_cols:
+            
+            # 💡 判斷當前任務是否為分類任務 (你在 PipelineAssembler 的 init 中沒有傳入 y，
+            # 但我們可以透過一個簡單的經驗法則，或者你也可以在 init 傳入 is_classification)
+            # 這裡我們先假設你在 assembler 的 init 或 build 時能知道 is_classification
+            # 如果不確定，TargetEncoder 的 target_type="auto" 其實也很聰明！
+            
             transformers.append((
                 "high_card_pipeline",
                 _build_high_cardinality_pipeline(),
                 high_card_cols,
             ))
-            print(f"  [Assembler] 高基數管線     ← {len(high_card_cols):2d} 欄: {high_card_cols[:5]}...")
+            print(f"  [Assembler] 高基數管線(Target) ← {len(high_card_cols):2d} 欄: {high_card_cols[:5]}...")
 
         # ── 4. 文字特徵（每欄獨立，修正 TF-IDF 維度問題）──────────
         text_cols = self.feature_groups.get("text", [])
@@ -275,13 +309,7 @@ class PipelineAssembler:
                 ),
                 list(set(potential_ids[:3] + potential_nums[:2])),
             ))
-            print(f"  [Assembler] 🛡️ 注入自動群組聚合統計 分支！(ID: {potential_ids[:3]} | 數值: {potential_nums[:2]})")
-            self.applied_feature_steps.append({
-                "type": "grouped_agg",
-                "label": "分組聚合統計",
-                "detail": f"依 {potential_ids[:3]} 分組,算 {potential_nums[:2]} 的 mean/std",
-                "columns": list(set(potential_ids[:3] + potential_nums[:2])),
-            })
+            print(f"  [Assembler] 注入自動群組聚合統計分支 (ID: {potential_ids[:3]} | 數值: {potential_nums[:2]})")
 
         # (B) 自動多項式交互特徵 (Polynomial Interactions)
         # 挑選前 3 個最重要的數值特徵進行兩兩交叉乘除，避免維度過度爆炸
@@ -292,30 +320,19 @@ class PipelineAssembler:
                 PolynomialInteracter(target_cols=poly_targets, allow_division=True),
                 poly_targets,
             ))
-            print(f"  [Assembler] ⚔️ 注入多項式交叉乘除 分支！(目標特徵: {poly_targets})")
-            self.applied_feature_steps.append({
-                "type": "polynomial",
-                "label": "多項式交互特徵",
-                "detail": f"對 {poly_targets} 兩兩做乘 / 除,造交互項",
-                "columns": list(poly_targets),
-            })
+            print(f"  [Assembler] 注入多項式交叉乘除分支 (目標特徵: {poly_targets})")
 
         # (C) 自動非線性縮放 (Non-linear Transformations)
         # 專門抓出金額類特徵進行常態化分位數轉換，矯正長尾偏態
         amt_cols = [c for c in numeric_cols if "amt" in c.lower() or "amount" in c.lower()]
         if amt_cols:
-            transformers.append((
-                "feat_nonlinear_scale",
-                NonLinearScaler(target_cols=amt_cols, strategy="quantile"),
-                amt_cols,
-            ))
-            print(f"  [Assembler] 🧪 注入非線性長尾偏態矯正 分支！(目標特徵: {amt_cols})")
-            self.applied_feature_steps.append({
-                "type": "nonlinear_scale",
-                "label": "非線性長尾矯正",
-                "detail": f"對 {amt_cols} 做 QuantileTransformer 常態化",
-                "columns": list(amt_cols),
-            })
+            if track == 'dl': # 樹模型不需要縮放
+                transformers.append((
+                    "feat_nonlinear_scale",
+                    NonLinearScaler(target_cols=amt_cols, strategy="quantile"),
+                    amt_cols,
+                ))
+                print(f"  [Assembler] 注入非線性長尾偏態矯正分支 (目標特徵: {amt_cols})")
 
         # ── 空管線早期錯誤 ────────────────────────────────────────
         if not transformers:
@@ -387,6 +404,15 @@ class PipelineAssembler:
         import scipy.sparse as sp
         X_arr = X_clean.toarray() if sp.issparse(X_clean) else np.asarray(X_clean)
 
+        # 自動判斷分類 / 迴歸
+        is_classification = y.nunique() <= 50
+        mi_fn = mutual_info_classif if is_classification else mutual_info_regression
+
+        import scipy.sparse as sp
+        X_arr = X_clean.toarray() if sp.issparse(X_clean) else np.asarray(X_clean)
+        # 🛡️ 加入這行防呆：暫時填補 NaN，只為了讓 MI 演算法能順利計算！
+        # (因為 sklearn 的 mutual_info 不吃 NaN)
+        X_arr = np.nan_to_num(X_arr, nan=-999.0) 
         # 自動判斷分類 / 迴歸
         is_classification = y.nunique() <= 50
         mi_fn = mutual_info_classif if is_classification else mutual_info_regression

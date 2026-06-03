@@ -23,3 +23,7 @@ I2AI-handoff/
 # Node / Tailwind build — node_modules 不進 repo;css/tailwind.css 由 CI 編譯產生,不 commit
 node_modules/
 css/tailwind.css
+
+# 大 model blob (estimator.pkl) 自動 offload 到這個目錄,可被 MODEL_BLOB_DIR env 覆寫。
+# 內容絕對不能 commit (動輒 GB),要備份的話用 rsync / 跑 OS 級備份。
+model_blobs/

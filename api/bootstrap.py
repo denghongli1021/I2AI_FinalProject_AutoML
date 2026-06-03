@@ -78,3 +78,51 @@ def subprocess_env(extra: Optional[dict] = None) -> dict:
 # ────────────────────────────────────────────────────────────────
 _force_utf8_console()
 _load_dotenv()
+
+
+# ────────────────────────────────────────────────────────────────
+# 4. Runtime 設定常數
+#    放在 _load_dotenv() 之後,確保 .env 已生效再讀 env var。
+# ────────────────────────────────────────────────────────────────
+def _env_int(name: str, default: int) -> int:
+    """讀環境變數整數值;格式錯誤就 fallback 預設值。"""
+    raw = os.environ.get(name)
+    if raw is None or raw == "":
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        print(f"[bootstrap] env {name}={raw!r} 不是整數,使用預設 {default}", file=sys.stderr)
+        return default
+
+
+# DB 模型 pickle blob 大小上限 (MB)。
+# -1 = 不限制 (DB 塞不下時自動 fallback 到 file blob);可被環境變數 MODEL_BLOB_MAX_MB 覆寫。
+# 用在 storage.save_model() — 包括 sklearn estimator / scaler / X_test 跟 Daniel ensemble bundle。
+MODEL_BLOB_MAX_MB: int = _env_int("MODEL_BLOB_MAX_MB", -1)
+
+
+def model_blob_max_bytes() -> Optional[int]:
+    """回傳 blob 大小上限 (bytes);None = 不限制。"""
+    if MODEL_BLOB_MAX_MB < 0:
+        return None
+    return MODEL_BLOB_MAX_MB * 1024 * 1024
+
+
+# 大 blob 改寫到檔案系統的門檻 (MB)。
+# SQLite 單 row 上限 ~1GB、Postgres bytea 加 TOAST 上限也是 1GB,
+# 超過這個門檻就改寫到 MODEL_BLOB_DIR 下的檔案,DB 只存 "FILEBLOB:" + 絕對路徑。
+# 預設 50MB:典型 sklearn estimator 跟小型 ensemble 都會塞 DB;Daniel ensemble 跟大資料集自動進檔案。
+MODEL_BLOB_FILE_THRESHOLD_MB: int = _env_int("MODEL_BLOB_FILE_THRESHOLD_MB", 50)
+
+# File blob 落地的目錄。預設專案根目錄下的 model_blobs/,可被環境變數 MODEL_BLOB_DIR 覆寫。
+# 注意:這個目錄要列入 .gitignore;備份策略要把它一起備走。
+MODEL_BLOB_DIR: str = os.environ.get("MODEL_BLOB_DIR") or os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    "model_blobs",
+)
+
+
+def model_blob_file_threshold_bytes() -> int:
+    """回傳大 blob 改寫到檔案的門檻 (bytes)。"""
+    return max(0, MODEL_BLOB_FILE_THRESHOLD_MB) * 1024 * 1024

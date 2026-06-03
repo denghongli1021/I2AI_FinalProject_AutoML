@@ -153,6 +153,7 @@ class MetaLearnerStacker:
         self.k_best = k_best
         self.meta_model_ = None
         self.meta_name_: str = None
+        self._imputer = None
         self._x_scaler = None
         self._selector = None
 
@@ -259,12 +260,15 @@ class MetaLearnerStacker:
         from sklearn.linear_model import LogisticRegression
         from sklearn.preprocessing import StandardScaler
 
-        # 若傳入原始特徵，先標準化再拼入（避免高維 raw 特徵淹沒 OOF 機率）
+        # 若傳入原始特徵，先補值→標準化→特徵篩選再拼入（避免高維 raw 特徵淹沒 OOF 機率）
         X_orig_scaled = None
         if X_orig is not None:
-            self._x_scaler = StandardScaler()
-            X_orig_scaled = self._x_scaler.fit_transform(X_orig)
+            from sklearn.impute import SimpleImputer
             from sklearn.feature_selection import SelectKBest, f_classif
+            self._imputer = SimpleImputer(strategy='median')
+            X_orig_clean = self._imputer.fit_transform(X_orig)
+            self._x_scaler = StandardScaler()
+            X_orig_scaled = self._x_scaler.fit_transform(X_orig_clean)
             actual_k = min(self.k_best, X_orig_scaled.shape[1])
             self._selector = SelectKBest(f_classif, k=actual_k)
             X_orig_scaled = self._selector.fit_transform(X_orig_scaled, y)
@@ -318,6 +322,8 @@ class MetaLearnerStacker:
     def predict_proba(self, test_list: list, X_orig: np.ndarray = None) -> np.ndarray:
         X_orig_scaled = None
         if X_orig is not None and self._x_scaler is not None:
+            if self._imputer is not None:
+                X_orig = self._imputer.transform(X_orig)
             X_orig_scaled = self._x_scaler.transform(X_orig)
             if self._selector is not None:
                 X_orig_scaled = self._selector.transform(X_orig_scaled)
@@ -327,6 +333,8 @@ class MetaLearnerStacker:
     def predict(self, test_list: list, X_orig: np.ndarray = None) -> np.ndarray:
         X_orig_scaled = None
         if X_orig is not None and self._x_scaler is not None:
+            if self._imputer is not None:
+                X_orig = self._imputer.transform(X_orig)
             X_orig_scaled = self._x_scaler.transform(X_orig)
             if self._selector is not None:
                 X_orig_scaled = self._selector.transform(X_orig_scaled)

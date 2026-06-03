@@ -343,6 +343,7 @@ def run_tabular_cv(
 
     best_fold_score = -np.inf
     best_fold_model = None
+    best_fold_fb    = None   # 對應 best_fold_model 的 FeatureBuilder (SHAP 用)
 
     for seed_idx in range(n_seeds):
         cur_seed = SEED + seed_idx * 100
@@ -377,6 +378,7 @@ def run_tabular_cv(
             if val_score > best_fold_score:
                 best_fold_score = val_score
                 best_fold_model = model
+                best_fold_fb    = fb
 
             # 收集 (fb, model) 供 ensemble 推論 (傳 collect_folds=[] 才會收)
             if collect_folds is not None:
@@ -391,6 +393,8 @@ def run_tabular_cv(
         np.save(os.path.join(ARTIFACTS_DIR, f"{tag}_test.npy"), test_preds)
         if best_fold_model is not None:
             joblib.dump(best_fold_model, os.path.join(ARTIFACTS_DIR, f"{tag}_best_model.pkl"))
+        if best_fold_fb is not None:
+            joblib.dump(best_fold_fb, os.path.join(ARTIFACTS_DIR, f"{tag}_best_model_fb.pkl"))
 
     return oof, test_preds
 
