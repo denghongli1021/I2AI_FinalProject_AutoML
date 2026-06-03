@@ -347,7 +347,9 @@ def main():
             pass
 
     HERE = os.path.dirname(os.path.abspath(__file__))
-    sys.path.insert(0, HERE)
+    PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(HERE)))
+    sys.path.insert(0, PROJECT_ROOT)  # 讓 `from src.xxx` 找到專案根目錄的 src/
+    sys.path.insert(0, HERE)          # 讓 `import pipeline` 找到同層的 pipeline.py
 
     # 確認模式
     presplit = bool(args.train_csv and args.test_csv)

@@ -735,11 +735,16 @@ async def train_pipeline_stream_endpoint(
                 frame.to_csv(_path, index=False)
                 return _path
 
-            # train:就地加上 target 欄 (剛 unpickle 出來、無人共用,可安全 mutate)
+            # train:加上 target 欄後寫暫存 CSV
+            # 注意:guest 模式 pp_entry 是 in-memory store 的共用 dict,不能直接寫 None 回去
+            # (會破壞第二次訓練);已登入用戶每次 get_preprocessor() 都重新 unpickle,寫回無害。
+            if X_train_df is None:
+                raise HTTPException(status_code=400,
+                    detail="預處理資料的 X_train 已遺失,請重新執行預處理再訓練。")
+            X_train_df = X_train_df.copy()
             X_train_df[pp_target] = list(y_train)
             train_csv_path = _df_to_temp_csv(X_train_df, f"daniel_{_safe}_train_")
             del X_train_df
-            pp_entry["X_train"] = None
 
             # 決定 test CSV:有 predict_csv 時用使用者上傳的 (套用同一個 preprocessor)
             predict_input_for_job: bytes | None = None
