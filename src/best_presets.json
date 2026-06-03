@@ -1,0 +1,52 @@
+{
+  "lgbm": {
+    "feature_set": "raw_stat",
+    "num_leaves": 63,
+    "learning_rate": 0.1,
+    "n_estimators": 2000,
+    "min_child_samples": 20,
+    "subsample": 0.8,
+    "colsample_bytree": 0.8,
+    "reg_alpha": 0.0,
+    "reg_lambda": 1.0
+  },
+  "xgb": {
+    "feature_set": "raw_stat",
+    "max_depth": 8,
+    "learning_rate": 0.1,
+    "n_estimators": 2000,
+    "subsample": 0.8,
+    "colsample_bytree": 0.8,
+    "min_child_weight": 1,
+    "reg_alpha": 0.0,
+    "reg_lambda": 1.0
+  },
+  "catboost": {
+    "feature_set": "raw_stat",
+    "depth": 8,
+    "learning_rate": 0.1,
+    "iterations": 2000,
+    "l2_leaf_reg": 3.0,
+    "bagging_temperature": 1.0
+  },
+  "rf": {
+    "feature_set": "raw_stat",
+    "n_estimators": 300,
+    "max_depth": null,
+    "min_samples_leaf": 2,
+    "max_features": "sqrt"
+  },
+  "logreg": {
+    "feature_set": "pca64",
+    "C": 1.0,
+    "solver": "lbfgs",
+    "penalty": "l2"
+  },
+  "extra_trees": {
+    "feature_set": "raw_stat",
+    "n_estimators": 300,
+    "max_depth": null,
+    "min_samples_leaf": 1,
+    "max_features": "sqrt"
+  }
+}

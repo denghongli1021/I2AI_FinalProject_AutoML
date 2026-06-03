@@ -1,29 +1,73 @@
+# ── 大型資料集 ────────────────────────────────────────────────────────────────
 openml_cc18_data/
+!openml_cc18_data/
+openml_cc18_data/*
+!openml_cc18_data/179_adult.csv
+openml_regression_data/
+ucr_ts_80*/
 Dataset/
-ucr_ts_80(時序資料)/
 visualization/dataset/
 visualization/plots/
 
-# 隊友分支的 git worktree (用 git worktree add 建,各自 checkout 一個 origin/* 分支)
-# 不是普通資料夾,不要 commit 進主分支
-teammate-branches/
-i2ai-team.code-workspace
+# ── 模型快取 ──────────────────────────────────────────────────────────────────
+autogluon_models/
 autogluon/
-.claude/
+artifacts/**
+!artifacts/single/
+!artifacts/single/179_adult/
+!artifacts/single/179_adult/**
+catboost_info/
+model_blobs/
 
-# Auth — 本機環境變數 / SQLite fallback DB,絕對不能 commit
+# ── 本地測試與內部文件 ─────────────────────────────────────────────────────────
+test/
+doc/
+LOG/
+logs/
+improve.txt
+improve.md
+
+# ── Claude / Codex 工作區 ─────────────────────────────────────────────────────
+.claude/
+AGENTS.md
+github_readme.md
+CLAUDE.md
+
+# ── 中間結果 CSV（不上傳）────────────────────────────────────────────────────
+baseline_batch_results.csv
+baseline_batch_results.prev.csv
+pipeline_time_batch_results.csv
+
+# ── 文件 ─────────────────────────────────────────────────────────────────────
+*.pdf
+
+# ── Python 編譯產物 ───────────────────────────────────────────────────────────
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# ── 虛擬環境 ──────────────────────────────────────────────────────────────────
+.venv/
+venv/
+env/
+
+# ── 機敏資訊 ──────────────────────────────────────────────────────────────────
 .env
+*.key
+*.log
 api/auth.db
 
-
-
-catboost_info/
-I2AI-handoff/
-
-# Node / Tailwind build — node_modules 不進 repo;css/tailwind.css 由 CI 編譯產生,不 commit
+# ── Node / Tailwind build ────────────────────────────────────────────────────
 node_modules/
 css/tailwind.css
 
-# 大 model blob (estimator.pkl) 自動 offload 到這個目錄,可被 MODEL_BLOB_DIR env 覆寫。
-# 內容絕對不能 commit (動輒 GB),要備份的話用 rsync / 跑 OS 級備份。
-model_blobs/
+# ── Git worktree / IDE ────────────────────────────────────────────────────────
+teammate-branches/
+i2ai-team.code-workspace
+I2AI-handoff/
+
+# ── IDE ───────────────────────────────────────────────────────────────────────
+.vscode/
+.idea/
