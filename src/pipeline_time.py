@@ -176,14 +176,15 @@ def _make_reg_loader(X, y=None, batch_size: int = 128, shuffle: bool = False):
 def build_reg_tabular_model(name: str, params: dict, seed: int = SEED, device: str = "cpu"):
     use_gpu = device == "cuda"
     if name == "lgbm":
-        return lgb.LGBMRegressor(**params, random_state=seed, n_jobs=-2, verbose=-1)
+        return lgb.LGBMRegressor(**params, random_state=seed, n_jobs=-2, verbose=-1, max_bin=63)
     if name == "xgb":
         return xgb.XGBRegressor(
             **params,
             early_stopping_rounds=100,
             random_state=seed,
             verbosity=0,
-            **({"device": "cuda"} if use_gpu else {"n_jobs": -2}),
+            n_jobs=-2,
+            max_bin=63,
         )
     if name == "catboost":
         if not _CATBOOST_OK:
@@ -440,8 +441,17 @@ class TabularRegHPO:
         global_cfg = global_cfg or {}
         folds = get_ts_folds(len(X), n_splits=scout_cv_folds)
 
+        # 原始欄位數多時限制特徵展開（ts_tabular 是 13× 展開，欄位數大時直接 OOM）
+        _n_raw = X.shape[1]
+        if _n_raw > 500:
+            _active_fs = ["raw"]           # 超多欄位：直接用 raw，跳過 13× 展開
+        elif _n_raw > 100:
+            _active_fs = ["ts_tabular"]    # 中等欄位：展開但不加 FFT
+        else:
+            _active_fs = TS_TABULAR_FEATURE_SETS
+
         # 預先計算所有 feature_set × fold 的特徵快取
-        fs_set = set(TS_TABULAR_FEATURE_SETS)
+        fs_set = set(_active_fs)
         cache = {}
         for fs in sorted(fs_set):
             for fi, (tr, vl) in enumerate(folds):
@@ -453,7 +463,7 @@ class TabularRegHPO:
         direction = reg_metric_direction(self.metric)
 
         for name in self.model_names:
-            fs_candidates = TS_TABULAR_FEATURE_SETS
+            fs_candidates = _active_fs
 
             def objective(trial, _name=name, _fs=fs_candidates):
                 merged = _reg_tabular_space(_name, trial, _fs)
@@ -514,6 +524,15 @@ class TabularRegHPO:
 
         folds = get_ts_folds(len(X), n_splits=self.n_folds)
 
+        # 原始欄位數多時限制特徵展開（ts_tabular 是 13× 展開，欄位數大時直接 OOM）
+        _n_raw = X.shape[1]
+        if _n_raw > 500:
+            _active_fs = ["raw"]
+        elif _n_raw > 100:
+            _active_fs = ["ts_tabular"]
+        else:
+            _active_fs = TS_TABULAR_FEATURE_SETS
+
         # 預算所有 feature_set × fold
         fs_set = set()
         for n in self.model_names:
@@ -523,7 +542,7 @@ class TabularRegHPO:
             if lk:
                 fs_set.add(lk)
             else:
-                fs_set.update(TS_TABULAR_FEATURE_SETS)
+                fs_set.update(_active_fs)
         print(f"  [HPO] Pre-computing {len(fs_set)} feature set(s) × {len(folds)} folds ...")
         cache = {}
         for fs in sorted(fs_set):
@@ -537,7 +556,7 @@ class TabularRegHPO:
             n_tr = int(self.per_model_trials.get(name, self.n_trials))
             if n_tr <= 0:
                 continue
-            fs_candidates = TS_TABULAR_FEATURE_SETS
+            fs_candidates = _active_fs
             _locked = locked_feature_sets.get(name)
 
             def objective(trial, _name=name, _fs=fs_candidates, _locked=_locked):

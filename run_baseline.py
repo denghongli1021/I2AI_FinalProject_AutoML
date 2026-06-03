@@ -110,7 +110,10 @@ _TIME_RESULT_COLS = [
 def _append_time_result(out_path: str, row: dict):
     """Append one result row to time_results.csv; write header only if file is new."""
     df = pd.DataFrame([{c: row.get(c) for c in _TIME_RESULT_COLS}])
-    df.to_csv(out_path, mode="a", header=not os.path.exists(out_path), index=False)
+    with open(out_path, mode="a", encoding="utf-8", newline="") as f:
+        df.to_csv(f, header=f.tell() == 0, index=False)
+        f.flush()
+        os.fsync(f.fileno())
 
 
 class _AGWrapper:
