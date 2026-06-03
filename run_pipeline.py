@@ -50,7 +50,7 @@ def _auto_detect_task(y: pd.Series) -> str:
     if y.dtype == object or y.dtype == bool:
         return "classification"
     n_unique = y.nunique()
-    return "classification" if (n_unique <= 50 and n_unique / len(y) < 0.30) else "regression"
+    return "classification" if (n_unique <= 50 and n_unique / max(len(y), 1) < 0.30) else "regression"
 
 
 def _find_target_col(df: pd.DataFrame) -> str:

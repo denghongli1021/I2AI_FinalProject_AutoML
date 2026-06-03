@@ -66,15 +66,19 @@ def _auto_detect_task(filename: str, y: pd.Series) -> str:
 
 def _build_shap_col_names(feature_set: str, orig_names: list, n_transformed: int) -> list:
     n = len(orig_names)
-    if feature_set == "raw":
-        return orig_names[:n_transformed]
-    if feature_set == "signal":
-        base = orig_names[:n]
-        return (base + [f"{nm}_l2" for nm in base])[:n_transformed]
-    if feature_set in ("pca64", "svd64", "kpca32"):
-        return [f"PC{i}" for i in range(n_transformed)]
-    extra = [f"feat_{i}" for i in range(max(0, n_transformed - n))]
-    return (orig_names + extra)[:n_transformed]
+    if any(k in feature_set for k in ("pca", "svd", "kpca")):
+        return [f"{feature_set}_{i}" for i in range(n_transformed)]
+    if n_transformed == n:
+        return orig_names.copy()
+    if "signal" in feature_set:
+        base = orig_names.copy()
+        extended = base + [f"{nm}_l2" for nm in base]
+        if n_transformed <= len(extended):
+            return extended[:n_transformed]
+        return extended + [f"{feature_set}_{i}" for i in range(n_transformed - len(extended))]
+    if n_transformed > n:
+        return orig_names + [f"{feature_set}_{i}" for i in range(n_transformed - n)]
+    return orig_names[:n_transformed]
 
 
 def _run_shap_visualization(artifacts_dir: str, X_test_raw: np.ndarray,

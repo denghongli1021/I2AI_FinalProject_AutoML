@@ -190,7 +190,7 @@ def _run_regression(X_tr, y_tr, X_te, y_te, target_col, source_tag,
         skip_tabular=args.skip_tabular,
         skip_dl=args.skip_dl,
         artifacts_dir=run_artifacts_dir,
-        metric="rmse",
+        metric=args.reg_metric,
     )
 
     # test_blend / test_stack 是回歸單值預測 (1D)
@@ -331,6 +331,8 @@ def main():
     parser.add_argument("--target", default=None)
     parser.add_argument("--ts", action="store_true")
     parser.add_argument("--metric", default="f1", choices=["f1", "accuracy"])
+    parser.add_argument("--reg-metric", default="rmse", choices=["rmse", "r2", "mae"],
+                        help="回歸優化指標（預設 rmse）")
     parser.add_argument("--fast", action="store_true")
     parser.add_argument("--time-limit", type=float, default=0)
     parser.add_argument("--skip-tabular", action="store_true")
@@ -349,7 +351,7 @@ def main():
     HERE = os.path.dirname(os.path.abspath(__file__))
     PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(HERE)))
     sys.path.insert(0, PROJECT_ROOT)  # 讓 `from src.xxx` 找到專案根目錄的 src/
-    sys.path.insert(0, HERE)          # 讓 `import pipeline` 找到同層的 pipeline.py
+    sys.path.insert(0, HERE)          # 讓 `import pipeline` 找到 api/train/pipeline/pipeline.py
 
     # 確認模式
     presplit = bool(args.train_csv and args.test_csv)

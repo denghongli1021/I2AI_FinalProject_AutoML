@@ -63,6 +63,9 @@ app.add_middleware(
 # 啟動時建表 (User table)
 init_db()
 
+# 啟動時還原 guest pipeline 模型 (重啟後 SHAP 不再顯示「已不在記憶體」)
+storage.restore_guest_models()
+
 # 掛 auth router (/api/auth/*)
 app.include_router(auth_router, prefix="/api")
 
@@ -254,7 +257,7 @@ async def preprocess_transform_endpoint(
         # 注意:daniel 最新版 preprocess_for_training 拿掉了 use_mice / use_mi_selection /
         # mi_threshold 三個 flag — MICE 跟 MI selection 改成內部自動依資料特性決定。
         # 若有 adv_test_df,enable_adv_val=True 才會跑;沒給就跳過。
-        X_train, X_test, y_train, y_test, fitted = preprocess_for_training(
+        X_train, X_test, y_train, y_test, fitted, adv_report = preprocess_for_training(
             df, target, test_size=testSize,
             test_data_source=adv_test_df,
             enable_adv_val=(adv_test_df is not None),
@@ -307,6 +310,8 @@ async def preprocess_transform_endpoint(
         # v3 透明度:實際自動觸發的進階特徵工程 + MI 篩選結果
         "appliedFeatureSteps": getattr(fitted_tree, "applied_feature_steps_", []),
         "miSelection": getattr(fitted_tree, "mi_selection_", None),
+        # 對抗驗證結果（僅上傳 test.csv 時才有，否則為 null）
+        "adversarialReport": adv_report,
     }
 
 
@@ -589,6 +594,7 @@ async def train_pipeline_stream_endpoint(
     target: str | None = Form(None),
     timeSeries: bool = Form(False),
     metric: str = Form("f1"),
+    regMetric: str = Form("rmse"),
     fast: bool = Form(True),
     timeLimit: float = Form(0),
     skipTabular: bool = Form(False),
@@ -627,8 +633,9 @@ async def train_pipeline_stream_endpoint(
 
     jobs: list[dict[str, Any]] = []
     base_options = {
-        "target": target, "timeSeries": timeSeries, "metric": metric, "fast": fast,
-        "timeLimit": timeLimit, "skipTabular": skipTabular, "skipDl": skipDl, "noNas": noNas,
+        "target": target, "timeSeries": timeSeries, "metric": metric, "regMetric": regMetric,
+        "fast": fast, "timeLimit": timeLimit, "skipTabular": skipTabular, "skipDl": skipDl,
+        "noNas": noNas,
     }
     dataset_name_for_run = "(uploaded)"
     # 為了在 create_training_run 之前推 task_type:三個 source 分支都會在這存一份 target 欄
@@ -805,7 +812,7 @@ async def train_pipeline_stream_endpoint(
         task_type=inferred_task_type,
         sources=src_list if from_store else ["upload"],
         options={
-            "metric": metric, "fast": fast, "timeSeries": timeSeries,
+            "metric": metric, "regMetric": regMetric, "fast": fast, "timeSeries": timeSeries,
             "skipDl": skipDl, "noNas": noNas, "skipTabular": skipTabular,
             "timeLimit": timeLimit, "preprocessorId": preprocessorId,
             "hasPredictFile": predict_csv_bytes is not None,

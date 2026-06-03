@@ -135,7 +135,9 @@ def run_pipeline(
         tmp_csv = None
 
     # 組指令
-    cmd = [sys.executable, "-u", _RUNNER_SCRIPT, "--metric", str(options.get("metric", "f1"))]
+    cmd = [sys.executable, "-u", _RUNNER_SCRIPT,
+           "--metric", str(options.get("metric", "f1")),
+           "--reg-metric", str(options.get("regMetric", "rmse"))]
     if tmp_csv:
         cmd += ["--csv", tmp_csv]
     else:

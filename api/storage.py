@@ -498,6 +498,7 @@ def save_model(
             "preprocessorId": preprocessor_id,
             "hyperparameters": hyperparameters or {},
         }, user)
+        _save_guest_model_to_disk(model_id, MODELS[model_id])
         return model_id
 
     # DB path — pickle 失敗時 (例如 Lock / 不可序列化物件) 才跳過。
@@ -950,3 +951,64 @@ def sanitize_for_json(obj):
     if isinstance(obj, (list, tuple)):
         return [sanitize_for_json(v) for v in obj]
     return obj
+
+
+# ============================================================
+# GUEST PERSISTENCE — pipeline ensemble bundles 重啟後存活
+# ============================================================
+
+def _guest_model_dir() -> str:
+    d = os.path.join(MODEL_BLOB_DIR, "guest")
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+def _save_guest_model_to_disk(model_id: str, entry: dict) -> None:
+    """只持久化 pipeline ensemble bundle (estimator 是 dict 且 version==1)。
+    sklearn 模型因為無 pkl_bytes 傳入，不在這裡處理。
+    """
+    estimator = entry.get("estimator")
+    if not (isinstance(estimator, dict) and estimator.get("version") == 1):
+        return
+    try:
+        d = _guest_model_dir()
+        with open(os.path.join(d, f"{model_id}_estimator.pkl"), "wb") as f:
+            pickle.dump(estimator, f, protocol=pickle.HIGHEST_PROTOCOL)
+        meta = {k: v for k, v in entry.items() if k != "estimator"}
+        with open(os.path.join(d, f"{model_id}_meta.pkl"), "wb") as f:
+            pickle.dump(meta, f, protocol=pickle.HIGHEST_PROTOCOL)
+        print(f"[guest persist] 已儲存 {model_id} → model_blobs/guest/", flush=True)
+    except Exception as e:
+        print(f"[guest persist] 儲存失敗 {model_id}: {e}", flush=True)
+
+
+def restore_guest_models() -> int:
+    """啟動時從 model_blobs/guest/ 還原 pipeline ensemble 到 MODELS dict。
+    回傳還原的模型數量。
+    """
+    d = os.path.join(MODEL_BLOB_DIR, "guest")
+    if not os.path.isdir(d):
+        return 0
+    restored = 0
+    for fname in sorted(os.listdir(d)):
+        if not fname.endswith("_meta.pkl"):
+            continue
+        model_id = fname[:-9]  # strip "_meta.pkl"
+        if model_id in MODELS:
+            continue
+        est_path  = os.path.join(d, f"{model_id}_estimator.pkl")
+        meta_path = os.path.join(d, fname)
+        if not os.path.exists(est_path):
+            continue
+        try:
+            with open(est_path, "rb") as f:
+                estimator = pickle.load(f)
+            with open(meta_path, "rb") as f:
+                meta = pickle.load(f)
+            MODELS[model_id] = {**meta, "estimator": estimator}
+            restored += 1
+        except Exception as e:
+            print(f"[guest persist] 還原失敗 {model_id}: {e}", flush=True)
+    if restored:
+        print(f"[guest persist] 啟動還原 {restored} 個 guest pipeline model", flush=True)
+    return restored

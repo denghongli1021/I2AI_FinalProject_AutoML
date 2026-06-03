@@ -3208,6 +3208,33 @@ function renderAppliedSteps(res, opts) {
     rows.push(`<div class="text-xs px-3 py-2 rounded-r border-l-2 bg-dark-800/40 border-dark-600 text-dark-400">○ MI 特徵選擇未啟用</div>`);
   }
 
+  // 4. 對抗驗證結果
+  const adv = res.adversarialReport;
+  if (!adv) {
+    rows.push(`<div class="text-xs px-3 py-2 rounded-r border-l-2 bg-dark-800/40 border-dark-600 text-dark-400">○ 對抗驗證未執行（未上傳 test.csv）</div>`);
+  } else if (adv.verdict === 'error') {
+    rows.push(`<div class="text-xs px-3 py-2 rounded-r border-l-2 bg-warning-500/10 border-warning-500 text-warning-300">⚠ 對抗驗證執行失敗：${escapeHtml(adv.message || '')}</div>`);
+  } else {
+    const auc = typeof adv.auc_mean === 'number' ? adv.auc_mean.toFixed(4) : '—';
+    const nDropped = adv.n_dropped ?? (adv.features_to_drop || []).length;
+    const verdictColor = adv.verdict === 'ok'
+      ? 'bg-success-500/10 border-success-500 text-success-300'
+      : adv.verdict === 'warning'
+        ? 'bg-warning-500/10 border-warning-500 text-warning-300'
+        : 'bg-danger-500/10 border-danger-500 text-danger-300';
+    const verdictIcon = adv.verdict === 'ok' ? '✓' : adv.verdict === 'warning' ? '⚠' : '✕';
+    const droppedFeats = adv.features_to_drop || [];
+    const droppedStr = droppedFeats.length
+      ? droppedFeats.slice(0, 10).map(escapeHtml).join('、') + (droppedFeats.length > 10 ? ` …+${droppedFeats.length - 10}` : '')
+      : '無';
+    rows.push(`<div class="text-xs px-3 py-2 rounded-r border-l-2 ${verdictColor}">
+      ${verdictIcon} 對抗驗證：AUC = <b>${auc}</b>　${escapeHtml(adv.message || '')}
+      ${nDropped > 0
+        ? `<div class="mt-1 text-dark-300">已移除 <b>${nDropped}</b> 個漂移特徵：<span class="font-mono">${droppedStr}</span></div>`
+        : `<div class="mt-1 text-dark-400">無特徵被移除</div>`}
+    </div>`);
+  }
+
   body.innerHTML = rows.join('');
   card.classList.remove('hidden');
 }
@@ -3640,17 +3667,19 @@ function renderRealExperimentsPage() {
     }
   }
 
-  // Populate target select with all numeric columns
+  // Populate target select with all columns (numeric + categorical + boolean)
   const targetSel = document.getElementById('exp-target-select');
   targetSel.innerHTML = '';
   ds.analysis.forEach(col => {
-    if (col.type === 'numeric') {
-      const opt = document.createElement('option');
-      opt.value = col.name;
-      opt.textContent = `${col.name} (${col.type})`;
-      targetSel.appendChild(opt);
-    }
+    const opt = document.createElement('option');
+    opt.value = col.name;
+    opt.textContent = `${col.name} (${col.type})`;
+    targetSel.appendChild(opt);
   });
+  // 自動選常見目標欄名；找不到則保持第一欄
+  const _TARGET_PRIO = ['target', 'label', 'class', 'y', 'c'];
+  const _autoTarget = _TARGET_PRIO.find(n => ds.analysis.some(c => c.name === n));
+  if (_autoTarget) targetSel.value = _autoTarget;
 
   // --- Feature checkboxes ---
   const featBox = document.getElementById('exp-feature-checkboxes');

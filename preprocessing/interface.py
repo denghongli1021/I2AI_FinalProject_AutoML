@@ -318,6 +318,7 @@ def preprocess_for_training(
 
     # 2. 🛡️ 測試集處理與切割邏輯
     y_test = None
+    adv_result = None  # 對抗驗證結果，無測試集時保持 None
     if test_data_source is not None:
         # ── 情況 A：使用者有提供真實獨立 Test 集 ──
         print(">>> [Phase 1.5] 測試資料載入與整合 (Test Ingestion)")
@@ -337,17 +338,19 @@ def preprocess_for_training(
             print("\n>>> [Phase 1.8] 啟動對抗驗證 (Adversarial Validation)")
             try:
                 adv_result = run_adversarial_validation(
-                    train_df=X_train_raw, 
-                    test_df=X_test_raw, 
-                    target_col=None, 
+                    train_df=X_train_raw,
+                    test_df=X_test_raw,
+                    target_col=None,
                     auc_threshold_warn=0.7,
                     auc_threshold_danger=0.85
                 )
                 print_adversarial_report(adv_result)
-                # 自動刪除有害特徵
+                n_before = X_train_raw.shape[1]
                 X_train_raw, X_test_raw = drop_adversarial_features(X_train_raw, X_test_raw, adv_result)
+                adv_result["n_dropped"] = n_before - X_train_raw.shape[1]
             except Exception as e:
                 print(f"⚠️ [預處理模組] 對抗驗證執行失敗，已跳過: {e}")
+                adv_result = {"verdict": "error", "message": str(e)}
 
         # 🧹 情況 A 記憶體清理
         try:
@@ -488,7 +491,7 @@ def preprocess_for_training(
     preprocessors = {"tree": tree_preprocessor, "dl": dl_preprocessor}
 
     print("[預處理模組] 雙軌處理完成！")
-    return X_train_dict, X_test_dict, y_train, y_test, preprocessors
+    return X_train_dict, X_test_dict, y_train, y_test, preprocessors, adv_result
 
 def preprocess_for_timeseries(
     df: pd.DataFrame,
