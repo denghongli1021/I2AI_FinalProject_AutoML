@@ -38,7 +38,8 @@ except Exception:
 from src.ensemble import NelderMeadBlender, MetaLearnerStacker
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
-_DEFAULT_PRESETS = os.path.join(_HERE, "src", "best_presets.json")
+# api/train/pipeline/src/ 已移除，改指向根目錄的 src/best_presets.json
+_DEFAULT_PRESETS = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(_HERE))), "src", "best_presets.json")
 
 _ALL_TABULAR_MODELS = ["lgbm", "xgb", "catboost", "rf", "logreg", "extra_trees", "knn"]
 _DEFAULT_MLP_ARCH = {

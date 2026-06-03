@@ -484,20 +484,13 @@ def main():
                 print(f"__RESULT_JSON__:{json.dumps({'ok': False, 'error': '沒有可用的數值欄位 (pipeline 僅讀數值型,請先做 one-hot 或選只含數值欄的資料集)'})}")
                 return 1
 
-            # NOTE: 不要再用 `args.ts and task != "classification"`,那會讓「單一 CSV + 勾時序 +
-            # 分類 target」的情境跑成 stratified random fold,破壞時序回測 → label leakage。
-            # Mode B 一律用 bool(args.ts),這裡跟它對齊。
+            # 分類任務樣本獨立（UCR 格式每列是獨立訊號），無論是否標記 --ts
+            # 均使用 Stratified split；Chronological 僅適用於回歸（已在上方 return）。
             is_forecasting = bool(args.ts)
             try:
-                if not is_forecasting:
-                    X_tr, X_te, y_tr, y_te = train_test_split(
-                        X_all, y_all, test_size=0.2, random_state=SEED, stratify=y_all)
-                    split_mode = "Random Stratified"
-                else:
-                    idx = int(len(X_all) * 0.8)
-                    X_tr, X_te = X_all[:idx], X_all[idx:]
-                    y_tr, y_te = y_all[:idx], y_all[idx:]
-                    split_mode = "Chronological"
+                X_tr, X_te, y_tr, y_te = train_test_split(
+                    X_all, y_all, test_size=0.2, random_state=SEED, stratify=y_all)
+                split_mode = "Stratified (TS cls)" if is_forecasting else "Random Stratified"
             except ValueError:
                 X_tr, X_te, y_tr, y_te = train_test_split(X_all, y_all, test_size=0.2, random_state=SEED)
                 split_mode = "Random (no stratify)"
@@ -513,7 +506,8 @@ def main():
         # ── 呼叫 Daniel pipeline ──────────────────────────────────────────
         budget = _pl.TimeBudget(limit_sec=args.time_limit, t_start=t0)
         cfg = _pl.get_cfg(args.fast, n_samples=len(y_tr))
-        cfg["is_timeseries"] = is_forecasting
+        # 分類任務（TS 回歸已在上方 return）樣本獨立 → StratifiedKFold；cf. run_pipeline_time.py:286
+        cfg["is_timeseries"] = False
 
         # 每次跑用獨立 artifacts dir (timestamp 為後綴),避免同 CSV 第二次跑時
         # OOF/.npy 快取命中導致 fold model 沒重訓 → ensemble bundle 拒絕 persist

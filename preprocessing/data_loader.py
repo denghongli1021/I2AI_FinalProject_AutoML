@@ -3,7 +3,7 @@ import gc  # 🆕 引入 Python 內建的垃圾回收模組
 from typing import List, Union
 import re
 
-from preprocessing.utils.memory_optimizer import reduce_mem_usage
+from .utils.memory_optimizer import reduce_mem_usage
 
 def load_and_merge_data(data_source: Union[pd.DataFrame, str, List[str]], main_file_index: int = 0) -> pd.DataFrame:
     """

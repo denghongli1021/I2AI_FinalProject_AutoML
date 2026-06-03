@@ -6,9 +6,9 @@ import numpy as np
 #   - DatetimeFeatureExtractor：日期欄→年/月/日/星期/週期特徵（即時計算，無洩漏）
 #   - build_tree_category_pipeline：OrdinalEncoder 類別編碼（含未知值防呆）
 #   - reduce_mem_usage：記憶體壓縮
-from preprocessing.processors.time_processor import DatetimeFeatureExtractor
-from preprocessing.processors.category_processor import build_tree_category_pipeline
-from preprocessing.utils.memory_optimizer import reduce_mem_usage
+from ..processors.time_processor import DatetimeFeatureExtractor
+from ..processors.category_processor import build_tree_category_pipeline
+from ..utils.memory_optimizer import reduce_mem_usage
 
 
 class TSDataProcessor:

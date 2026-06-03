@@ -1,10 +1,5 @@
-# preprocessing/core/__init__.py
+# api/preprocess/core/__init__.py
+# 直接從外層 preprocessing.core 重新匯出，避免維護重複副本
+from preprocessing.core import AutoRouter, PipelineAssembler
 
-from .router import AutoRouter
-from .assembler import PipelineAssembler
-
-# 定義當外部使用 from preprocessing.core import * 時會匯入的內容
-__all__ = [
-    'AutoRouter',
-    'PipelineAssembler'
-]
+__all__ = ["AutoRouter", "PipelineAssembler"]

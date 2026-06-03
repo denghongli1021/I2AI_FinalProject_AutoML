@@ -150,7 +150,24 @@ def _array_to_dataframe(
     """
     if sp.issparse(array):
         array = array.toarray()
-    return pd.DataFrame(array, columns=feature_names).astype(np.float32)
+    df = pd.DataFrame(array, columns=feature_names)
+    # 【inf / float32 溢位防禦】
+    # feature engineering (poly2 / raw_stat / FFT 等) 對大值欄位做 X_i × X_j
+    # 後可能產生 > float32 上限 (~3.4e38) 的值，astype(np.float32) 直接溢位成 ±inf。
+    # 下游 StandardScaler / KNNImputer / 對抗驗證的 classifier 看到 inf 就拋
+    # "Input X contains infinity or a value too large for dtype('float32')."
+    #
+    # 修法（順序很重要）：
+    #   ① 先把 inf → NaN（保留「異常值」訊號讓 Imputer 接手，不要降級成 F32_MAX）
+    #   ② clip 殘餘的超大有限值到 float32 安全範圍（防 astype 溢位）
+    #   ③ astype(np.float32) 此時不會再產生新 inf
+    #   ④ 保險再 replace 一次（避免 1.0 / 0.0 之類 ufunc 在 cast 階段又產生 inf）
+    F32_MAX = float(np.finfo(np.float32).max)
+    df = df.replace([np.inf, -np.inf], np.nan)
+    df = df.clip(lower=-F32_MAX, upper=F32_MAX)
+    df = df.astype(np.float32)
+    df = df.replace([np.inf, -np.inf], np.nan)
+    return df
 
 
 # ──────────────────────────────────────────────────────────────────
