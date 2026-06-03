@@ -51,13 +51,29 @@ _IS_SQLITE = _DATABASE_URL.startswith("sqlite")
 _PG_POOL_KWARGS = {} if _IS_SQLITE else {"pool_size": 2, "max_overflow": 3, "pool_recycle": 1800}
 
 # SQLite 多執行緒需要 check_same_thread=False;Postgres 不用
+# SQLite 額外加 timeout=30:預設 5s 太短,SHAP 背景 worker 寫 DB 跟新 training 撞鎖時會直接拋
+# OperationalError: database is locked。給 30 秒讓 sqlite3 內建 retry,實務上幾乎不會再爆。
 engine = create_engine(
     _DATABASE_URL,
-    connect_args={"check_same_thread": False} if _IS_SQLITE else {},
+    connect_args={"check_same_thread": False, "timeout": 30.0} if _IS_SQLITE else {},
     pool_pre_ping=True,
     **_PG_POOL_KWARGS,
 )
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+
+# SQLite 開 WAL 模式 — 大幅減少 writer/reader 競爭,SHAP worker 寫的同時其他 thread 還能讀。
+# 預設 journal_mode=DELETE 會把整個 DB 鎖死。WAL = Write-Ahead Logging。
+if _IS_SQLITE:
+    from sqlalchemy import event
+    @event.listens_for(engine, "connect")
+    def _set_sqlite_pragma(dbapi_conn, _connection_record):
+        cur = dbapi_conn.cursor()
+        try:
+            cur.execute("PRAGMA journal_mode=WAL")
+            cur.execute("PRAGMA synchronous=NORMAL")  # 配合 WAL 提高寫入吞吐
+            cur.execute("PRAGMA busy_timeout=30000")  # 30s,跟 connect_args 對齊
+        finally:
+            cur.close()
 
 
 class Base(DeclarativeBase):

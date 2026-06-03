@@ -2959,6 +2959,7 @@ async function runPreprocessTransform() {
     renderFeatureGroups(res.featureGroups);
     renderTransformResult(res);
     renderAppliedSteps(res, { useMice, useMiSelection });
+    renderAdversarialValidation(res.adversarialValidation);
     renderInferenceForm(ds, target);
     ppLastPreprocessorId = res.preprocessorId;
     ppLastFeatureColumns = (ds.headers || []).filter(h => h !== target);
@@ -2972,6 +2973,8 @@ async function runPreprocessTransform() {
       trainSize: res.trainSize,
       testSize: res.testSize,
       featureCount: res.transformedFeatureCount,
+      // 對抗驗證 path 的 testSize 是「上傳的 test.csv 列數」,沒有 label,跟 holdout 完全不同
+      isAdversarial: !!(res.adversarialValidation && res.adversarialValidation.verdict),
     });
     document.getElementById('pp-audit-section').classList.remove('hidden');
     document.getElementById('pp-groups-section').classList.remove('hidden');
@@ -3209,6 +3212,77 @@ function renderAppliedSteps(res, opts) {
   }
 
   body.innerHTML = rows.join('');
+  card.classList.remove('hidden');
+}
+
+// 對抗驗證結果渲染 — 只有 res.adversarialValidation 非 null 才會顯示卡片
+function renderAdversarialValidation(adv) {
+  const card = document.getElementById('pp-adversarial-card');
+  if (!card) return;
+  // 沒做或失敗 → 不顯示
+  if (!adv || adv.verdict === 'skipped' || adv.error) {
+    card.classList.add('hidden');
+    return;
+  }
+
+  const verdict = adv.verdict || 'ok';
+  const aucMean = (typeof adv.auc_mean === 'number') ? adv.auc_mean.toFixed(4) : '—';
+  const aucStd  = (typeof adv.auc_std  === 'number') ? adv.auc_std.toFixed(4)  : '—';
+
+  // verdict badge 顏色
+  const verdictMap = {
+    ok:      { label: '✓ 分布一致',  cls: 'bg-success-500/20 text-success-300 border border-success-500/40',
+               rowCls: 'bg-success-500/5 border-l-2 border-success-500' },
+    warning: { label: '⚠ 輕微漂移',  cls: 'bg-warning-500/20 text-warning-300 border border-warning-500/40',
+               rowCls: 'bg-warning-500/5 border-l-2 border-warning-500' },
+    danger:  { label: '🚨 嚴重漂移', cls: 'bg-danger-500/20 text-danger-300 border border-danger-500/40',
+               rowCls: 'bg-danger-500/5 border-l-2 border-danger-500' },
+  };
+  const v = verdictMap[verdict] || verdictMap.ok;
+  const badge = document.getElementById('pp-adv-verdict-badge');
+  if (badge) { badge.textContent = v.label; badge.className = `text-xs px-2 py-0.5 rounded-full font-semibold ${v.cls}`; }
+
+  const summaryRow = document.getElementById('pp-adv-summary-row');
+  if (summaryRow) summaryRow.className = `flex items-center gap-4 px-3 py-2 rounded-lg ${v.rowCls}`;
+
+  document.getElementById('pp-adv-auc').textContent       = `${aucMean} ± ${aucStd}`;
+  document.getElementById('pp-adv-message').textContent   = adv.message || '';
+
+  // 被剔除的間諜特徵
+  const toDrop = adv.features_to_drop || [];
+  const droppedWrap = document.getElementById('pp-adv-dropped-wrap');
+  if (toDrop.length > 0) {
+    droppedWrap.classList.remove('hidden');
+    document.getElementById('pp-adv-dropped-count').textContent = `(共 ${toDrop.length} 個)`;
+    document.getElementById('pp-adv-dropped-list').innerHTML = toDrop.map(f =>
+      `<span class="text-xs px-2 py-1 rounded bg-danger-500/10 border border-danger-500/30 text-danger-300 font-mono">✕ ${escapeHtml(f)}</span>`
+    ).join('');
+  } else {
+    droppedWrap.classList.add('hidden');
+  }
+
+  // Top 重要性(取前 10,排除已被剔除的)
+  const fis = (adv.feature_importances || []).filter(fi => !toDrop.includes(fi.feature)).slice(0, 10);
+  const topWrap = document.getElementById('pp-adv-top-wrap');
+  if (fis.length > 0) {
+    topWrap.classList.remove('hidden');
+    const maxImp = fis[0].importance || 1;
+    document.getElementById('pp-adv-top-list').innerHTML = fis.map((fi, i) => {
+      const pct = Math.max(2, Math.round((fi.importance / maxImp) * 100));
+      // bg 用 inline style — bg-primary-500/60 動態 innerHTML 注入時 Tailwind 沒掃到不會編譯成 CSS
+      return `<div class="flex items-center gap-2 text-xs">
+        <span class="text-dark-500 font-mono w-5 text-right">${i + 1}.</span>
+        <span class="text-dark-200 font-mono w-40 truncate" title="${escapeHtml(fi.feature)}">${escapeHtml(fi.feature)}</span>
+        <div class="flex-1 h-2 bg-dark-800 rounded-full overflow-hidden">
+          <div class="h-full rounded-full" style="width:${pct}%; background-color: rgba(59, 130, 246, 0.7);"></div>
+        </div>
+        <span class="text-dark-400 font-mono w-16 text-right">${fi.importance.toFixed(1)}</span>
+      </div>`;
+    }).join('');
+  } else {
+    topWrap.classList.add('hidden');
+  }
+
   card.classList.remove('hidden');
 }
 
@@ -3640,17 +3714,45 @@ function renderRealExperimentsPage() {
     }
   }
 
-  // Populate target select with all numeric columns
+  // Populate target select with ALL columns (不只 numeric)
+  // 非 numeric target 也合法 (例如 categorical 用於分類);但「原始資料集」這條路只接 numeric target,
+  // 所以下方會在 change 事件鎖掉 raw checkbox。
   const targetSel = document.getElementById('exp-target-select');
   targetSel.innerHTML = '';
   ds.analysis.forEach(col => {
-    if (col.type === 'numeric') {
-      const opt = document.createElement('option');
-      opt.value = col.name;
-      opt.textContent = `${col.name} (${col.type})`;
-      targetSel.appendChild(opt);
-    }
+    const opt = document.createElement('option');
+    opt.value = col.name;
+    opt.textContent = `${col.name} (${col.type})`;
+    opt.dataset.colType = col.type;
+    targetSel.appendChild(opt);
   });
+
+  // 【非 numeric target 自動鎖原始資料集】
+  // 原始資料集那條 ML 路徑只接 numeric target (回歸/分類都要先 to-number),
+  // 選 categorical/text/datetime 時自動 uncheck + disable 原始資料集 checkbox,
+  // 強制 user 走預處理過的資料。
+  const srcRawCb = document.getElementById('exp-src-raw');
+  const srcPpCb  = document.getElementById('exp-src-pp');
+  const _applyTargetTypeLock = () => {
+    const selected = targetSel.options[targetSel.selectedIndex];
+    if (!selected || !srcRawCb) return;
+    const isNumeric = (selected.dataset.colType === 'numeric');
+    if (isNumeric) {
+      srcRawCb.disabled = false;
+      const lbl = srcRawCb.closest('label');
+      if (lbl) lbl.classList.remove('opacity-40', 'cursor-not-allowed');
+    } else {
+      srcRawCb.checked = false;
+      srcRawCb.disabled = true;
+      const lbl = srcRawCb.closest('label');
+      if (lbl) lbl.classList.add('opacity-40', 'cursor-not-allowed');
+      // 自動勾起預處理 (確保 user 還有路可走)
+      if (srcPpCb && !srcPpCb.disabled) srcPpCb.checked = true;
+    }
+  };
+  targetSel.addEventListener('change', _applyTargetTypeLock);
+  // 初始化也跑一次 (進畫面預設選的可能是 numeric 也可能不是)
+  _applyTargetTypeLock();
 
   // --- Feature checkboxes ---
   const featBox = document.getElementById('exp-feature-checkboxes');
@@ -3975,7 +4077,12 @@ function renderRealExperimentsPage() {
         opt.value = p.id;
         // 用建立時間取代 ID 顯示 (人讀友善);沒 createdAt 的舊資料退回到 ID 顯示
         const stamp = p.createdAt ? _formatPreprocessTime(p.createdAt * 1000) : p.id;
-        opt.textContent = `${stamp} — target=${p.target}, ${p.featureCount} 特徵 (train ${p.trainSize}/test ${p.testSize})`;
+        // 對抗驗證 path 的 X_test 是用戶上傳的 test.csv (無 label),跟 sklearn 切的 holdout 完全不同
+        // 用不同文案讓人一眼看出來
+        const _splitLabel = p.isAdversarial
+          ? `train ${p.trainSize} (全用) · 對抗 test ${p.testSize} (無標籤)`
+          : `train ${p.trainSize} · holdout ${p.testSize}`;
+        opt.textContent = `${stamp} — target=${p.target}, ${p.featureCount} 特徵 (${_splitLabel})`;
         opt.title = `preprocessorId: ${p.id}`;  // hover 還是看得到 ID
         ppSelect.appendChild(opt);
       });
@@ -6094,15 +6201,12 @@ async function leaderboardPredict(modelId, btnEl) {
     return;
   }
 
-  // 判斷:Daniel ensemble (canPredict=true 且 type=daniel_pipeline_ensemble) → SSE 版
-  // 從 _trainingHistory 找 model 看 type
-  let useSSE = false;
-  for (const h of (_trainingHistory || [])) {
-    const m = (h.models || []).find(mm => mm.id === modelId);
-    if (m && (m.type === 'daniel_pipeline_ensemble' || m.canPredict)) {
-      useSSE = true; break;
-    }
-  }
+  // 【SSE 暫時禁用】Windows + Chrome + uvicorn 三方某個底層問題,連線開始後 ~7s 必斷
+  // (跟 keep-alive timeout / heartbeat / --reload 都無關,經多輪測試確認)。
+  // Daniel ensemble 改走非 streaming 一次性 endpoint /api/predict/batch — 後端那邊也支援 ensemble,
+  // 只是少了進度條 + 不能中途取消。但「穩」比「酷」重要。
+  // 若以後找到 SSE 7s 斷的真正根因,把下面 useSSE = false 改回原本邏輯即可。
+  const useSSE = false;
 
   const origLabel = btnEl?.textContent;
   const setPredictingBtn = (txt) => {
@@ -8160,3 +8264,43 @@ function initNewUiAuthHandshake() {
 
 // ===== EXPOSE navigateTo globally =====
 window.navigateTo = navigateTo;
+
+// ============================================================
+// i18n — 介面語言切換
+// 機制:HTML 元素帶 data-en="English text" 屬性,
+//   - lang=zh 時用元素原本的 textContent (中文,寫死在 HTML)
+//   - lang=en 時把 textContent 換成 data-en 的內容
+// 切換時把原中文塞進 data-zh 暫存,要切回來再換回去。
+// 動態 alert / notify / innerHTML 注入的中文不在此覆蓋範圍。
+// ============================================================
+const I18N_KEY = "ui-lang";
+
+function applyLang(lang) {
+  const els = document.querySelectorAll("[data-en]");
+  els.forEach(el => {
+    // 首次切換時,把原文(中文)備份到 data-zh
+    if (!el.hasAttribute("data-zh")) {
+      el.setAttribute("data-zh", el.textContent);
+    }
+    el.textContent = (lang === "en") ? el.getAttribute("data-en") : el.getAttribute("data-zh");
+  });
+  document.documentElement.lang = (lang === "en") ? "en" : "zh-TW";
+  try { localStorage.setItem(I18N_KEY, lang); } catch {}
+}
+
+function initLangSwitcher() {
+  const saved = (() => { try { return localStorage.getItem(I18N_KEY) || "zh"; } catch { return "zh"; } })();
+  // 套用儲存的語言
+  if (saved === "en") applyLang("en");
+  // 綁設定頁的 select
+  const sel = document.getElementById("setting-lang");
+  if (sel) {
+    sel.value = saved;
+    sel.addEventListener("change", () => applyLang(sel.value));
+  }
+}
+
+// DOM ready 後跑(app.js 自己沒 DOMContentLoaded wrap,而設定頁的 setting-lang 元素一開始就在 DOM,
+// 所以可以直接同步呼叫)
+initLangSwitcher();
+

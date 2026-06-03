@@ -34,7 +34,15 @@ class MIFeatureSelector(BaseEstimator, TransformerMixin):
     def fit(self, X, y):
         print(f"  [MI Selector] 正在計算特徵重要性 (目標保留 top_{self.top_k})...")
         X_arr = X.toarray() if sp.issparse(X) else np.asarray(X)
-        
+        # 【inf / float32 溢位防禦】sklearn mutual_info_* 內部會 check_array(force_all_finite=True),
+        # 看到 inf / 超大值就拋 "Input X contains infinity or a value too large for dtype('float32')"。
+        # 上游 poly2 / raw_stat / FFT 對 LotArea 之類大數欄相乘輕鬆爆 float32 上限 (~3.4e38) → cast 成 inf。
+        # 順序:inf → NaN → clip 殘餘超大有限值 → fill NaN=0 (MI 是排名用,絕對值不重要)
+        F32_MAX = float(np.finfo(np.float32).max)
+        X_arr = np.where(np.isinf(X_arr), np.nan, X_arr)
+        X_arr = np.clip(X_arr, -F32_MAX, F32_MAX)
+        X_arr = np.nan_to_num(X_arr, nan=0.0, posinf=F32_MAX, neginf=-F32_MAX)
+
         # 依據任務類型選擇 MI 演算法
         mi_fn = mutual_info_classif if self.is_classification else mutual_info_regression
         scores = mi_fn(X_arr, y, random_state=42)
@@ -58,6 +66,12 @@ class MIFeatureSelector(BaseEstimator, TransformerMixin):
     def transform(self, X):
         # 套用訓練時記憶的 mask，過濾掉不重要的特徵
         X_arr = X.toarray() if sp.issparse(X) else np.asarray(X)
+        # 同 fit 的防禦:推論階段也可能撞到 inf / 超大值;不過 transform 不丟給 sklearn check_array,
+        # 但下游 model 多半也吃不下,所以一併 sanitize 比較保險
+        F32_MAX = float(np.finfo(np.float32).max)
+        X_arr = np.where(np.isinf(X_arr), np.nan, X_arr)
+        X_arr = np.clip(X_arr, -F32_MAX, F32_MAX)
+        X_arr = np.nan_to_num(X_arr, nan=0.0, posinf=F32_MAX, neginf=-F32_MAX)
         return X_arr[:, self.selected_mask_]
 
 # =====================================================================
@@ -129,9 +143,26 @@ class RobustDataCleaner(BaseEstimator, TransformerMixin):
         # 3. 剔除常數欄位
         df = df.drop(columns=[c for c in self.drop_cols_ if c in df.columns], errors="ignore")
 
+        # 4. 【inf / float32 溢位防禦 — 統一出口】
+        # 下游 sklearn (PowerTransformer / StandardScaler / SimpleImputer / mutual_info_*)
+        # 全部都會 check_array(force_all_finite=True),看到 inf 就拋
+        # "Input X contains infinity or a value too large for dtype('float32')".
+        # MemoryOptimizer.reduce_mem_usage 已先把欄位 cast 成 float32,若有 > 3.4e38 的值
+        # 會直接溢位成 ±inf。在這裡統一接住,給下游一個保證 finite 的乾淨輸入。
+        # 順序:先抓出純數值欄,inf → NaN (給 SimpleImputer 接手),再 clip 殘餘超大值。
+        F32_MAX = float(np.finfo(np.float32).max)
+        for col in df.columns:
+            if pd.api.types.is_numeric_dtype(df[col]):
+                # replace inplace 比 mask+assign 省一份 copy
+                col_data = df[col]
+                if np.isinf(col_data.values).any():
+                    df[col] = col_data.replace([np.inf, -np.inf], np.nan)
+                # clip 仍會保留 NaN,只動有限值
+                df[col] = df[col].clip(lower=-F32_MAX, upper=F32_MAX)
+
         # 紀錄輸出欄位名稱供 get_feature_names_out 使用
         self._out_columns = df.columns.tolist()
-        
+
         # 維持 Scikit-learn 慣例，回傳 numpy array
         return df
 

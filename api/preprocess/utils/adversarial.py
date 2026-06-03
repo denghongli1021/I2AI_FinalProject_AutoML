@@ -328,17 +328,26 @@ def _encode_categoricals(
     X_test  = X_test.copy()
 
     for col in cat_cols:
+        # 【category dtype 防呆】MemoryOptimizer 會把低基數 object 欄轉成 'category' dtype,
+        # 而 pandas Categorical 不准 fillna 一個不在 categories 裡的新值,直接拋
+        # "Cannot setitem on a Categorical with a new category (__NaN__)"。
+        # 解法:先 cast 回 object,fillna + astype(str) 才安全。
+        train_col = X_train[col].astype(object) if pd.api.types.is_categorical_dtype(X_train[col]) else X_train[col]
+        test_col  = X_test[col].astype(object)  if pd.api.types.is_categorical_dtype(X_test[col])  else X_test[col]
+
         # 合併 unique 值來 fit encoder
         combined_vals = pd.concat([
-            X_train[col].fillna("__NaN__").astype(str),
-            X_test[col].fillna("__NaN__").astype(str),
+            train_col.fillna("__NaN__").astype(str),
+            test_col.fillna("__NaN__").astype(str),
         ], ignore_index=True)
 
         le = LabelEncoder()
         le.fit(combined_vals)
 
         def _safe_transform(series: pd.Series) -> np.ndarray:
-            filled = series.fillna("__NaN__").astype(str)
+            # 同樣對 category dtype 做 cast 防呆
+            s = series.astype(object) if pd.api.types.is_categorical_dtype(series) else series
+            filled = s.fillna("__NaN__").astype(str)
             # 處理 unseen label（理論上不會發生，因為已合併 fit）
             known = set(le.classes_)
             filled = filled.apply(lambda x: x if x in known else "__NaN__")

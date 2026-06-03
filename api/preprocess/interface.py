@@ -289,10 +289,18 @@ def preprocess_for_training(
         raise ValueError("清理後資料集為空（0 列），無法訓練。")
 
     # 2. 嚴格時間與空間切割
-    stratify = y if (y.nunique() <= 20 and y.nunique() >= 2) else None
-    X_train_raw, X_test_raw, y_train, y_test = train_test_split(
-        X, y, test_size=test_size, random_state=42, stratify=stratify
-    )
+    # 注意:這段的結果其實沒用到 — case A/B 邏輯後面會重做切分,把這些變數覆寫。
+    # 留著只是因為下面 del 釋放記憶體相依。test_size=0 時跳過,避免 sklearn 拋 ValueError。
+    if test_size is None or float(test_size) <= 0.0:
+        X_train_raw = X
+        X_test_raw = X.iloc[0:0].copy()
+        y_train = y
+        y_test = None
+    else:
+        stratify = y if (y.nunique() <= 20 and y.nunique() >= 2) else None
+        X_train_raw, X_test_raw, y_train, y_test = train_test_split(
+            X, y, test_size=test_size, random_state=42, stratify=stratify
+        )
 
     # 🚀 新增這行：立刻超渡舊的肥大變數，釋放記憶體！
     del raw_df, clean_df, X, y
@@ -318,52 +326,87 @@ def preprocess_for_training(
 
     # 2. 🛡️ 測試集處理與切割邏輯
     y_test = None
+    adv_result_for_ui = None    # 對抗驗證結果,情況 A 才會填,情況 B 路徑保持 None;最後掛到 preprocessor 給 UI 用
     if test_data_source is not None:
-        # ── 情況 A：使用者有提供真實獨立 Test 集 ──
-        print(">>> [Phase 1.5] 測試資料載入與整合 (Test Ingestion)")
+        # ── 情況 A：使用者有提供 Test 集 → 只當「對抗驗證的偵測對象」用,不當真的 X_test ──
+        # 跑完對抗驗證 + 砍掉間諜特徵後,test_data_source 就丟掉。
+        # X_train / X_test 仍然從原 train.csv 切出來(走情況 B 的流程),確保:
+        #   1. X_test 有 target → 訓練可以算 R² / RMSE
+        #   2. 對抗驗證單純當偵測工具用,不污染下游
+        print(">>> [Phase 1.5] 測試資料載入與整合 (僅供對抗驗證偵測用)")
         raw_test_df = load_and_merge_data(test_data_source, main_file_index=main_file_index)
         clean_test_df = _clean_raw_data(raw_test_df)
-        
-        X_train_raw = X
-        y_train = y
-        X_test_raw = clean_test_df
-        
-        # 確保 Test 集如果混到了 target 欄位，要把它拔掉
-        if target_col in X_test_raw.columns:
-            X_test_raw = X_test_raw.drop(columns=[target_col])
-        
+        # 跟 X 對齊欄位 (拿掉 target 跟不存在於 X 的欄位)
+        adv_test_X = clean_test_df.drop(columns=[target_col], errors="ignore")
+
         # 🚀 啟動對抗驗證 (Adversarial Validation)
+        cols_to_drop_after_adv: list = []
         if enable_adv_val:
             print("\n>>> [Phase 1.8] 啟動對抗驗證 (Adversarial Validation)")
             try:
                 adv_result = run_adversarial_validation(
-                    train_df=X_train_raw, 
-                    test_df=X_test_raw, 
-                    target_col=None, 
+                    train_df=X,
+                    test_df=adv_test_X,
+                    target_col=None,
                     auc_threshold_warn=0.7,
                     auc_threshold_danger=0.85
                 )
                 print_adversarial_report(adv_result)
-                # 自動刪除有害特徵
-                X_train_raw, X_test_raw = drop_adversarial_features(X_train_raw, X_test_raw, adv_result)
+                adv_result_for_ui = adv_result
+                # 取出要剔除的欄位 (間諜特徵),稍後從 X 砍掉
+                cols_to_drop_after_adv = [c for c in (adv_result.get("features_to_drop") or []) if c in X.columns]
+                if cols_to_drop_after_adv:
+                    X = X.drop(columns=cols_to_drop_after_adv)
+                    print(f"[對抗驗證] 已從 train 砍掉 {len(cols_to_drop_after_adv)} 個間諜特徵: {cols_to_drop_after_adv}")
             except Exception as e:
                 print(f"⚠️ [預處理模組] 對抗驗證執行失敗，已跳過: {e}")
+                adv_result_for_ui = {"error": str(e), "verdict": "skipped"}
+
+        # 對抗驗證跑完,把 test_data_source 相關物件全部丟掉 — 它的任務完成了
+        try:
+            del raw_test_df, clean_test_df, adv_test_X
+        except NameError:
+            pass
+
+        # 接下來走「情況 B」邏輯:從 (砍完間諜特徵的) X 切出 X_train / X_test
+        # 不再用 test_data_source 當 X_test_raw。下面這個 if/else 跟情況 B 一樣
+        if test_size is None or float(test_size) <= 0.0:
+            print(">>> [Phase 1.5b] test_size=0,X_train = 全部,X_test 留空(訓練時內部自切)")
+            X_train_raw = X
+            X_test_raw = X.iloc[0:0].copy()
+            y_train = y
+            y_test = None
+        else:
+            print(f">>> [Phase 1.5b] 對抗驗證後,從 train 切 {test_size*100}% 當 holdout")
+            stratify = y if (y.nunique() <= 20 and y.nunique() >= 2) else None
+            X_train_raw, X_test_raw, y_train, y_test = train_test_split(
+                X, y, test_size=test_size, random_state=42, stratify=stratify
+            )
 
         # 🧹 情況 A 記憶體清理
         try:
-            del raw_df, clean_df, raw_test_df, clean_test_df, X, y
+            del raw_df, clean_df, X, y
         except NameError:
             pass
 
     else:
-        # ── 情況 B：使用者只給了 Train 集，啟動傳統的 80/20 分割 ──
-        print(f">>> [Phase 1.5] 無獨立測試集，自動進行 {test_size*100}% 驗證集隨機切割")
-        stratify = y if (y.nunique() <= 20 and y.nunique() >= 2) else None
-        
-        X_train_raw, X_test_raw, y_train, y_test = train_test_split(
-            X, y, test_size=test_size, random_state=42, stratify=stratify
-        )
-        
+        # ── 情況 B：使用者只給了 Train 集，啟動傳統 80/20 分割 ──
+        # test_size=0 特例:user 想 100% 訓練不留 holdout(Kaggle workflow,結果靠 submit test.csv 驗收)。
+        # sklearn train_test_split 不接 0.0(會拋 ValueError),所以這裡直接跳過切分,
+        # X_test 給空 DataFrame,y_test = None。下游訓練的 fallback (y_test=None → 內部 80/20) 會接住評估。
+        if test_size is None or float(test_size) <= 0.0:
+            print(">>> [Phase 1.5] test_size=0,不切 holdout,X_train = 全部,X_test 留空(訓練時內部自切評估)")
+            X_train_raw = X
+            X_test_raw = X.iloc[0:0].copy()   # 空 DataFrame,保留欄位 schema 給下游 transform
+            y_train = y
+            y_test = None
+        else:
+            print(f">>> [Phase 1.5] 無獨立測試集，自動進行 {test_size*100}% 驗證集隨機切割")
+            stratify = y if (y.nunique() <= 20 and y.nunique() >= 2) else None
+            X_train_raw, X_test_raw, y_train, y_test = train_test_split(
+                X, y, test_size=test_size, random_state=42, stratify=stratify
+            )
+
         # 🧹 情況 B 記憶體清理
         try:
             del raw_df, clean_df, X, y
@@ -406,32 +449,77 @@ def preprocess_for_training(
     del X_train_sample, X_sample_phase0_array, X_sample_phase0_df
     import gc; gc.collect()
 
+    # ──────────────────────────────────────────────────────────────
+    # 【自動決策】MICE 補值 + MI 特徵選擇的 top_k
+    # 不再 hard-code,改依資料特性動態決定。
+    # ──────────────────────────────────────────────────────────────
+    numeric_cols_for_decision = feature_groups.get("numeric", [])
+    n_rows = len(X_train_raw)
+    n_numeric = len(numeric_cols_for_decision)
+    # 數值欄的 NaN 比例(用整個訓練集算,不是抽樣)
+    numeric_nan_ratio = (
+        float(X_train_raw[numeric_cols_for_decision].isna().mean().mean())
+        if numeric_cols_for_decision else 0.0
+    )
+    # ── A. MICE 啟用條件 ──
+    # MICE (IterativeImputer) 用 Ridge 迭代估計缺失值,比 median 準但慢。
+    # 啟用需同時滿足:
+    #   1) 數值欄數 ≤ 50 (>50 → MICE 計算成本爆炸,10 倍以上 median 速度)
+    #   2) 數值欄 NaN 比例 ≥ 5% (低於這個 median 就夠了)
+    #   3) 資料列數 ≤ 100,000 (太多列 MICE 跑不完)
+    auto_use_mice = (
+        n_numeric > 0
+        and n_numeric <= 50
+        and numeric_nan_ratio >= 0.05
+        and n_rows <= 100_000
+    )
+    # ── B. MI top_k 動態 ──
+    # 經驗法則:從特徵總數 sqrt 或 log 推一個合理保留數。
+    # 假設 phase1 (assembler) 輸出大約是 raw cols × 5 ~ 10 倍 (OHE / poly 等),
+    # 直接用一個保守上限 + 下限夾住:
+    #   - 上限 300 (NAS/DL 梯度爆炸 / OOM 防線)
+    #   - 下限 max(30, raw_features) (太少會傷模型表達力)
+    # 動態值:約 raw_features × 4(保留 OHE 後常見密度)
+    estimated_post_assembler = max(n_numeric * 4, len(feature_groups.get("categorical", [])) * 8, 30)
+    auto_mi_top_k = max(30, min(300, estimated_post_assembler // 2))
+
     # 4. 啟動組裝廠 (Assembler)
     print("[預處理模組] 啟動雙軌制管線 (Dual-Track Pipeline) 組裝...")
-    assembler = PipelineAssembler(feature_groups)
+    print(
+        f"[自動決策] n_rows={n_rows} n_numeric={n_numeric} "
+        f"numeric_nan_ratio={numeric_nan_ratio:.2%} "
+        f"→ use_mice={auto_use_mice} | mi_top_k={auto_mi_top_k}",
+        flush=True,
+    )
+    assembler = PipelineAssembler(
+        feature_groups,
+        use_mice=auto_use_mice,
+        # 開 MICE 必須走 _build_numeric_pipeline_with_indicators 路徑
+        add_missing_indicators=auto_use_mice,
+    )
 
     # 判斷任務類型
     is_classification = (y_train.nunique() <= 50)
 
     # ==========================================
     # 🌳 第一軌：樹狀模型專用 (Tree Track - 生肉)
-    # 不補值、不縮放。直接交給 XGBoost 自己挖寶，不需經過 MI 篩選！
+    # 不補值、不縮放。直接交給 XGBoost 自己挖寶,不需經過 MI 篩選!
     # ==========================================
     tree_preprocessor = Pipeline([
         ('phase0', RobustDataCleaner()),
         ('phase1', assembler.build(track="tree"))
-        # 🚨 刪除 phase2_mi_selector！讓生肉原汁原味進入模型。
+        # 🚨 刪除 phase2_mi_selector!讓生肉原汁原味進入模型。
     ])
 
     # ==========================================
     # 🧠 第二軌：深度學習/線性模型專用 (DL Track - 熟肉)
-    # 精緻補值、標準化，嚴格壓在 300 個特徵防 NAS/DL 梯度爆炸與 OOM
+    # 精緻補值、標準化,MI top_k 動態決定 (而不是死的 300)
     # ==========================================
     dl_preprocessor = Pipeline([
         ('phase0', RobustDataCleaner()),
         ('phase1', assembler.build(track="dl")),
-        # ✅ DL 軌道非常需要 MI 篩選，因為神經網路對無用特徵（雜訊）非常敏感！
-        ('phase2_mi_selector', MIFeatureSelector(top_k=300, is_classification=is_classification))
+        # MI top_k 由 auto_mi_top_k 動態決定 (依特徵總數推估,夾在 [30, 300])
+        ('phase2_mi_selector', MIFeatureSelector(top_k=auto_mi_top_k, is_classification=is_classification))
     ])
 
     
@@ -478,14 +566,30 @@ def preprocess_for_training(
     import gc; gc.collect()
 
     # 6. 僅轉換 (Transform) 測試集
-    print("[預處理模組] 正在轉換測試集資料...")
-    X_test_tree = _array_to_dataframe(tree_preprocessor.transform(X_test_raw), tree_feat_names)
-    X_test_dl = _array_to_dataframe(dl_preprocessor.transform(X_test_raw), dl_feat_names)
+    # X_test_raw 空 (test_size=0) → 直接給空 DataFrame,不能呼叫 .transform()
+    # 因為 sklearn SimpleImputer 等 step 拒收 0-sample input,會拋
+    # "Found array with 0 sample(s) (shape=(0, N))"。
+    if X_test_raw is None or len(X_test_raw) == 0:
+        print("[預處理模組] X_test 空 (test_size=0),跳過 test transform,直接給空 DataFrame")
+        X_test_tree = pd.DataFrame(columns=tree_feat_names)
+        X_test_dl = pd.DataFrame(columns=dl_feat_names)
+    else:
+        print("[預處理模組] 正在轉換測試集資料...")
+        X_test_tree = _array_to_dataframe(tree_preprocessor.transform(X_test_raw), tree_feat_names)
+        X_test_dl = _array_to_dataframe(dl_preprocessor.transform(X_test_raw), dl_feat_names)
 
     # 7. 打包雙軌資料
     X_train_dict = {"tree": X_train_tree, "dl": X_train_dl}
     X_test_dict = {"tree": X_test_tree, "dl": X_test_dl}
     preprocessors = {"tree": tree_preprocessor, "dl": dl_preprocessor}
+
+    # 對抗驗證結果掛到 tree preprocessor 上,跟 applied_feature_steps_ / mi_selection_ 一樣的 pattern,
+    # main.py 用 getattr(fitted_tree, "adversarial_validation_", None) 撈出來回給前端。
+    # None = 沒跑(情況 B 或 enable_adv_val=False);dict = 跑了(含 verdict 跟 features_to_drop)。
+    try:
+        tree_preprocessor.adversarial_validation_ = adv_result_for_ui
+    except Exception:
+        pass
 
     print("[預處理模組] 雙軌處理完成！")
     return X_train_dict, X_test_dict, y_train, y_test, preprocessors

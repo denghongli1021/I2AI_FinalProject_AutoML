@@ -102,7 +102,9 @@ def _infer_task_type(y_series) -> str:
 
 
 @app.get("/api/health")
-def health() -> dict[str, Any]:
+async def health() -> dict[str, Any]:
+    # async def 而非 def:health 不能被「同步重計算 endpoint (batch_prep / SHAP)」卡在 threadpool 後面。
+    # 改成 async 走 event loop,即使所有 worker thread 都被占用,health 仍然秒回。
     # 不再回 DATASETS/MODELS 計數 — 那是 guest 路徑用的 in-memory dict,跟登入使用者
     # 看到的內容無關。要看真的用量需要 user_id,health 是 public endpoint 拿不到。
     from api.store import DATASETS as _DATASETS, MODELS as _MODELS
@@ -260,6 +262,10 @@ async def preprocess_transform_endpoint(
             enable_adv_val=(adv_test_df is not None),
         )
     except Exception as e:
+        # 把完整 traceback 印到 stderr,前端只看 e.__class__ + message 沒辦法 debug
+        # 哪一個 sklearn step 拋的 (StandardScaler / PowerTransformer / MIFeatureSelector...)
+        import traceback as _tb
+        _tb.print_exc()
         raise HTTPException(status_code=500, detail=f"transform 失敗: {e}")
 
     # 新版 preprocess_for_training 回傳雙軌 dict；
@@ -307,6 +313,9 @@ async def preprocess_transform_endpoint(
         # v3 透明度:實際自動觸發的進階特徵工程 + MI 篩選結果
         "appliedFeatureSteps": getattr(fitted_tree, "applied_feature_steps_", []),
         "miSelection": getattr(fitted_tree, "mi_selection_", None),
+        # 對抗驗證結果 — 只有 user 傳了 test.csv 才會非 None
+        # 結構:{auc_mean, auc_std, verdict, message, features_to_drop, feature_importances, ...}
+        "adversarialValidation": getattr(fitted_tree, "adversarial_validation_", None),
     }
 
 
@@ -714,6 +723,12 @@ async def train_pipeline_stream_endpoint(
             y_test = pp_entry["y_test"]
             pp_target = pp_entry["target"]
             pp_obj = pp_entry["preprocessor"]
+
+            # 【y_test=None 的兩個來源】
+            #   1. 對抗驗證 path:user 上傳 test.csv (無 target) 觸發
+            #   2. test_size=0 path:user 滑桿拉到 0% 不留 holdout
+            # 兩種情況都沒「有標籤 holdout」可給 daniel,改走 daniel single-CSV 模式 (mode 1) —
+            # daniel 內部會自己對 train_csv 跑 80/20。下面組 job 時看到 y_test=None → 不寫 test CSV。
             # preprocessed source 沒有原 df,但 y_train 就是 target 欄;直接拿來推 task_type
             if target_col_sample is None and y_train is not None:
                 import pandas as _pd_infer2
@@ -743,6 +758,7 @@ async def train_pipeline_stream_endpoint(
 
             # 決定 test CSV:有 predict_csv 時用使用者上傳的 (套用同一個 preprocessor)
             predict_input_for_job: bytes | None = None
+            test_csv_path = None    # None = 沒有有標籤 holdout,走 daniel mode 1 自切
             if predict_csv_bytes:
                 import pandas as _pd
                 try:
@@ -752,8 +768,11 @@ async def train_pipeline_stream_endpoint(
                     transformed = pp_obj.transform(predict_feat_raw)
                     if hasattr(transformed, "toarray"):
                         transformed = transformed.toarray()
-                    # train/test 同一個 preprocessor → 欄位一致,用 X_test 的欄名即可
-                    transformed_df = _pd.DataFrame(transformed, columns=list(X_test_df.columns))
+                    # train/test 同一個 preprocessor → 欄位一致,用 X_train 的欄名(避開 X_test 可能空的 case)
+                    _cols_ref = list(X_train_df.columns) if X_train_df is not None else list(X_test_df.columns)
+                    # X_train_df 此時包含 target 欄(line 773 加的),要剔除
+                    _cols_ref = [c for c in _cols_ref if c != pp_target]
+                    transformed_df = _pd.DataFrame(transformed, columns=_cols_ref)
                 except Exception as e:
                     raise HTTPException(
                         status_code=400,
@@ -762,25 +781,36 @@ async def train_pipeline_stream_endpoint(
                 test_csv_path = _df_to_temp_csv(transformed_df, f"daniel_{_safe}_test_")
                 del transformed_df
                 predict_input_for_job = predict_csv_bytes
-            else:
+            elif y_test is not None and X_test_df is not None and len(X_test_df) > 0:
+                # 有 holdout 才寫 test CSV → daniel 走 mode 2 (pre-split)
                 X_test_df[pp_target] = list(y_test)
                 test_csv_path = _df_to_temp_csv(X_test_df, f"daniel_{_safe}_test_")
-            del X_test_df
+            else:
+                # y_test=None 或 X_test 空 → 不寫 test CSV → 下面 worker 看到 test_csv_path is None
+                # 就改用 csv_path 餵 daniel mode 1,daniel 內部自己 80/20 切
+                print(f"[train_pipeline] 沒有有標籤 holdout,改走 daniel single-CSV mode (mode 1)", flush=True)
+            if X_test_df is not None:
+                del X_test_df
             pp_entry["X_test"] = None
 
             pp_options = dict(base_options)
             pp_options["target"] = pp_target
 
+            # 暫存檔清單動態組 — daniel mode 1 沒 test_csv_path
+            _temp_paths = [train_csv_path]
+            if test_csv_path:
+                _temp_paths.append(test_csv_path)
+
             jobs.append({
                 "label": "預處理", "source": "preprocessed",
                 "train_csv_path": train_csv_path,
-                "test_csv_path": test_csv_path,
+                "test_csv_path": test_csv_path,   # None → worker 走 daniel mode 1 (用 csv_path)
                 "train_file_name": f"{_safe}.csv",
                 "options": pp_options,
                 "preprocessorId": preprocessorId,
                 "predict_input_bytes": predict_input_for_job,
                 # run_pipeline 不會刪 caller 給的路徑 → 由 worker 的 finally 收尾刪除
-                "_temp_paths": [train_csv_path, test_csv_path],
+                "_temp_paths": _temp_paths,
             })
 
     if not jobs:
@@ -855,14 +885,26 @@ async def train_pipeline_stream_endpoint(
                         break
                     if "train_csv_path" in job:
                         # 路徑模式 (預處理大矩陣):CSV 已串流寫好,只傳路徑,不在記憶體扛 bytes
-                        r = run_daniel_pipeline(
-                            train_csv_path=job["train_csv_path"],
-                            test_csv_path=job["test_csv_path"],
-                            train_file_name=job["train_file_name"],
-                            options=job["options"],
-                            on_progress=on_prog,
-                            cancel_token=cancel_token,
-                        )
+                        if job.get("test_csv_path"):
+                            # daniel mode 2:有 holdout 的 test CSV
+                            r = run_daniel_pipeline(
+                                train_csv_path=job["train_csv_path"],
+                                test_csv_path=job["test_csv_path"],
+                                train_file_name=job["train_file_name"],
+                                options=job["options"],
+                                on_progress=on_prog,
+                                cancel_token=cancel_token,
+                            )
+                        else:
+                            # daniel mode 1:單 CSV,daniel 內部自切 80/20
+                            # (preprocess test_size=0 或對抗驗證 path 走到這)
+                            r = run_daniel_pipeline(
+                                csv_path=job["train_csv_path"],
+                                file_name=job["train_file_name"],
+                                options=job["options"],
+                                on_progress=on_prog,
+                                cancel_token=cancel_token,
+                            )
                     elif "train_csv_bytes" in job:
                         r = run_daniel_pipeline(
                             train_csv_bytes=job["train_csv_bytes"],
@@ -2032,6 +2074,209 @@ def _shap_family_of_tag(tag: str) -> Optional[str]:
     return None
 
 
+def _build_readable_feature_names(fb, base_names: list, total_dims: int) -> list:
+    """把 FeatureBuilder 展開後的 X_fb 欄,從 f0/f1/... 換成可讀名稱。
+
+    Daniel FeatureBuilder.transform 對 ts_tabular_fft / raw_stat / poly2 等 feature_set 會 hstack 多段:
+      [X_scaled (= base_names)] + [ts_win 13×F] + [fft ~50] + [stat 全域 20 + 局部 4×n_segments]
+
+    - 前 len(base_names) 欄 = 直接對應 preprocessor 輸出名 (例如 "MSSubClass", "MSZoning_RL")
+    - ts_win 段:每 F 欄一組 — diff / lag1 / lag2 / roll3_mean / roll3_std / roll3_max / roll3_min /
+                              roll5_mean / roll5_std / roll5_max / roll5_min / ema3 / ema5
+    - fft 段:全域聚合統計 (mean / std / max / argmax / 8 band%) + 頻譜形狀 (centroid/spread/rolloff/entropy) + top20
+    - stat 段:全域 20 維 (mean/std/q5/q25/q75/q95/min/max/skew/kurt/median/abs_mean/abs_max/
+                          pos_ratio/ptp/var/energy/rms/mean_abs_diff/zcr) + 局部 n_segments × 4
+
+    對應不上的(未知 feature_set 或長度算不準)→ 給 generic 但帶 section 標籤的名字,
+    例如 "ts_win_idx42" 比死硬 "f867" 更可懂。
+    """
+    F = len(base_names)
+    if total_dims == F:
+        return list(base_names)
+
+    feature_set = getattr(fb, "feature_set", "") if fb is not None else ""
+    n_segments = int(getattr(fb, "n_segments", 8)) if fb is not None else 8
+    names = list(base_names)  # 前 F 欄一律是 base_names
+
+    def _gen_ts_win(F: int) -> list:
+        ops = ["diff", "lag1", "lag2",
+               "roll3_mean", "roll3_std", "roll3_max", "roll3_min",
+               "roll5_mean", "roll5_std", "roll5_max", "roll5_min",
+               "ema3", "ema5"]  # 13 段,跟 _ts_window_features 的 parts 順序對齊
+        out = []
+        for op in ops:
+            for b in base_names:
+                out.append(f"{op}({b})")
+        return out  # 13 × F
+
+    def _gen_fft() -> list:
+        # _fft_features 的順序:mean / std / max / argmax / band0% ~ band7% (8)
+        # / centroid / spread / rolloff / entropy / top0 ~ top19 (20)
+        return (
+            ["fft_mean", "fft_std", "fft_max", "fft_argmax"]
+            + [f"fft_band{i}_pct" for i in range(8)]
+            + ["fft_centroid", "fft_spread", "fft_rolloff", "fft_entropy"]
+            + [f"fft_top{i}" for i in range(20)]
+        )  # 4 + 8 + 4 + 20 = 36
+
+    def _gen_stat() -> list:
+        # _stat_features 順序:全域 20 維 + 局部 n_segments × 4
+        global_names = ["stat_mean", "stat_std", "stat_q5", "stat_q25", "stat_q75", "stat_q95",
+                        "stat_min", "stat_max", "stat_skew", "stat_kurt", "stat_median",
+                        "stat_abs_mean", "stat_abs_max", "stat_pos_ratio", "stat_ptp", "stat_var",
+                        "stat_energy", "stat_rms", "stat_mean_abs_diff", "stat_zcr"]
+        local_names = []
+        for kind in ("mean", "std", "max", "min"):
+            for i in range(n_segments):
+                local_names.append(f"stat_{kind}_seg{i}")
+        return global_names + local_names  # 20 + n_segments × 4
+
+    # 依 feature_set 決定後續段的順序
+    if feature_set == "raw":
+        pass
+    elif feature_set == "signal":
+        # X_scaled + row_norm (F)
+        names += [f"l2norm({b})" for b in base_names]
+    elif feature_set in ("pca64", "svd64", "kpca32"):
+        # 後段是降維,沒原始欄對應 → reduced_{i}
+        names += [f"{feature_set}_d{i}" for i in range(total_dims - F)]
+    elif feature_set == "poly2":
+        # X_scaled + interactions (數量不定,依 top-k 變數)
+        names += [f"poly2_inter{i}" for i in range(total_dims - F)]
+    elif feature_set == "ts_tabular":
+        names += _gen_ts_win(F)
+        names += _gen_stat()
+    elif feature_set == "ts_tabular_fft":
+        names += _gen_ts_win(F)
+        names += _gen_fft()
+        names += _gen_stat()
+    elif feature_set == "raw_stat":
+        names += _gen_stat()
+        # 後面可能還有 kmeans cluster 距離(若有開 use_kmeans)
+    elif feature_set == "raw_stat_fft":
+        names += _gen_stat()
+        names += _gen_fft()
+        # 後面可能還有 kmeans cluster 距離
+
+    # 若我們算出來的 names 仍跟 total_dims 對不上(未知 feature_set / 算錯 / kmeans 等)
+    # 剩餘欄用 generic 但帶 feature_set 前綴
+    if len(names) < total_dims:
+        extra = total_dims - len(names)
+        names += [f"{feature_set or 'extra'}_d{i}" for i in range(extra)]
+    elif len(names) > total_dims:
+        names = names[:total_dims]
+    return names
+
+
+def _map_transformed_to_original(tx_cols: list, base_names: list) -> tuple:
+    """把 transformed 欄(含 OneHot 展開 + FeatureBuilder 衍生)反查回原始 CSV 欄。
+
+    回傳:
+      mapped_names: 跟 tx_cols 等長,每個位置是「應該歸屬到的原始 CSV 欄名」
+      ohe_prefixes: 偵測到的 OneHot 來源欄(原始 CSV 名),供 caller debug
+
+    邏輯:
+      ① 偵測 base_names (前 75 個 = preprocessor 輸出) 中的 OneHot 群組:
+         - 多個欄共用 "Prefix_" 前綴 + 該 Prefix 本身不存在於 base_names → OHE 來源
+         - 例:MSZoning_RL/RM/FV 三個都有 "MSZoning_" 前綴,且沒有獨立的 "MSZoning" → MSZoning 是 OHE 來源
+         - LotArea 沒 underscore → 不是 OHE,保持 LotArea
+         - 1stFlrSF 雖有底線但 "1stFlrSF" 本身就在 base_names → 不算 OHE
+      ② 對 tx_cols 的每個名字:
+         - 如果是 op(X) 包裝的衍生欄 → 提出 X,套用 OHE 映射,結果不再加包裝(讓 op 跟 OHE 都聚合到 X 的原始欄)
+         - 純全域衍生欄如 stat_mean_seg2 / fft_band3_pct → 保留(不屬於任何單一原始欄)
+         - 直接的 base name → 套用 OHE 映射
+    """
+    import re
+    from collections import defaultdict
+
+    # ── ① 偵測 OneHot 來源欄
+    standalone = set(base_names)
+    prefix_groups = defaultdict(list)
+    for n in base_names:
+        if "_" in n:
+            prefix = n.split("_", 1)[0]
+            prefix_groups[prefix].append(n)
+    ohe_prefixes = {
+        p for p, group in prefix_groups.items()
+        if len(group) >= 2 and p not in standalone
+    }
+
+    def _strip_to_original(name: str) -> str:
+        """套用 OHE prefix 映射,回傳原始 CSV 欄名(若無法判定就回傳原 name)。"""
+        if name in ohe_prefixes:
+            return name  # 不應該發生
+        if "_" in name:
+            prefix = name.split("_", 1)[0]
+            if prefix in ohe_prefixes:
+                return prefix
+        return name
+
+    # 全域衍生欄前綴(無法歸屬到單一原始欄,保留)
+    GLOBAL_STAT_PREFIXES = ("stat_", "fft_", "l2norm", "pca64", "svd64", "kpca32",
+                             "poly2_", "ts_tabular_", "raw_stat_", "extra_d")
+
+    mapped = []
+    for name in tx_cols:
+        # 全域衍生欄 → 保留
+        if any(name.startswith(p) for p in GLOBAL_STAT_PREFIXES):
+            mapped.append(name)
+            continue
+        # op(X) 包裝的衍生欄 → 提出 X 再映射(讓所有 diff/lag/roll/ema 都聚合到原始)
+        m = re.match(r'^([a-zA-Z0-9_]+)\((.+)\)$', name)
+        if m:
+            inner = m.group(2)
+            mapped.append(_strip_to_original(inner))
+            continue
+        # 直接 base name
+        mapped.append(_strip_to_original(name))
+
+    return mapped, ohe_prefixes
+
+
+def _aggregate_shap_by_original(viz, tx_cols: list, base_names: list):
+    """SHAP 值按原始 CSV 欄聚合,直接 in-place 改 viz.X_test 跟 _get_shap_matrix。
+
+    monkey-patch viz 的 X_test.columns 跟 _get_shap_matrix 回傳值,讓 generate_beeswarm_plot /
+    generate_waterfall_plot / generate_dependence_plot 都看到聚合後的版本。
+    """
+    import pandas as pd
+    from collections import OrderedDict
+
+    mapped_names, ohe_prefixes = _map_transformed_to_original(tx_cols, base_names)
+    if ohe_prefixes:
+        print(f"[shap_precompute] OHE 來源欄偵測: {sorted(ohe_prefixes)}", flush=True)
+
+    # 依 mapped_names 分組(保持首次出現順序)
+    groups: "OrderedDict[str, list[int]]" = OrderedDict()
+    for i, m in enumerate(mapped_names):
+        groups.setdefault(m, []).append(i)
+
+    if len(groups) == len(tx_cols):
+        # 沒有任何聚合(都一對一) → 不動 viz,直接 return
+        return
+
+    shap_mat = viz._get_shap_matrix()  # (n_samples, n_tx_features)
+    agg_names = list(groups.keys())
+    agg_shap = np.zeros((shap_mat.shape[0], len(agg_names)), dtype=shap_mat.dtype)
+    for j, (orig_col, indices) in enumerate(groups.items()):
+        # 同源欄的 SHAP 值相加 — 對 global importance 跟 waterfall 都正確
+        agg_shap[:, j] = shap_mat[:, indices].sum(axis=1)
+
+    # 聚合後 X_test 拿 group 內第一個原欄的值當代表(僅用於 plot label / hover,
+    # 不影響 SHAP 值本身)。
+    agg_X = pd.DataFrame(
+        {n: viz.X_test.iloc[:, groups[n][0]].values for n in agg_names}
+    )
+
+    viz.X_test = agg_X
+    # 用 closure 鎖住聚合後矩陣;_get_shap_matrix 改成 lambda 回固定值
+    viz._get_shap_matrix = lambda _v=agg_shap: _v
+    print(
+        f"[shap_precompute] 聚合 transformed→original: {len(tx_cols)} → {len(agg_names)} 欄",
+        flush=True,
+    )
+
+
 def _compute_shap_for_ensemble_bundle(bundle: dict, per_model: list,
                                        feature_names: list, x_test_sample: list) -> dict:
     """對 ensemble 內最強的 tabular + DL 基模型各跑 3 張 SHAP plotly。
@@ -2111,7 +2356,8 @@ def _compute_shap_for_ensemble_bundle(bundle: dict, per_model: list,
                 X_fb = X_arr
 
             # feature names 對齊 transformed 後的維度(FeatureBuilder 會展開/壓縮)
-            tx_cols = cols if X_fb.shape[1] == len(cols) else [f"f{i}" for i in range(X_fb.shape[1])]
+            # 不再 fallback "f0/f1/..." — 改成依 feature_set 結構生衍生欄的可讀名稱
+            tx_cols = _build_readable_feature_names(fb, cols, X_fb.shape[1])
             X_fb_df = pd.DataFrame(X_fb, columns=tx_cols)
 
             if family == "tabular":
@@ -2129,8 +2375,20 @@ def _compute_shap_for_ensemble_bundle(bundle: dict, per_model: list,
                         return _predict_dl_fold(fold, Xn, n_classes)
                 viz = AutoMLVisualizer(_DLWrap(), X_fb_df, output_dir=None)
 
-            # 三張圖
-            target_feat = tx_cols[0] if tx_cols else "f0"
+            # 【SHAP 聚合到原始 CSV 欄】把 transformed 欄 (含 OneHot + diff/lag/fft/stat) 反向歸位:
+            # - MSZoning_RL / RM / FV 三欄 → 聚合成 MSZoning (一個 bar,SHAP 值相加)
+            # - diff(LotArea) / lag1(LotArea) / roll3_mean(LotArea) → 全部聚合到 LotArea
+            # - stat_mean_seg2 / fft_band3_pct 全域聚合特徵 → 無對應原始欄,保留
+            # 修法在 viz 完成 SHAP 計算之後,monkey-patch viz.X_test + _get_shap_matrix,
+            # 讓後續 beeswarm / waterfall / dependence 都看到聚合後的版本。
+            try:
+                _aggregate_shap_by_original(viz, tx_cols, cols)
+            except Exception as _agg_e:
+                print(f"[shap_precompute] {family} 聚合失敗,fallback transformed 欄: {_agg_e}", flush=True)
+
+            # 三張圖 — 聚合後 viz.X_test.columns 已換成原始 CSV 欄名
+            agg_cols = list(viz.X_test.columns)
+            target_feat = agg_cols[0] if agg_cols else "f0"
             fig_global = viz.generate_beeswarm_plot(return_fig=True)
             fig_wf     = viz.generate_waterfall_plot(sample_index=0, return_fig=True)
             fig_dep    = viz.generate_dependence_plot(target_feature=target_feat, return_fig=True)
@@ -2138,7 +2396,7 @@ def _compute_shap_for_ensemble_bundle(bundle: dict, per_model: list,
             results[family] = {
                 "modelTag": (per_model[idx] or {}).get("tag"),
                 "oofScore": (per_model[idx] or {}).get("oofScore"),
-                "featureNames": tx_cols,    # 給前端 dependence 切換用
+                "featureNames": agg_cols,   # 給前端 dependence 切換用 — 已是聚合後的原始 CSV 欄名
                 "global":     _fig_to_json(fig_global),
                 "waterfall":  _fig_to_json(fig_wf),
                 "dependence": _fig_to_json(fig_dep),
@@ -2586,25 +2844,56 @@ async def predict_batch_stream_endpoint(
     result_box: dict[str, Any] = {"preds": None, "error": None}
 
     def worker():
+        # 把每個 emit 同時吐到 stdout (flush=True),萬一 C 層 segfault 沒留 traceback,
+        # 至少從 terminal 看得到「最後印的是哪個 fold/config」,就能定位崩在哪。
+        def _on_progress(ev):
+            try:
+                _phase = ev.get("phase", "?")
+                _tag = ev.get("tag", "")
+                _done = ev.get("done", "")
+                _total = ev.get("total", "")
+                print(f"[predict_worker] phase={_phase} tag={_tag} {_done}/{_total}", flush=True)
+            except Exception:
+                pass
+            q.put({"type": "progress", **ev})
+
         try:
+            print(f"[predict_worker] start replay  bundle_configs={len(bundle.get('configs', []))} X_shape={X_raw.shape}", flush=True)
             preds = _ensemble_replay(
                 bundle, X_raw, return_proba=False,
-                on_progress=lambda ev: q.put({"type": "progress", **ev}),
+                on_progress=_on_progress,
                 cancel_token=cancel_token,
             )
+            print(f"[predict_worker] replay 完成 preds_len={len(preds) if preds is not None else 0}", flush=True)
             result_box["preds"] = np.asarray(preds).ravel()
         except InterruptedError as ie:
+            print(f"[predict_worker] 取消: {ie}", flush=True)
             result_box["error"] = ("cancelled", str(ie))
         except HTTPException as he:
+            print(f"[predict_worker] HTTPException: {he.status_code} {he.detail}", flush=True)
             result_box["error"] = ("http", f"{he.status_code}: {he.detail}")
-        except Exception as e:
+        except BaseException as e:
+            # 連 SystemExit / KeyboardInterrupt 都接,什麼例外都印 — 比 Exception 還寬
             import traceback
+            print(f"[predict_worker] 💥 {type(e).__name__}: {e}", flush=True)
             traceback.print_exc()
-            result_box["error"] = ("error", str(e))
+            result_box["error"] = ("error", f"{type(e).__name__}: {str(e)[:300]}")
         finally:
+            print("[predict_worker] worker 結束,送 sentinel", flush=True)
             q.put(None)
 
     threading.Thread(target=worker, daemon=True).start()
+
+    # SSE heartbeat sentinel — q.get 超時時 _q_get_with_timeout 回傳這個,
+    # event_stream 看到就送 `: heartbeat\n\n` comment 維持連線。
+    # 不能用 None,因為 None 是 worker 結束的訊號。
+    _HEARTBEAT = object()
+
+    def _q_get_with_timeout(_q, _timeout: float):
+        try:
+            return _q.get(timeout=_timeout)
+        except queue.Empty:
+            return _HEARTBEAT
 
     async def event_stream():
         # 兩層 try:外層只擋 GeneratorExit/CancelledError(瀏覽器斷線觸發 cancel_token),
@@ -2612,8 +2901,19 @@ async def predict_batch_stream_endpoint(
         try:
             try:
                 loop = asyncio.get_event_loop()
+                # 立刻送一個 heartbeat,讓 client 馬上收到 first byte,避免 fetch 在 headers 收完
+                # 卻沒 body 的情況下被某些 proxy / 瀏覽器 timeout
+                # 立刻送 first byte (真 event 不是 comment) — 確保 client / proxy 都認得「有資料來了」
+                yield f"event: progress\ndata: {json.dumps({'phase': 'connected'}, ensure_ascii=False)}\n\n"
                 while True:
-                    ev = await loop.run_in_executor(None, q.get)
+                    # 阻塞最多 1 秒等 worker 推 event;沒事就送 heartbeat 保活
+                    # 解決 uvicorn keep-alive 預設 5s timeout + 某些 fold predict 跑 > 5s 時連線被砍的問題
+                    ev = await loop.run_in_executor(None, _q_get_with_timeout, q, 1.0)
+                    if ev is _HEARTBEAT:
+                        # SSE comment (`:` 開頭) 有些 proxy / 瀏覽器不認當「有資料」→ 改送真 progress event。
+                        # client 看到 phase=heartbeat 會在 progress handler 走 else 分支(不更新 UI 也不會 error)
+                        yield f"event: progress\ndata: {json.dumps({'phase': 'heartbeat'}, ensure_ascii=False)}\n\n"
+                        continue
                     if ev is None:
                         break
                     yield f"event: progress\ndata: {json.dumps(ev, ensure_ascii=False)}\n\n"
@@ -2659,7 +2959,21 @@ async def predict_batch_stream_endpoint(
             cancel_token.set()
             raise
 
-    return StreamingResponse(event_stream(), media_type="text/event-stream")
+    # 【SSE 必備 headers】缺這幾個 client 會把 stream 當 normal HTTP 處理,
+    # 讀完第一個 chunk 就斷線 → 後端 worker 繼續跑變孤兒,前端看 ERR_CONNECTION_RESET
+    #   - Cache-Control: no-cache        proxies / browsers 不要 cache
+    #   - X-Accel-Buffering: no          nginx 等 proxy 不要 buffer (即使本機沒 nginx,
+    #                                     某些 antivirus / 瀏覽器擴充也會看這個 header)
+    #   - Connection: keep-alive         明確要求保持連線
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+            "Connection": "keep-alive",
+        },
+    )
 
 
 @app.post("/api/predict/batch")

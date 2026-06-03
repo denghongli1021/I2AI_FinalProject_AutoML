@@ -97,15 +97,15 @@
     <nav class="flex-1 p-3 space-y-1 overflow-y-auto">
       <a href="#" class="nav-item active" data-page="dashboard">
         <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-6 0a1 1 0 001-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 001 1m-6 0h6"/></svg>
-        <span>總覽儀表板</span>
+        <span data-en="Dashboard">總覽儀表板</span>
       </a>
       <a href="#" class="nav-item" data-page="datasets">
         <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M4 7v10c0 2.21 3.582 4 8 4s8-1.79 8-4V7M4 7c0 2.21 3.582 4 8 4s8-1.79 8-4M4 7c0-2.21 3.582-4 8-4s8 1.79 8 4m0 5c0 2.21-3.582 4-8 4s-8-1.79-8-4"/></svg>
-        <span>數據集管理</span>
+        <span data-en="Datasets">數據集管理</span>
       </a>
       <a href="#" class="nav-item" data-page="preprocessing">
         <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M4 6h16M4 12h16M4 18h7"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M14 18l2 2 4-4"/></svg>
-        <span>預處理</span>
+        <span data-en="Preprocessing">預處理</span>
       </a>
       <!-- AutoML Pipeline — 暫時隱藏,以後要還原只要拿掉註解
       <a href="#" class="nav-item" data-page="pipeline">
@@ -116,23 +116,23 @@
       -->
       <a href="#" class="nav-item" data-page="experiments">
         <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M19.428 15.428a2 2 0 00-1.022-.547l-2.387-.477a6 6 0 00-3.86.517l-.318.158a6 6 0 01-3.86.517L6.05 15.21a2 2 0 00-1.806.547M8 4h8l-1 1v5.172a2 2 0 00.586 1.414l5 5c1.26 1.26.367 3.414-1.415 3.414H4.828c-1.782 0-2.674-2.154-1.414-3.414l5-5A2 2 0 009 10.172V5L8 4z"/></svg>
-        <span>實驗室</span>
+        <span data-en="Lab">實驗室</span>
       </a>
       <a href="#" class="nav-item" data-page="leaderboard">
         <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"/></svg>
-        <span>模型排行榜</span>
+        <span data-en="Leaderboard">模型排行榜</span>
       </a>
       <a href="#" class="nav-item" data-page="insights">
         <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z"/></svg>
-        <span>洞察與決策</span>
+        <span data-en="Insights">洞察與決策</span>
         <!-- <span class="ml-auto text-[9px] bg-accent-500/20 text-accent-400 px-1.5 py-0.5 rounded-full font-semibold">核心</span> -->
       </a>
 
       <div class="border-t border-dark-700/50 my-3"></div>
-      <p class="text-[10px] text-dark-500 uppercase tracking-wider px-3 mb-2">系統</p>
+      <p class="text-[10px] text-dark-500 uppercase tracking-wider px-3 mb-2" data-en="System">系統</p>
       <a href="#" class="nav-item" data-page="settings">
         <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.066 2.573c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.573 1.066c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.066-2.573c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/></svg>
-        <span>系統設定</span>
+        <span data-en="Settings">系統設定</span>
       </a>
     </nav>
 
@@ -177,7 +177,7 @@
               <span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-dark-400 opacity-75"></span>
               <span class="relative inline-flex rounded-full h-2 w-2 bg-dark-500"></span>
             </span>
-            <span id="global-status-text" class="text-dark-300">系統就緒</span>
+            <span id="global-status-text" class="text-dark-300" data-en="System Ready">系統就緒</span>
           </div>
           <!-- Notification -->
           <div class="relative">
@@ -189,11 +189,11 @@
             <!-- Notification dropdown -->
             <div id="notification-panel" class="hidden absolute right-0 mt-2 w-80 bg-dark-900 border border-dark-700 rounded-xl shadow-2xl z-50 overflow-hidden">
               <div class="flex items-center justify-between px-4 py-3 border-b border-dark-700/50">
-                <h4 class="text-sm font-semibold">通知</h4>
-                <button id="btn-clear-notifications" class="text-xs text-dark-400 hover:text-dark-200 transition-colors">全部清除</button>
+                <h4 class="text-sm font-semibold" data-en="Notifications">通知</h4>
+                <button id="btn-clear-notifications" class="text-xs text-dark-400 hover:text-dark-200 transition-colors" data-en="Clear all">全部清除</button>
               </div>
               <div id="notification-list" class="max-h-80 overflow-y-auto">
-                <p class="px-4 py-6 text-center text-xs text-dark-500">目前沒有通知</p>
+                <p class="px-4 py-6 text-center text-xs text-dark-500" data-en="No notifications">目前沒有通知</p>
               </div>
             </div>
           </div>
@@ -202,8 +202,8 @@
 
           <!-- 使用者區塊 — guest 顯示登入按鈕,登入後顯示頭像 + 名稱 + 登出 -->
           <div id="auth-guest-section" class="flex items-center gap-2">
-            <button id="btn-auth-open" class="btn btn-sm btn-primary">登入 / 註冊</button>
-            <span class="text-[10px] text-dark-500">匿名訪客模式</span>
+            <button id="btn-auth-open" class="btn btn-sm btn-primary" data-en="Sign in / Register">登入 / 註冊</button>
+            <span class="text-[10px] text-dark-500" data-en="Guest mode">匿名訪客模式</span>
           </div>
           <div id="auth-user-section" class="hidden relative">
             <button id="btn-auth-menu" class="flex items-center gap-2 px-2 py-1.5 hover:bg-dark-800 rounded-lg transition-colors">
@@ -215,11 +215,11 @@
             <!-- 下拉選單 -->
             <div id="auth-user-menu" class="hidden absolute right-0 mt-2 w-56 bg-dark-900 border border-dark-700 rounded-xl shadow-2xl z-50 overflow-hidden">
               <div class="px-4 py-3 border-b border-dark-700/50">
-                <p class="text-xs text-dark-500">登入身分</p>
+                <p class="text-xs text-dark-500" data-en="Signed in as">登入身分</p>
                 <p id="auth-user-email" class="text-sm font-mono text-dark-100 truncate">—</p>
                 <p id="auth-user-provider" class="text-[10px] text-dark-500 mt-0.5"></p>
               </div>
-              <button id="btn-auth-logout" class="w-full text-left px-4 py-2.5 text-sm text-danger-400 hover:bg-danger-500/10 transition-colors">登出</button>
+              <button id="btn-auth-logout" class="w-full text-left px-4 py-2.5 text-sm text-danger-400 hover:bg-danger-500/10 transition-colors" data-en="Sign out">登出</button>
             </div>
           </div>
         </div>
@@ -237,7 +237,7 @@
             </div>
             <h3 class="empty-state-title">尚無實驗數據</h3>
             <p class="empty-state-desc">請先上傳數據集並完成模型訓練，儀表板將顯示即時數據</p>
-            <button onclick="navigateTo('datasets')" class="btn btn-primary">前往上傳數據集</button>
+            <button onclick="navigateTo('datasets')" class="btn btn-primary" data-en="Go to Upload Dataset">前往上傳數據集</button>
           </div>
         </div>
         <div id="dashboard-demo-content">
@@ -245,7 +245,7 @@
         <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
           <div class="metric-card">
             <div class="flex items-center justify-between mb-3">
-              <span class="text-dark-400 text-sm">活躍數據集</span>
+              <span class="text-dark-400 text-sm" data-en="Active Datasets">活躍數據集</span>
               <div class="w-8 h-8 rounded-lg bg-primary-500/10 flex items-center justify-center"><svg class="w-4 h-4 text-primary-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 7v10c0 2.21 3.582 4 8 4s8-1.79 8-4V7"/></svg></div>
             </div>
             <div class="text-3xl font-bold">12</div>
@@ -253,7 +253,7 @@
           </div>
           <div class="metric-card">
             <div class="flex items-center justify-between mb-3">
-              <span class="text-dark-400 text-sm">已完成實驗</span>
+              <span class="text-dark-400 text-sm" data-en="Completed Experiments">已完成實驗</span>
               <div class="w-8 h-8 rounded-lg bg-accent-500/10 flex items-center justify-center"><svg class="w-4 h-4 text-accent-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19.428 15.428a2 2 0 00-1.022-.547l-2.387-.477a6 6 0 00-3.86.517l-.318.158a6 6 0 01-3.86.517L6.05 15.21a2 2 0 00-1.806.547M8 4h8l-1 1v5.172a2 2 0 00.586 1.414l5 5c1.26 1.26.367 3.414-1.415 3.414H4.828c-1.782 0-2.674-2.154-1.414-3.414l5-5A2 2 0 009 10.172V5L8 4z"/></svg></div>
             </div>
             <div class="text-3xl font-bold">47</div>
@@ -261,7 +261,7 @@
           </div>
           <div class="metric-card">
             <div class="flex items-center justify-between mb-3">
-              <span class="text-dark-400 text-sm">最佳模型準確率</span>
+              <span class="text-dark-400 text-sm" data-en="Best Model Accuracy">最佳模型準確率</span>
               <div class="w-8 h-8 rounded-lg bg-success-500/10 flex items-center justify-center"><svg class="w-4 h-4 text-success-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/></svg></div>
             </div>
             <div class="text-3xl font-bold">96.8<span class="text-lg text-dark-400">%</span></div>
@@ -269,7 +269,7 @@
           </div>
           <div class="metric-card">
             <div class="flex items-center justify-between mb-3">
-              <span class="text-dark-400 text-sm">已部署模型</span>
+              <span class="text-dark-400 text-sm" data-en="Deployed Models">已部署模型</span>
               <div class="w-8 h-8 rounded-lg bg-warning-500/10 flex items-center justify-center"><svg class="w-4 h-4 text-warning-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 12h14M12 5l7 7-7 7"/></svg></div>
             </div>
             <div class="text-3xl font-bold">5</div>
@@ -318,33 +318,33 @@
                 <div class="w-2 h-2 rounded-full bg-success-500"></div>
                 <div class="flex-1 min-w-0">
                   <p class="text-sm font-medium truncate">客戶流失預測 v3</p>
-                  <p class="text-xs text-dark-400">分類 | XGBoost | F1: 0.942</p>
+                  <p class="text-xs text-dark-400" data-en="Classification | XGBoost | F1: 0.942">分類 | XGBoost | F1: 0.942</p>
                 </div>
-                <span class="text-xs text-dark-400">2 小時前</span>
+                <span class="text-xs text-dark-400" data-en="2 hours ago">2 小時前</span>
               </div>
               <div class="flex items-center gap-3 p-3 rounded-lg bg-dark-800/50 hover:bg-dark-800 transition-colors">
                 <div class="w-2 h-2 rounded-full bg-primary-500 animate-pulse"></div>
                 <div class="flex-1 min-w-0">
                   <p class="text-sm font-medium truncate">銷售額預測 Q2</p>
-                  <p class="text-xs text-dark-400">回歸 | LightGBM | 訓練中...</p>
+                  <p class="text-xs text-dark-400" data-en="Regression | LightGBM | Training...">回歸 | LightGBM | 訓練中...</p>
                 </div>
-                <span class="text-xs text-warning-400">進行中</span>
+                <span class="text-xs text-warning-400" data-en="In Progress">進行中</span>
               </div>
               <div class="flex items-center gap-3 p-3 rounded-lg bg-dark-800/50 hover:bg-dark-800 transition-colors">
                 <div class="w-2 h-2 rounded-full bg-success-500"></div>
                 <div class="flex-1 min-w-0">
                   <p class="text-sm font-medium truncate">產品推薦引擎</p>
-                  <p class="text-xs text-dark-400">分類 | Ensemble | AUC: 0.978</p>
+                  <p class="text-xs text-dark-400" data-en="Classification | Ensemble | AUC: 0.978">分類 | Ensemble | AUC: 0.978</p>
                 </div>
-                <span class="text-xs text-dark-400">昨天</span>
+                <span class="text-xs text-dark-400" data-en="Yesterday">昨天</span>
               </div>
               <div class="flex items-center gap-3 p-3 rounded-lg bg-dark-800/50 hover:bg-dark-800 transition-colors">
                 <div class="w-2 h-2 rounded-full bg-danger-500"></div>
                 <div class="flex-1 min-w-0">
                   <p class="text-sm font-medium truncate">庫存需求預測</p>
-                  <p class="text-xs text-dark-400">回歸 | XGBoost | 數據品質不足</p>
+                  <p class="text-xs text-dark-400" data-en="Regression | XGBoost | Insufficient data quality">回歸 | XGBoost | 數據品質不足</p>
                 </div>
-                <span class="text-xs text-danger-400">失敗</span>
+                <span class="text-xs text-danger-400" data-en="Failed">失敗</span>
               </div>
             </div>
           </div>
@@ -355,15 +355,15 @@
             <div class="space-y-3">
               <div class="flex gap-3 p-3 rounded-lg bg-success-500/5 border border-success-500/10">
                 <svg class="w-5 h-5 text-success-400 flex-shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
-                <div><p class="text-sm font-medium">模型部署成功</p><p class="text-xs text-dark-400 mt-1">「客戶流失預測 v3」已成功部署至生產環境</p></div>
+                <div><p class="text-sm font-medium">模型部署成功</p><p class="text-xs text-dark-400 mt-1" data-en="'Customer Churn Prediction v3' deployed to production">「客戶流失預測 v3」已成功部署至生產環境</p></div>
               </div>
               <div class="flex gap-3 p-3 rounded-lg bg-warning-500/5 border border-warning-500/10">
                 <svg class="w-5 h-5 text-warning-400 flex-shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"/></svg>
-                <div><p class="text-sm font-medium">數據品質警告</p><p class="text-xs text-dark-400 mt-1">「銷售數據 2024」有 12% 缺失值，建議檢查</p></div>
+                <div><p class="text-sm font-medium">數據品質警告</p><p class="text-xs text-dark-400 mt-1" data-en="'Sales Data 2024' has 12% missing values, please review">「銷售數據 2024」有 12% 缺失值，建議檢查</p></div>
               </div>
               <div class="flex gap-3 p-3 rounded-lg bg-primary-500/5 border border-primary-500/10">
                 <svg class="w-5 h-5 text-primary-400 flex-shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
-                <div><p class="text-sm font-medium">超參數優化完成</p><p class="text-xs text-dark-400 mt-1">共嘗試 200 組組合，最佳組合已儲存</p></div>
+                <div><p class="text-sm font-medium">超參數優化完成</p><p class="text-xs text-dark-400 mt-1" data-en="Tried 200 combinations, best saved">共嘗試 200 組組合，最佳組合已儲存</p></div>
               </div>
             </div>
           </div>
@@ -395,7 +395,7 @@
               <svg class="w-8 h-8 text-primary-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12"/></svg>
             </div>
             <p class="text-lg font-semibold mb-1">拖拽 CSV 檔案至此或點擊上傳</p>
-            <p class="text-sm text-dark-400">支援 CSV / TSV 格式，系統將自動分析數據結構</p>
+            <p class="text-sm text-dark-400" data-en="Supports CSV / TSV — auto-analyzes data structure">支援 CSV / TSV 格式，系統將自動分析數據結構</p>
             <div class="flex items-center justify-center gap-4 mt-4">
               <button id="btn-choose-file" class="btn btn-primary">選擇檔案</button>
             </div>
@@ -442,7 +442,7 @@
               <div class="card-header">
                 <h3 class="card-title">欄位概覽</h3>
                 <div class="flex items-center gap-2">
-                  <span class="text-xs text-dark-400" id="col-count-label">共 0 個欄位</span>
+                  <span class="text-xs text-dark-400" id="col-count-label" data-en="0 columns total">共 0 個欄位</span>
                 </div>
               </div>
               <div class="overflow-x-auto" style="max-height:340px">
@@ -452,7 +452,7 @@
                       <th class="text-left py-2 px-3 font-medium">欄位名稱</th>
                       <th class="text-left py-2 px-3 font-medium">類型</th>
                       <th class="text-left py-2 px-3 font-medium">分佈</th>
-                      <th class="text-left py-2 px-3 font-medium">缺失</th>
+                      <th class="text-left py-2 px-3 font-medium" data-en="Missing">缺失</th>
                       <th class="text-left py-2 px-3 font-medium">異常值</th>
                       <th class="text-left py-2 px-3 font-medium">唯一值</th>
                     </tr>
@@ -468,7 +468,7 @@
             <div class="card-header">
               <div class="flex items-center gap-3">
                 <h3 class="card-title">數據預覽</h3>
-                <span class="text-xs text-dark-400" id="preview-row-label">前 100 筆</span>
+                <span class="text-xs text-dark-400" id="preview-row-label" data-en="First 100 rows">前 100 筆</span>
               </div>
               <div class="flex items-center gap-2" id="col-page-controls">
                 <button id="btn-col-prev" class="p-1 rounded hover:bg-dark-700 text-dark-400 hover:text-dark-100 transition-colors disabled:opacity-30 disabled:cursor-not-allowed" disabled>
@@ -503,7 +503,7 @@
                   </select>
                   <span>個特徵</span>
                 </label>
-                <span class="text-xs text-dark-400" id="corr-feature-count">僅數值型欄位</span>
+                <span class="text-xs text-dark-400" id="corr-feature-count" data-en="Numeric columns only">僅數值型欄位</span>
               </div>
             </div>
             <div id="chart-correlation" class="h-80"></div>
@@ -513,8 +513,8 @@
           <!-- 若要恢復:把 hidden 拿掉,且需要實作後端 method 套用 endpoint -->
           <div class="card hidden">
             <div class="card-header">
-              <h3 class="card-title">自動化處理記錄</h3>
-              <span class="text-xs text-dark-400">點擊項目可查看詳情與調整處理方式</span>
+              <h3 class="card-title" data-en="Auto-processing Log">自動化處理記錄</h3>
+              <span class="text-xs text-dark-400" data-en="Click an item for details and method adjustment">點擊項目可查看詳情與調整處理方式</span>
             </div>
             <div class="space-y-2 p-4" id="auto-process-log"></div>
           </div>
@@ -527,7 +527,7 @@
             <div class="sticky top-0 bg-dark-900 border-b border-dark-700/50 px-6 py-4 flex items-center justify-between z-10">
               <div>
                 <h3 class="text-lg font-semibold" id="proc-modal-title">處理詳情</h3>
-                <p class="text-xs text-dark-400 mt-0.5" id="proc-modal-subtitle">欄位: —</p>
+                <p class="text-xs text-dark-400 mt-0.5" id="proc-modal-subtitle" data-en="Column: —">欄位: —</p>
               </div>
               <button id="close-process-modal" class="p-1.5 hover:bg-dark-700 rounded-lg transition-colors">
                 <svg class="w-5 h-5"><use href="#i-close"/></svg>
@@ -541,7 +541,7 @@
                 <div class="flex items-center justify-between flex-wrap gap-3">
                   <div>
                     <p class="text-sm font-medium mb-1">處理方法</p>
-                    <p class="text-xs text-dark-400" id="proc-method-desc">選擇不同方法查看前後對比</p>
+                    <p class="text-xs text-dark-400" id="proc-method-desc" data-en="Choose a method to see before/after comparison">選擇不同方法查看前後對比</p>
                   </div>
                   <div class="flex items-center gap-3">
                     <select id="proc-method-select" class="bg-dark-700 border border-dark-600 rounded-lg px-3 py-2 text-sm focus:border-primary-500 outline-none min-w-[180px]">
@@ -628,33 +628,33 @@
           </div>
           <h3 class="empty-state-title">尚未上傳數據集</h3>
           <p class="empty-state-desc">請先前往數據集管理頁面上傳 CSV 檔案</p>
-          <button onclick="navigateTo('datasets')" class="btn btn-primary">前往上傳數據集</button>
+          <button onclick="navigateTo('datasets')" class="btn btn-primary" data-en="Go to Upload Dataset">前往上傳數據集</button>
         </div>
 
         <!-- Configuration -->
         <div id="pp-config-wrap" class="hidden">
           <div class="card mb-6">
             <div class="card-header">
-              <h3 class="card-title">預處理設定</h3>
+              <h3 class="card-title" data-en="Preprocessing Configuration">預處理設定</h3>
               <span id="pp-dataset-badge" class="badge badge-primary"></span>
             </div>
             <div class="grid grid-cols-1 md:grid-cols-3 gap-6 px-4 pb-4 pt-2">
               <div>
-                <label class="block text-sm font-medium text-dark-300 mb-2">目標變數 (Target)</label>
+                <label class="block text-sm font-medium text-dark-300 mb-2" data-en="Target Variable">目標變數 (Target)</label>
                 <select id="pp-target-select" class="w-full bg-dark-800 border border-dark-600 rounded-lg px-3 py-2.5 text-sm focus:border-primary-500 outline-none"></select>
-                <p class="text-xs text-dark-500 mt-1.5">會從特徵欄位中排除,並用來切 train/test。</p>
+                <p class="text-xs text-dark-500 mt-1.5" data-en="Excluded from features, used to split train/test.">會從特徵欄位中排除,並用來切 train/test。</p>
               </div>
               <div>
-                <label class="block text-sm font-medium text-dark-300 mb-2">測試集比例</label>
+                <label class="block text-sm font-medium text-dark-300 mb-2" data-en="Test Set Ratio">測試集比例</label>
                 <div class="flex items-center gap-3">
-                  <input type="range" id="pp-test-size" min="0.1" max="0.5" step="0.05" value="0.2" class="flex-1 accent-primary-500">
+                  <input type="range" id="pp-test-size" min="0" max="0.9" step="0.05" value="0.2" class="flex-1 accent-primary-500">
                   <span id="pp-test-size-label" class="text-sm font-mono text-primary-400 w-12 text-right">20%</span>
                 </div>
-                <p class="text-xs text-dark-500 mt-1.5">train_test_split 切分比例,固定 random_state=42。</p>
+                <p class="text-xs text-dark-500 mt-1.5" data-en="train_test_split ratio, fixed random_state=42.">train_test_split 切分比例,固定 random_state=42。</p>
               </div>
               <div class="flex items-end gap-2">
-                <button id="btn-pp-audit" class="btn btn-tertiary flex-1">快速健檢</button>
-                <button id="btn-pp-run" class="btn btn-primary flex-1">
+                <button id="btn-pp-audit" class="btn btn-tertiary flex-1" data-en="Quick Audit">快速健檢</button>
+                <button id="btn-pp-run" class="btn btn-primary flex-1" data-en="Run Preprocessing">
                   執行預處理
                 </button>
               </div>
@@ -662,16 +662,16 @@
             <!-- 進階前處理選項 (preprocessingv3) -->
             <div class="px-4 pb-4">
               <div class="flex flex-wrap items-center gap-x-6 gap-y-3 pt-3 border-t border-dark-700/50">
-                <span class="text-xs font-medium text-dark-400">進階選項</span>
+                <span class="text-xs font-medium text-dark-400" data-en="Advanced Options">進階選項</span>
                 <!-- <label class="flex items-center gap-2 cursor-pointer opacity-50" title="新版 daniel preprocessing 已內部自動決定,此 flag 不再生效">
                   <input type="checkbox" id="pp-opt-mice" class="rounded bg-dark-700 border-dark-500" disabled>
-                  <span class="text-sm text-dark-200">MICE 補值</span>
-                  <span class="text-[11px] text-dark-500">已停用 — 由內部自動決定</span>
+                  <span class="text-sm text-dark-200" data-en="MICE Imputation">MICE 補值</span>
+                  <span class="text-[11px] text-dark-500" data-en="Disabled — auto-decided internally">已停用 — 由內部自動決定</span>
                 </label>
                 <label class="flex items-center gap-2 cursor-pointer opacity-50" title="同上,內部自動決定">
                   <input type="checkbox" id="pp-opt-mi" class="rounded bg-dark-700 border-dark-500" disabled>
-                  <span class="text-sm text-dark-200">MI 特徵選擇</span>
-                  <span class="text-[11px] text-dark-500">已停用</span>
+                  <span class="text-sm text-dark-200" data-en="MI Feature Selection">MI 特徵選擇</span>
+                  <span class="text-[11px] text-dark-500" data-en="Disabled">已停用</span>
                 </label> -->
                 <!-- 對抗驗證 — 可選上傳第二份 test.csv (Kaggle 風) 觸發 adversarial validation -->
                 <div class="flex items-center gap-2 ml-2 pl-4 border-l border-dark-700/50 flex-wrap">
@@ -682,7 +682,7 @@
                     <input id="pp-adv-file" type="file" accept=".csv" class="hidden">
                   </label>
                   <button id="pp-adv-file-clear" type="button" class="text-xs text-dark-500 hover:text-danger-400 hidden">✕</button>
-                  <span class="text-[10px] text-dark-500">給 Kaggle 風 test.csv → 偵測 train/test 分佈漂移的「間諜特徵」並剔除</span>
+                  <span class="text-[10px] text-dark-500" data-en="Upload Kaggle-style test.csv → detect train/test distribution drift spy features and remove them">給 Kaggle 風 test.csv → 偵測 train/test 分佈漂移的「間諜特徵」並剔除</span>
                 </div>
               </div>
             </div>
@@ -705,19 +705,19 @@
               <div class="px-4 pb-4 space-y-3">
                 <div class="grid grid-cols-2 gap-3">
                   <div class="bg-dark-800/50 rounded-lg p-3">
-                    <p class="text-xs text-dark-400 mb-1">總列數</p>
+                    <p class="text-xs text-dark-400 mb-1" data-en="Total Rows">總列數</p>
                     <p class="text-xl font-bold" id="pp-stat-rows">—</p>
                   </div>
                   <div class="bg-dark-800/50 rounded-lg p-3">
-                    <p class="text-xs text-dark-400 mb-1">總欄位</p>
+                    <p class="text-xs text-dark-400 mb-1" data-en="Total Columns">總欄位</p>
                     <p class="text-xl font-bold" id="pp-stat-cols">—</p>
                   </div>
                   <div class="bg-dark-800/50 rounded-lg p-3">
-                    <p class="text-xs text-dark-400 mb-1">完美欄位</p>
+                    <p class="text-xs text-dark-400 mb-1" data-en="Perfect Columns">完美欄位</p>
                     <p class="text-xl font-bold text-success-400" id="pp-stat-perfect">—</p>
                   </div>
                   <div class="bg-dark-800/50 rounded-lg p-3">
-                    <p class="text-xs text-dark-400 mb-1">有缺失欄位</p>
+                    <p class="text-xs text-dark-400 mb-1" data-en="Missing Columns">有缺失欄位</p>
                     <p class="text-xl font-bold text-warning-400" id="pp-stat-missing">—</p>
                   </div>
                 </div>
@@ -746,7 +746,7 @@
                   <table class="w-full text-sm">
                     <thead class="sticky top-0 bg-dark-900 z-10">
                       <tr class="text-dark-400 text-xs border-b border-dark-700/50">
-                        <th class="text-left py-2 px-3 font-medium">欄位</th>
+                        <th class="text-left py-2 px-3 font-medium" data-en="Column">欄位</th>
                         <th class="text-right py-2 px-3 font-medium">缺失數</th>
                         <th class="text-right py-2 px-3 font-medium">缺失率</th>
                       </tr>
@@ -769,19 +769,19 @@
               <div class="px-4 pb-4 space-y-3">
                 <div class="grid grid-cols-2 gap-2 text-xs">
                   <div class="bg-dark-800/50 rounded p-2">
-                    <p class="text-dark-500 mb-0.5">欄位</p>
+                    <p class="text-dark-500 mb-0.5" data-en="Column">欄位</p>
                     <p class="font-mono text-dark-100" id="pp-target-col">—</p>
                   </div>
                   <div class="bg-dark-800/50 rounded p-2">
-                    <p class="text-dark-500 mb-0.5">資料型別</p>
+                    <p class="text-dark-500 mb-0.5" data-en="Data Type">資料型別</p>
                     <p class="font-mono text-dark-100" id="pp-target-dtype">—</p>
                   </div>
                   <div class="bg-dark-800/50 rounded p-2">
-                    <p class="text-dark-500 mb-0.5">唯一值數</p>
+                    <p class="text-dark-500 mb-0.5" data-en="Unique Values">唯一值數</p>
                     <p class="font-mono text-dark-100" id="pp-target-unique">—</p>
                   </div>
                   <div class="bg-dark-800/50 rounded p-2">
-                    <p class="text-dark-500 mb-0.5">缺失</p>
+                    <p class="text-dark-500 mb-0.5" data-en="Missing">缺失</p>
                     <p class="font-mono text-dark-100" id="pp-target-missing">—</p>
                   </div>
                 </div>
@@ -794,14 +794,14 @@
             <div id="pp-outliers-card" class="card hidden">
               <div class="card-header">
                 <h3 class="card-title">離群值掃描 (3×IQR)</h3>
-                <span id="pp-outliers-count" class="text-[10px] px-2 py-0.5 rounded border border-warning-500/30 text-warning-400">0 欄</span>
+                <span id="pp-outliers-count" class="text-[10px] px-2 py-0.5 rounded border border-warning-500/30 text-warning-400" data-en="0 cols">0 欄</span>
               </div>
               <div class="px-4 pb-4">
                 <div class="overflow-x-auto" style="max-height:220px">
                   <table class="w-full text-sm">
                     <thead class="sticky top-0 bg-dark-900 z-10">
                       <tr class="text-dark-400 text-xs border-b border-dark-700/50">
-                        <th class="text-left py-2 px-3 font-medium">欄位</th>
+                        <th class="text-left py-2 px-3 font-medium" data-en="Column">欄位</th>
                         <th class="text-right py-2 px-3 font-medium">離群數</th>
                         <th class="text-right py-2 px-3 font-medium">比例</th>
                         <th class="text-right py-2 px-3 font-medium">下界</th>
@@ -825,12 +825,12 @@
                 目標洩漏候選
               </h3>
               <div class="flex items-center gap-2">
-                <span id="pp-leakage-high-count" class="text-[10px] px-2 py-0.5 rounded border border-danger-500/30 text-danger-400 bg-danger-500/10 hidden">0 高風險</span>
-                <span id="pp-leakage-med-count" class="text-[10px] px-2 py-0.5 rounded border border-warning-500/30 text-warning-400 bg-warning-500/10 hidden">0 中風險</span>
+                <span id="pp-leakage-high-count" class="text-[10px] px-2 py-0.5 rounded border border-danger-500/30 text-danger-400 bg-danger-500/10 hidden" data-en="0 high risk">0 高風險</span>
+                <span id="pp-leakage-med-count" class="text-[10px] px-2 py-0.5 rounded border border-warning-500/30 text-warning-400 bg-warning-500/10 hidden" data-en="0 medium risk">0 中風險</span>
               </div>
             </div>
             <div class="px-4 pb-4 space-y-3">
-              <p class="text-[11px] text-dark-400 leading-relaxed">
+              <p class="text-[11px] text-dark-400 leading-relaxed" data-en="These columns correlate abnormally with the target (>0.8) — likely a leaked form of the answer (e.g. timestamps, pre-computed columns, row ID order). Recommend removing them; otherwise the model looks perfect in dev but collapses in production.">
                 這些欄位與目標欄相關性異常高（&gt;0.8），可能是「答案的另一種呈現」（如時間欄、預先計算欄、行 ID 順序）。
                 建議從特徵清單剔除，否則模型在開發時看似完美，上線後會崩盤。
               </p>
@@ -838,7 +838,7 @@
                 <table class="w-full text-sm">
                   <thead class="sticky top-0 bg-dark-900 z-10">
                     <tr class="text-dark-400 text-xs border-b border-dark-700/50">
-                      <th class="text-left py-2 px-3 font-medium">欄位</th>
+                      <th class="text-left py-2 px-3 font-medium" data-en="Column">欄位</th>
                       <th class="text-right py-2 px-3 font-medium">相關性</th>
                       <th class="text-center py-2 px-3 font-medium">偵測方法</th>
                       <th class="text-center py-2 px-3 font-medium">風險等級</th>
@@ -859,7 +859,7 @@
                 </svg>
                 標籤雜訊偵測
               </h3>
-              <span id="pp-labelnoise-count" class="text-[10px] px-2 py-0.5 rounded border border-warning-500/30 text-warning-400 bg-warning-500/10 hidden">0 筆</span>
+              <span id="pp-labelnoise-count" class="text-[10px] px-2 py-0.5 rounded border border-warning-500/30 text-warning-400 bg-warning-500/10 hidden" data-en="0 entries">0 筆</span>
             </div>
             <div class="px-4 pb-4 space-y-3">
               <p class="text-[11px] text-dark-400 leading-relaxed">
@@ -889,7 +889,7 @@
                 </svg>
                 集成離群偵測
               </h3>
-              <span id="pp-ensemble-outliers-count" class="text-[10px] px-2 py-0.5 rounded border border-danger-500/30 text-danger-400 bg-danger-500/10 hidden">0 筆</span>
+              <span id="pp-ensemble-outliers-count" class="text-[10px] px-2 py-0.5 rounded border border-danger-500/30 text-danger-400 bg-danger-500/10 hidden" data-en="0 entries">0 筆</span>
             </div>
             <div class="px-4 pb-4 space-y-3">
               <p class="text-[11px] text-dark-400 leading-relaxed">
@@ -914,7 +914,7 @@
           <div id="pp-groups-section" class="card mb-6 hidden">
             <div class="card-header">
               <h3 class="card-title">欄位自動分類 (AutoRouter)</h3>
-              <span class="text-xs text-dark-400">每個欄位自動指派對應的處理管線</span>
+              <span class="text-xs text-dark-400" data-en="Each column auto-assigned to its pipeline">每個欄位自動指派對應的處理管線</span>
             </div>
             <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5 gap-3 px-4 pb-4">
               <div class="bg-dark-800/50 rounded-lg p-3 border border-blue-500/20">
@@ -922,7 +922,7 @@
                   <span class="text-xs font-semibold text-blue-400">Numeric</span>
                   <span class="text-xs text-dark-500" id="pp-group-numeric-count">0</span>
                 </div>
-                <p class="text-[10px] text-dark-500 mb-2">中位數填補 → StandardScaler</p>
+                <p class="text-[10px] text-dark-500 mb-2" data-en="Median imputation → StandardScaler">中位數填補 → StandardScaler</p>
                 <div id="pp-group-numeric" class="flex flex-wrap gap-1 max-h-28 overflow-y-auto pr-1"></div>
               </div>
               <div class="bg-dark-800/50 rounded-lg p-3 border border-amber-500/20">
@@ -930,7 +930,7 @@
                   <span class="text-xs font-semibold text-amber-400">Categorical</span>
                   <span class="text-xs text-dark-500" id="pp-group-categorical-count">0</span>
                 </div>
-                <p class="text-[10px] text-dark-500 mb-2">眾數填補 → OneHotEncoder</p>
+                <p class="text-[10px] text-dark-500 mb-2" data-en="Mode imputation → OneHotEncoder">眾數填補 → OneHotEncoder</p>
                 <div id="pp-group-categorical" class="flex flex-wrap gap-1 max-h-28 overflow-y-auto pr-1"></div>
               </div>
               <div class="bg-dark-800/50 rounded-lg p-3 border border-rose-500/20">
@@ -938,7 +938,7 @@
                   <span class="text-xs font-semibold text-rose-400">High-Cardinality</span>
                   <span class="text-xs text-dark-500" id="pp-group-high_cardinality-count">0</span>
                 </div>
-                <p class="text-[10px] text-dark-500 mb-2">眾數填補 → OrdinalEncoder (防 OHE 爆炸)</p>
+                <p class="text-[10px] text-dark-500 mb-2" data-en="Mode imputation → OrdinalEncoder (avoid OHE blowup)">眾數填補 → OrdinalEncoder (防 OHE 爆炸)</p>
                 <div id="pp-group-high_cardinality" class="flex flex-wrap gap-1 max-h-28 overflow-y-auto pr-1"></div>
               </div>
               <div class="bg-dark-800/50 rounded-lg p-3 border border-purple-500/20">
@@ -946,7 +946,7 @@
                   <span class="text-xs font-semibold text-purple-400">Text (NLP)</span>
                   <span class="text-xs text-dark-500" id="pp-group-text-count">0</span>
                 </div>
-                <p class="text-[10px] text-dark-500 mb-2">char_wb TF-IDF (支援中文) → SVD 50 維</p>
+                <p class="text-[10px] text-dark-500 mb-2" data-en="char_wb TF-IDF (Chinese supported) → SVD 50 dims">char_wb TF-IDF (支援中文) → SVD 50 維</p>
                 <div id="pp-group-text" class="flex flex-wrap gap-1 max-h-28 overflow-y-auto pr-1"></div>
               </div>
               <div class="bg-dark-800/50 rounded-lg p-3 border border-green-500/20">
@@ -954,7 +954,7 @@
                   <span class="text-xs font-semibold text-green-400">Datetime</span>
                   <span class="text-xs text-dark-500" id="pp-group-datetime-count">0</span>
                 </div>
-                <p class="text-[10px] text-dark-500 mb-2">拆 year / month / day / weekday</p>
+                <p class="text-[10px] text-dark-500 mb-2" data-en="Split into year / month / day / weekday">拆 year / month / day / weekday</p>
                 <div id="pp-group-datetime" class="flex flex-wrap gap-1 max-h-28 overflow-y-auto pr-1"></div>
               </div>
             </div>
@@ -962,8 +962,8 @@
             <div class="px-4 pb-4">
               <div id="pp-dropped-section" class="bg-dark-800/30 rounded-lg p-3 border border-dark-700 hidden">
                 <div class="flex items-center justify-between mb-2">
-                  <span class="text-xs font-semibold text-dark-400">已自動剔除 / 標記</span>
-                  <span class="text-[10px] text-dark-500">這些欄位不會進入模型</span>
+                  <span class="text-xs font-semibold text-dark-400" data-en="Auto-excluded / marked">已自動剔除 / 標記</span>
+                  <span class="text-[10px] text-dark-500" data-en="These columns won't enter the model">這些欄位不會進入模型</span>
                 </div>
                 <div id="pp-dropped-chips" class="flex flex-wrap gap-1"></div>
               </div>
@@ -983,10 +983,46 @@
             <div class="px-4 pb-4 space-y-2" id="pp-applied-body"></div>
           </div>
 
+          <!-- 對抗驗證結果 — 只有上傳了 test.csv 才會顯示 -->
+          <div id="pp-adversarial-card" class="card mb-6 hidden">
+            <div class="card-header">
+              <h3 class="card-title flex items-center gap-2">
+                <svg class="w-4 h-4 text-warning-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4M12 2a10 10 0 100 20 10 10 0 000-20z"/>
+                </svg>
+                對抗驗證結果 (Adversarial Validation)
+                <span id="pp-adv-verdict-badge" class="text-xs px-2 py-0.5 rounded-full font-semibold"></span>
+              </h3>
+            </div>
+            <div class="px-4 pb-4 space-y-3 text-sm">
+              <!-- AUC + 訊息 -->
+              <div class="flex items-center gap-4 px-3 py-2 rounded-lg" id="pp-adv-summary-row">
+                <div>
+                  <div class="text-xs text-dark-400">AUC</div>
+                  <div class="font-mono text-lg" id="pp-adv-auc">—</div>
+                </div>
+                <div class="flex-1 text-xs leading-snug" id="pp-adv-message">—</div>
+              </div>
+              <!-- 被剔除的「間諜特徵」 -->
+              <div id="pp-adv-dropped-wrap" class="hidden">
+                <p class="text-xs text-dark-400 mb-1.5">自動剔除的間諜特徵 <span id="pp-adv-dropped-count" class="text-dark-300"></span></p>
+                <div id="pp-adv-dropped-list" class="flex flex-wrap gap-1.5"></div>
+              </div>
+              <!-- Top 重要性 -->
+              <div id="pp-adv-top-wrap" class="hidden">
+                <p class="text-xs text-dark-400 mb-1.5" data-en="Top discriminating features (how distinguishable train/test are)">Top 區分能力特徵(可分辨 train/test 的程度)</p>
+                <div id="pp-adv-top-list" class="space-y-1"></div>
+              </div>
+              <p class="text-[11px] text-dark-500">
+                💡 AUC ≈ 0.5 = 分布幾乎一致;>0.85 = 嚴重漂移。被剔除的特徵已從訓練 / 測試集移除,避免模型「學成」訓練集標記。
+              </p>
+            </div>
+          </div>
+
           <!-- Transform Result -->
           <div id="pp-result-section" class="card mb-6 hidden">
             <div class="card-header">
-              <h3 class="card-title">處理後特徵 (X_train 前 10 列)</h3>
+              <h3 class="card-title" data-en="Transformed Features (X_train top 10)">處理後特徵 (X_train 前 10 列)</h3>
               <div class="flex items-center gap-3 text-xs text-dark-400">
                 <span>訓練 <span id="pp-result-train" class="text-dark-100 font-semibold">—</span></span>
                 <span>測試 <span id="pp-result-test" class="text-dark-100 font-semibold">—</span></span>
@@ -1019,7 +1055,7 @@
                   滾輪捲動查看更多列,Shift+滾輪 / 拖拉捲軸 看橫向欄位
                 </p>
               </div>
-              <p class="text-[11px] text-dark-500 mt-2">
+              <p class="text-[11px] text-dark-500 mt-2" data-en="💡 Fitted preprocessor saved on backend; reusable for new data later (POST /api/preprocess/inference).">
                 💡 fitted preprocessor 已儲存在後端,可用於日後對新資料套用 (POST /api/preprocess/inference)。
               </p>
             </div>
@@ -1035,13 +1071,13 @@
               </div>
             </div>
             <div class="px-4 pb-4">
-              <p id="pp-inference-hint" class="text-[11px] text-dark-500 mb-2">預設值已自動帶入第一筆資料,展開後可修改後再轉換。</p>
+              <p id="pp-inference-hint" class="text-[11px] text-dark-500 mb-2" data-en="Default values pre-filled from row 1; expand to edit before transform.">預設值已自動帶入第一筆資料,展開後可修改後再轉換。</p>
               <div id="pp-inference-inputs-wrap" class="hidden">
                 <div class="grid grid-cols-1 md:grid-cols-2 gap-3 mb-3">
                   <!-- Left: 原始輸入 -->
                   <div class="rounded-lg border border-dark-700/50 bg-dark-900/40">
                     <div class="px-3 py-2 border-b border-dark-700/50 flex items-center justify-between">
-                      <p class="text-[11px] font-semibold text-dark-300">原始資料 (Input)</p>
+                      <p class="text-[11px] font-semibold text-dark-300" data-en="Raw Input">原始資料 (Input)</p>
                       <span class="text-[10px] text-dark-500" id="pp-input-count">—</span>
                     </div>
                     <div id="pp-inference-inputs" class="p-2 space-y-1 max-h-80 overflow-y-auto" style="overscroll-behavior:contain;"></div>
@@ -1049,11 +1085,11 @@
                   <!-- Right: 處理後輸出 -->
                   <div class="rounded-lg border border-accent-500/30 bg-accent-500/[0.03]">
                     <div class="px-3 py-2 border-b border-accent-500/20 flex items-center justify-between">
-                      <p class="text-[11px] font-semibold text-accent-400">處理後 (Transformed)</p>
-                      <span class="text-[10px] text-dark-500" id="pp-output-count">尚未轉換</span>
+                      <p class="text-[11px] font-semibold text-accent-400" data-en="Transformed">處理後 (Transformed)</p>
+                      <span class="text-[10px] text-dark-500" id="pp-output-count" data-en="Not transformed yet">尚未轉換</span>
                     </div>
                     <div id="pp-inference-outputs" class="p-2 space-y-1 max-h-80 overflow-y-auto" style="overscroll-behavior:contain;">
-                      <p class="text-[11px] text-dark-500 px-2 py-1">點擊下方「轉換這筆資料」後會顯示處理結果。</p>
+                      <p class="text-[11px] text-dark-500 px-2 py-1" data-en="Click 'Transform this row' below to see the result.">點擊下方「轉換這筆資料」後會顯示處理結果。</p>
                     </div>
                   </div>
                 </div>
@@ -1077,7 +1113,7 @@
             </div>
             <h3 class="empty-state-title">尚未上傳數據集</h3>
             <p class="empty-state-desc">請先前往數據集管理頁面上傳 CSV 檔案</p>
-            <button onclick="navigateTo('datasets')" class="btn btn-primary">前往上傳數據集</button>
+            <button onclick="navigateTo('datasets')" class="btn btn-primary" data-en="Go to Upload Dataset">前往上傳數據集</button>
           </div>
 
           <!-- Experiment config (shown when dataset is loaded) -->
@@ -1090,7 +1126,7 @@
               <!-- Dataset Picker (from all uploaded CSV) -->
               <div class="px-4 pt-2 pb-3 border-b border-dark-700/30">
                 <div class="flex items-center gap-3">
-                  <label class="text-sm text-dark-300 shrink-0">資料集</label>
+                  <label class="text-sm text-dark-300 shrink-0" data-en="Dataset">資料集</label>
                   <select id="exp-dataset-select" class="flex-1 bg-dark-800 border border-dark-600 rounded-lg px-3 py-2 text-sm focus:border-primary-500 outline-none"></select>
                   <span class="text-xs text-dark-500" id="exp-dataset-info">—</span>
                 </div>
@@ -1098,13 +1134,13 @@
               <div class="grid grid-cols-1 md:grid-cols-2 gap-6 px-4 pb-4 pt-4">
                 <!-- Target Variable -->
                 <div>
-                  <label class="block text-sm font-medium text-dark-300 mb-2">目標變數 (Target Variable)</label>
+                  <label class="block text-sm font-medium text-dark-300 mb-2" data-en="Target Variable">目標變數 (Target Variable)</label>
                   <select id="exp-target-select" class="w-full bg-dark-800 border border-dark-600 rounded-lg px-3 py-2.5 text-sm focus:border-primary-500 outline-none"></select>
                   <p id="exp-target-info" class="text-xs text-dark-500 mt-1.5"></p>
                 </div>
                 <!-- Task Type -->
                 <div>
-                  <label class="block text-sm font-medium text-dark-300 mb-2">任務類型</label>
+                  <label class="block text-sm font-medium text-dark-300 mb-2" data-en="Task Type">任務類型</label>
                   <div class="flex gap-2 flex-wrap" id="exp-task-type-radios">
                     <label class="flex items-center gap-1.5 px-3 py-2 rounded-lg bg-dark-800 border border-dark-600 cursor-pointer hover:border-primary-500 transition-colors text-sm has-[:checked]:border-primary-500 has-[:checked]:bg-primary-500/10">
                       <input type="radio" name="exp-task-type" value="auto" checked class="accent-primary-500"> 自動偵測
@@ -1120,15 +1156,15 @@
                 </div>
                 <!-- Time Series Toggle -->
                 <div>
-                  <label class="block text-sm font-medium text-dark-300 mb-2">資料集類型</label>
+                  <label class="block text-sm font-medium text-dark-300 mb-2" data-en="Dataset Type">資料集類型</label>
                   <label class="flex items-center gap-3 px-3 py-2.5 rounded-lg bg-dark-800 border border-dark-600 cursor-pointer hover:border-primary-500 transition-colors">
                     <label class="toggle-switch" style="flex-shrink:0">
                       <input type="checkbox" id="exp-time-series">
                       <span class="toggle-slider"></span>
                     </label>
                     <div>
-                      <p class="text-sm font-medium">時間序列 (Time Series)</p>
-                      <p class="text-xs text-dark-400">啟用後將依時間順序切分訓練/測試集</p>
+                      <p class="text-sm font-medium" data-en="Time Series">時間序列 (Time Series)</p>
+                      <p class="text-xs text-dark-400" data-en="Enable to split train/test chronologically">啟用後將依時間順序切分訓練/測試集</p>
                     </div>
                   </label>
                   <!-- Class Imbalance Toggle -->
@@ -1139,7 +1175,7 @@
                     </label>
                     <div>
                       <p class="text-sm font-medium">類別平衡 (class_weight='balanced')</p>
-                      <p class="text-xs text-dark-400">資料類別不平衡時啟用，讓少數類別獲得更高權重</p>
+                      <p class="text-xs text-dark-400" data-en="Enable for imbalanced classes — gives higher weight to minority class">資料類別不平衡時啟用，讓少數類別獲得更高權重</p>
                     </div>
                   </label>
                   <p id="exp-imbalance-hint" class="hidden mt-1.5 text-xs text-warning-400 px-1"></p>
@@ -1147,28 +1183,28 @@
                 <!-- Training Engine — sklearn vs pipeline vs autogluon -->
                 <div class="md:col-span-2">
                   <label class="block text-sm font-medium text-dark-300 mb-2">
-                    訓練引擎 <span class="text-dark-500 font-normal text-xs">— sklearn (快) / pipeline (深度) / autogluon (基準對照)</span>
+                    訓練引擎 <span class="text-dark-500 font-normal text-xs" data-en="— sklearn (fast) / pipeline (deep) / autogluon (baseline)">— sklearn (快) / pipeline (深度) / autogluon (基準對照)</span>
                   </label>
                   <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
                     <label class="flex items-start gap-3 px-3 py-2.5 rounded-lg bg-dark-800 border border-dark-600 cursor-pointer hover:border-primary-500 transition-colors has-[:checked]:border-primary-500 has-[:checked]:bg-primary-500/10">
                       <input type="radio" name="exp-engine" value="sklearn" checked class="accent-primary-500 mt-0.5">
                       <div>
                         <p class="text-sm font-medium">sklearn</p>
-                        <p class="text-xs text-dark-400">同時跑多個演算法,秒級到分鐘級。可勾選下方演算法。</p>
+                        <p class="text-xs text-dark-400" data-en="Runs multiple algorithms in seconds to minutes. Select below.">同時跑多個演算法,秒級到分鐘級。可勾選下方演算法。</p>
                       </div>
                     </label>
                     <label class="flex items-start gap-3 px-3 py-2.5 rounded-lg bg-dark-800 border border-dark-600 cursor-pointer hover:border-warning-500 transition-colors has-[:checked]:border-warning-500 has-[:checked]:bg-warning-500/10">
                       <input type="radio" name="exp-engine" value="daniel" class="accent-warning-500 mt-0.5">
                       <div>
                         <p class="text-sm font-medium">pipeline</p>
-                        <p class="text-xs text-dark-400">HPO + NAS + 5-Fold CV + 雙層 Ensemble,數分鐘起跳。</p>
+                        <p class="text-xs text-dark-400" data-en="HPO + NAS + 5-Fold CV + 2-layer Ensemble. Minutes-plus.">HPO + NAS + 5-Fold CV + 雙層 Ensemble,數分鐘起跳。</p>
                       </div>
                     </label>
                     <label class="flex items-start gap-3 px-3 py-2.5 rounded-lg bg-dark-800 border border-dark-600 cursor-pointer hover:border-accent-500 transition-colors has-[:checked]:border-accent-500 has-[:checked]:bg-accent-500/10">
                       <input type="radio" name="exp-engine" value="autogluon" class="accent-accent-500 mt-0.5">
                       <div>
                         <p class="text-sm font-medium">autogluon</p>
-                        <p class="text-xs text-dark-400">TabularPredictor 一條龍,當基準對照組。MVP 暫不支援 batch predict / SHAP。</p>
+                        <p class="text-xs text-dark-400" data-en="TabularPredictor end-to-end as baseline. MVP: no batch predict / SHAP yet.">TabularPredictor 一條龍,當基準對照組。MVP 暫不支援 batch predict / SHAP。</p>
                       </div>
                     </label>
                   </div>
@@ -1177,7 +1213,7 @@
                 <!-- Autogluon engine options — 只在引擎=autogluon 顯示 -->
                 <div id="exp-autogluon-options" class="md:col-span-2 hidden">
                   <label class="block text-sm font-medium text-dark-300 mb-2">
-                    Autogluon 選項 <span class="text-dark-500 font-normal text-xs">— 沒設 time_limit = 讓 autogluon 自己決定</span>
+                    Autogluon 選項 <span class="text-dark-500 font-normal text-xs" data-en="— No time_limit = autogluon decides">— 沒設 time_limit = 讓 autogluon 自己決定</span>
                   </label>
                   <div class="grid grid-cols-1 md:grid-cols-3 gap-3">
                     <div class="setting-row">
@@ -1191,10 +1227,10 @@
                       </select>
                     </div>
                     <div class="setting-row">
-                      <p class="text-xs font-medium mb-1">Time limit (秒)</p>
+                      <p class="text-xs font-medium mb-1" data-en="Time limit (seconds)">Time limit (秒)</p>
                       <input id="exp-autogluon-time-limit" type="number" min="0" placeholder="0 = 不限"
                              class="form-input w-full text-xs">
-                      <p class="text-[10px] text-dark-500 mt-1">0 = 用 autogluon 自己 default</p>
+                      <p class="text-[10px] text-dark-500 mt-1" data-en="0 = use autogluon default">0 = 用 autogluon 自己 default</p>
                     </div>
                   </div>
                 </div>
@@ -1202,13 +1238,13 @@
                 <!-- Pipeline engine options — 只在引擎=daniel 顯示 -->
                 <div id="exp-daniel-options" class="md:col-span-2 hidden">
                   <label class="block text-sm font-medium text-dark-300 mb-2">
-                    Pipeline 選項 <span class="text-dark-500 font-normal text-xs">— 預設 fast 模式縮減 HPO trials</span>
+                    Pipeline 選項 <span class="text-dark-500 font-normal text-xs" data-en="— Default fast mode reduces HPO trials">— 預設 fast 模式縮減 HPO trials</span>
                   </label>
                   <div class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-3">
                     <label class="setting-row cursor-pointer">
                       <div>
-                        <p class="text-xs font-medium">快速模式</p>
-                        <p class="text-[10px] text-dark-500">縮減 trials</p>
+                        <p class="text-xs font-medium" data-en="Fast Mode">快速模式</p>
+                        <p class="text-[10px] text-dark-500" data-en="Reduce trials">縮減 trials</p>
                       </div>
                       <label class="toggle-switch">
                         <input type="checkbox" id="exp-daniel-fast" checked>
@@ -1217,8 +1253,8 @@
                     </label>
                     <label class="setting-row cursor-pointer">
                       <div>
-                        <p class="text-xs font-medium">跳過 DL</p>
-                        <p class="text-[10px] text-dark-500">只跑傳統 ML</p>
+                        <p class="text-xs font-medium" data-en="Skip DL">跳過 DL</p>
+                        <p class="text-[10px] text-dark-500" data-en="Traditional ML only">只跑傳統 ML</p>
                       </div>
                       <label class="toggle-switch">
                         <input type="checkbox" id="exp-daniel-skip-dl">
@@ -1227,8 +1263,8 @@
                     </label>
                     <label class="setting-row cursor-pointer">
                       <div>
-                        <p class="text-xs font-medium">跳過 NAS</p>
-                        <p class="text-[10px] text-dark-500">用預設架構</p>
+                        <p class="text-xs font-medium" data-en="Skip NAS">跳過 NAS</p>
+                        <p class="text-[10px] text-dark-500" data-en="Use default architecture">用預設架構</p>
                       </div>
                       <label class="toggle-switch">
                         <input type="checkbox" id="exp-daniel-no-nas">
@@ -1237,8 +1273,8 @@
                     </label>
                     <label class="setting-row cursor-pointer">
                       <div>
-                        <p class="text-xs font-medium">最佳化指標</p>
-                        <p class="text-[10px] text-dark-500">CV 內部評分</p>
+                        <p class="text-xs font-medium" data-en="Optimization Metric">最佳化指標</p>
+                        <p class="text-[10px] text-dark-500" data-en="CV internal score">CV 內部評分</p>
                       </div>
                       <select id="exp-daniel-metric" class="bg-dark-700 border border-dark-600 rounded px-2 py-1 text-xs">
                         <option value="f1">F1 (macro)</option>
@@ -1247,8 +1283,8 @@
                     </label>
                     <label class="setting-row cursor-pointer">
                       <div>
-                        <p class="text-xs font-medium">時間上限</p>
-                        <p class="text-[10px] text-dark-500">秒,0=無限</p>
+                        <p class="text-xs font-medium" data-en="Time Limit">時間上限</p>
+                        <p class="text-[10px] text-dark-500" data-en="seconds, 0=unlimited">秒,0=無限</p>
                       </div>
                       <input type="number" id="exp-daniel-time-limit" value="0" min="0" step="60"
                              class="w-20 bg-dark-700 border border-dark-600 rounded px-2 py-1 text-xs text-right focus:border-warning-500 outline-none">
@@ -1258,8 +1294,8 @@
                   <div class="mt-3 p-3 rounded-lg bg-dark-800/40 border border-dark-700/50">
                     <div class="flex items-center justify-between gap-3 flex-wrap">
                       <div class="flex-1 min-w-0">
-                        <p class="text-xs font-medium text-dark-200">📄 預測 CSV (可選)</p>
-                        <p class="text-[10px] text-dark-500 mt-0.5">訓練完成後將用 pipeline 對此檔案做預測,結果可直接下載成 submission.csv</p>
+                        <p class="text-xs font-medium text-dark-200" data-en="📄 Prediction CSV (optional)">📄 預測 CSV (可選)</p>
+                        <p class="text-[10px] text-dark-500 mt-0.5" data-en="After training, pipeline will predict on this file; result downloadable as submission.csv">訓練完成後將用 pipeline 對此檔案做預測,結果可直接下載成 submission.csv</p>
                       </div>
                       <div class="flex items-center gap-2 shrink-0">
                         <input type="file" id="exp-pipeline-predict-csv" accept=".csv"
@@ -1278,21 +1314,21 @@
                 <!-- Data Source (multi-select) -->
                 <div class="md:col-span-2">
                   <label class="block text-sm font-medium text-dark-300 mb-2">
-                    資料來源 <span class="text-dark-500 font-normal text-xs">可多選 — 同時跑可比較前處理效果</span>
+                    資料來源 <span class="text-dark-500 font-normal text-xs" data-en="Multi-select — runs in parallel for comparison">可多選 — 同時跑可比較前處理效果</span>
                   </label>
                   <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
                     <label class="flex items-start gap-3 px-3 py-2.5 rounded-lg bg-dark-800 border border-dark-600 cursor-pointer hover:border-primary-500 transition-colors has-[:checked]:border-primary-500 has-[:checked]:bg-primary-500/10">
                       <input type="checkbox" id="exp-src-raw" class="exp-src-cb accent-primary-500 mt-0.5" value="raw" checked>
                       <div>
-                        <p class="text-sm font-medium">原始資料集</p>
-                        <p class="text-xs text-dark-400">後端自動挑數值欄位 + 標準化 (現有流程)</p>
+                        <p class="text-sm font-medium" data-en="Raw Dataset">原始資料集</p>
+                        <p class="text-xs text-dark-400" data-en="Backend auto-selects numeric cols + standardization (existing flow)">後端自動挑數值欄位 + 標準化 (現有流程)</p>
                       </div>
                     </label>
                     <label class="flex items-start gap-3 px-3 py-2.5 rounded-lg bg-dark-800 border border-dark-600 cursor-pointer hover:border-primary-500 transition-colors has-[:checked]:border-primary-500 has-[:checked]:bg-primary-500/10">
                       <input type="checkbox" id="exp-src-pp" class="exp-src-cb accent-primary-500 mt-0.5" value="preprocessed">
                       <div class="flex-1 min-w-0">
-                        <p class="text-sm font-medium">已預處理資料</p>
-                        <p class="text-xs text-dark-400 mb-1.5">用「預處理」頁面切好的 train/test (含 OneHot / 文字 / 日期處理)</p>
+                        <p class="text-sm font-medium" data-en="Preprocessed Data">已預處理資料</p>
+                        <p class="text-xs text-dark-400 mb-1.5" data-en="Uses train/test from 'Preprocessing' page (OneHot / text / date)">用「預處理」頁面切好的 train/test (含 OneHot / 文字 / 日期處理)</p>
                         <div class="relative flex items-center gap-1">
                           <select id="exp-pp-select" class="flex-1 min-w-0 bg-dark-900 border border-dark-600 rounded px-2 py-1 text-xs focus:border-primary-500 outline-none disabled:opacity-50" disabled>
                             <option value="">尚無預處理結果 — 請先到「預處理」頁面執行</option>
@@ -1310,7 +1346,7 @@
                 <div class="md:col-span-2">
                   <div id="exp-feature-section-header" class="flex items-center justify-between mb-2">
                     <div class="flex items-center gap-4">
-                      <label class="block text-sm font-medium text-dark-300">特徵欄位 <span id="exp-feature-count" class="text-dark-500 font-normal"></span> <span class="text-dark-500 font-normal text-xs">(僅套用於「原始資料集」)</span></label>
+                      <label class="block text-sm font-medium text-dark-300">特徵欄位 <span id="exp-feature-count" class="text-dark-500 font-normal"></span> <span class="text-dark-500 font-normal text-xs" data-en="(applies only to 'Raw Dataset')">(僅套用於「原始資料集」)</span></label>
                       <input type="text" id="exp-feature-search" placeholder="搜尋欄位..." class="bg-dark-800 border border-dark-700 rounded px-2 py-1 text-xs focus:border-primary-500 outline-none w-32">
                     </div>
                     <div class="flex items-center gap-2">
@@ -1340,7 +1376,7 @@
                 </div>
               </div>
               <div class="px-4 pb-4 flex justify-end">
-                <button id="btn-real-train" class="btn btn-lg btn-primary">開始訓練</button>
+                <button id="btn-real-train" class="btn btn-lg btn-primary" data-en="Start Training">開始訓練</button>
               </div>
             </div>
 
@@ -1351,12 +1387,12 @@
                 <div class="flex items-center gap-3">
                   <!-- elapsed / time_limit timer; 沒設 time_limit 時只顯示 elapsed -->
                   <span id="exp-elapsed-timer" class="text-xs text-dark-400 font-mono hidden">
-                    <span class="text-dark-500">已跑</span>
+                    <span class="text-dark-500" data-en="Done">已跑</span>
                     <span id="exp-elapsed-value" class="text-dark-200">00:00</span>
                     <span id="exp-time-limit-sep" class="text-dark-600 hidden"> / </span>
                     <span id="exp-time-limit-value" class="text-dark-400 hidden"></span>
                   </span>
-                  <span id="exp-progress-step" class="text-xs text-accent-400 font-mono">準備中...</span>
+                  <span id="exp-progress-step" class="text-xs text-accent-400 font-mono" data-en="Preparing...">準備中...</span>
                 </div>
               </div>
               <div class="px-4 pb-2">
@@ -1381,13 +1417,13 @@
                   <table class="w-full text-sm">
                     <thead>
                       <tr class="text-dark-400 text-xs border-b border-dark-700/50">
-                        <th class="py-3 px-4 text-left font-medium">排名</th>
-                        <th class="py-3 px-4 text-left font-medium">資料來源</th>
-                        <th class="py-3 px-4 text-left font-medium">演算法</th>
+                        <th class="py-3 px-4 text-left font-medium" data-en="Rank">排名</th>
+                        <th class="py-3 px-4 text-left font-medium" data-en="Data Source">資料來源</th>
+                        <th class="py-3 px-4 text-left font-medium" data-en="Algorithm">演算法</th>
                         <th class="py-3 px-4 text-left font-medium" id="exp-metric-col1">—</th>
                         <th class="py-3 px-4 text-left font-medium" id="exp-metric-col2">—</th>
                         <th class="py-3 px-4 text-left font-medium" id="exp-metric-col3">—</th>
-                        <th class="py-3 px-4 text-left font-medium">訓練時間</th>
+                        <th class="py-3 px-4 text-left font-medium" data-en="Train Time">訓練時間</th>
                       </tr>
                     </thead>
                     <tbody id="exp-results-body"></tbody>
@@ -1397,7 +1433,7 @@
 
               <!-- Model selector for the two charts (Daniel pipeline 跑出來的模型不適用,會被隱藏) -->
               <div id="exp-chart-model-selector-wrap" class="flex items-center gap-2 mb-3 text-sm">
-                <span class="text-dark-400">檢視模型圖表:</span>
+                <span class="text-dark-400" data-en="View model charts:">檢視模型圖表:</span>
                 <select id="exp-chart-model-select" class="bg-dark-800 border border-dark-600 rounded-lg px-3 py-1.5 text-sm focus:border-primary-500 outline-none min-w-[18rem]"></select>
               </div>
 
@@ -1414,10 +1450,12 @@
               </div>
 
               <!-- 批次預測 — 上傳 test.csv,用訓練好的模型整批預測並下載結果 -->
-              <div id="exp-batch-predict-card" class="card mb-6">
+              <!-- 隱藏:這個功能跟「模型排行榜」頁的批次預測重複,避免 user 在兩處遇到不同表現。 -->
+              <!-- 若要恢復:把 hidden 拿掉。 -->
+              <div id="exp-batch-predict-card" class="card mb-6 hidden">
                 <div class="card-header">
-                  <h3 class="card-title">批次預測 (Batch Predict)</h3>
-                  <span class="text-xs text-dark-400">上傳一份 CSV (例如預處理頁下載的 test.csv),用模型整批預測</span>
+                  <h3 class="card-title" data-en="Batch Predict">批次預測 (Batch Predict)</h3>
+                  <span class="text-xs text-dark-400" data-en="Upload a CSV (e.g. test.csv from Preprocessing page) for batch prediction">上傳一份 CSV (例如預處理頁下載的 test.csv),用模型整批預測</span>
                 </div>
                 <div class="p-4 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 items-end">
                   <div>
@@ -1477,7 +1515,7 @@
             <div class="step-line"></div>
             <div class="step-item" data-step="4">
               <div class="step-circle">4</div>
-              <span class="step-label">開始訓練</span>
+              <span class="step-label" data-en="Start Training">開始訓練</span>
             </div>
           </div>
 
@@ -1492,7 +1530,7 @@
               </select>
             </div>
             <div>
-              <label class="block text-sm font-medium text-dark-300 mb-2">目標變數 (Target Variable)</label>
+              <label class="block text-sm font-medium text-dark-300 mb-2" data-en="Target Variable">目標變數 (Target Variable)</label>
               <select class="w-full bg-dark-800 border border-dark-600 rounded-lg px-3 py-2.5 text-sm focus:border-primary-500 focus:ring-1 focus:ring-primary-500 outline-none">
                 <option>churn (是否流失)</option>
                 <option>purchase_amount (購買金額)</option>
@@ -1506,14 +1544,14 @@
                   <input type="radio" name="task-type" checked class="text-primary-500">
                   <div>
                     <p class="text-sm font-medium">二元分類</p>
-                    <p class="text-xs text-dark-400">自動偵測</p>
+                    <p class="text-xs text-dark-400" data-en="Auto Detect">自動偵測</p>
                   </div>
                 </label>
                 <label class="flex-1 flex items-center gap-3 p-3 rounded-lg bg-dark-800 border border-dark-600 cursor-pointer hover:border-dark-500">
                   <input type="radio" name="task-type" class="text-primary-500">
                   <div>
-                    <p class="text-sm font-medium">回歸</p>
-                    <p class="text-xs text-dark-400">手動選擇</p>
+                    <p class="text-sm font-medium" data-en="Regression">回歸</p>
+                    <p class="text-xs text-dark-400" data-en="Manual">手動選擇</p>
                   </div>
                 </label>
               </div>
@@ -1525,14 +1563,14 @@
                   <input type="radio" name="data-mode" value="static" checked class="text-primary-500">
                   <div>
                     <p class="text-sm font-medium">靜態表格</p>
-                    <p class="text-xs text-dark-400">Cross-sectional · 隨機切分</p>
+                    <p class="text-xs text-dark-400" data-en="Cross-sectional · Random Split">Cross-sectional · 隨機切分</p>
                   </div>
                 </label>
                 <label class="exp-data-mode-opt flex-1 flex items-center gap-3 p-3 rounded-lg bg-dark-800 border border-dark-600 cursor-pointer hover:border-dark-500" data-mode="timeseries">
                   <input type="radio" name="data-mode" value="timeseries" class="text-primary-500">
                   <div>
                     <p class="text-sm font-medium">時間序列</p>
-                    <p class="text-xs text-dark-400">Time-series · 依時間順序切分</p>
+                    <p class="text-xs text-dark-400" data-en="Time-series · Chronological Split">Time-series · 依時間順序切分</p>
                   </div>
                 </label>
               </div>
@@ -1540,7 +1578,7 @@
           </div>
           <div class="px-4 pb-4 flex justify-end gap-3">
             <button class="btn btn-secondary">進階設定</button>
-            <button id="btn-start-training" class="btn btn-lg btn-primary">開始訓練</button>
+            <button id="btn-start-training" class="btn btn-lg btn-primary" data-en="Start Training">開始訓練</button>
           </div>
         </div>
 
@@ -1549,7 +1587,7 @@
           <div class="card-header">
             <h3 class="card-title">訓練進度</h3>
             <div class="flex items-center gap-2">
-              <span class="text-xs text-dark-400">預估剩餘時間:</span>
+              <span class="text-xs text-dark-400" data-en="Estimated time left:">預估剩餘時間:</span>
               <span id="training-eta" class="text-xs text-accent-400 font-mono">03:42</span>
             </div>
           </div>
@@ -1607,12 +1645,12 @@
             <div>
               <h4 class="text-sm font-medium text-dark-300 mb-3">即時訓練日誌</h4>
               <div id="training-log" class="bg-dark-900 rounded-lg p-3 h-52 overflow-y-auto font-mono text-xs space-y-1">
-                <p class="text-dark-500">[10:30:01] 開始數據清洗...</p>
+                <p class="text-dark-500" data-en="[10:30:01] Starting data cleaning...">[10:30:01] 開始數據清洗...</p>
                 <p class="text-success-400">[10:30:13] 數據清洗完成，處理 12,450 筆記錄</p>
-                <p class="text-dark-500">[10:30:13] 開始特徵工程...</p>
+                <p class="text-dark-500" data-en="[10:30:13] Starting feature engineering...">[10:30:13] 開始特徵工程...</p>
                 <p class="text-accent-400">[10:30:25] 產生 15 個新特徵（交互、多項式、時間）</p>
                 <p class="text-success-400">[10:30:41] 特徵工程完成，最終特徵數: 42</p>
-                <p class="text-dark-500">[10:30:42] 開始超參數優化...</p>
+                <p class="text-dark-500" data-en="[10:30:42] Starting hyperparameter optimization...">[10:30:42] 開始超參數優化...</p>
                 <p class="text-primary-400">[10:31:15] XGBoost Trial #47: F1=0.921, lr=0.05, depth=6</p>
                 <p class="text-primary-400">[10:31:38] LightGBM Trial #52: F1=0.935, lr=0.03, leaves=31</p>
                 <p class="text-warning-400">[10:32:01] 新最佳! LightGBM Trial #58: F1=0.942, lr=0.025</p>
@@ -1642,7 +1680,7 @@
 
         <div class="card mb-6">
           <div class="card-header">
-            <h3 class="card-title">模型排行榜</h3>
+            <h3 class="card-title" data-en="Model Leaderboard">模型排行榜</h3>
 
             <!-- 中央:批次預測 CSV 上傳 (緊湊版) — 上傳後在每列點「預測」可下載 -->
             <div class="flex items-center gap-3 text-xs" title="上傳後在每列點「預測」按鈕用該模型生成對應的 CSV">
@@ -1655,7 +1693,7 @@
               <span class="text-dark-600">+</span>
               <label id="lb-predict-sample-label" class="flex items-center gap-1.5 px-2.5 py-1.5 bg-dark-800 hover:bg-dark-700 border border-dark-600 hover:border-primary-500 rounded-lg cursor-pointer transition-colors" title="範本 submission (選填) — 給才會輸出 Kaggle 格式;不給輸出原欄位 + prediction">
                 <svg class="w-3.5 h-3.5 text-dark-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/></svg>
-                <span id="lb-predict-sample-text" class="text-dark-400">submission 範本 (選填)</span>
+                <span id="lb-predict-sample-text" class="text-dark-400" data-en="submission template (optional)">submission 範本 (選填)</span>
                 <button type="button" id="lb-predict-sample-clear" class="hidden text-dark-500 hover:text-danger-400 ml-1" title="清除">✕</button>
                 <input type="file" id="lb-predict-sample-csv" accept=".csv,.tsv,.txt" class="hidden">
               </label>
@@ -1666,18 +1704,18 @@
               <!-- Filter chips -->
               <div class="flex items-center gap-1.5 text-xs">
                 <select id="lb-filter-source" class="bg-dark-800 border border-dark-600 rounded px-2 py-1 text-xs text-dark-300 focus:outline-none focus:border-primary-500">
-                  <option value="">全部來源</option>
+                  <option value="" data-en="All Sources">全部來源</option>
                   <option value="raw">原始</option>
                   <option value="preprocessed">預處理</option>
                 </select>
                 <select id="lb-filter-type" class="bg-dark-800 border border-dark-600 rounded px-2 py-1 text-xs text-dark-300 focus:outline-none focus:border-primary-500">
-                  <option value="">全部任務</option>
-                  <option value="classification">分類</option>
-                  <option value="regression">回歸</option>
+                  <option value="" data-en="All Tasks">全部任務</option>
+                  <option value="classification" data-en="Classification">分類</option>
+                  <option value="regression" data-en="Regression">回歸</option>
                 </select>
                 <button id="lb-filter-reset" class="text-dark-500 hover:text-dark-300 transition-colors px-1" title="重設篩選">✕</button>
               </div>
-              <button id="btn-compare" class="btn btn-sm btn-primary" disabled>比較選取的模型</button>
+              <button id="btn-compare" class="btn btn-sm btn-primary" disabled data-en="Compare Selected">比較選取的模型</button>
             </div>
           </div>
           <p id="lb-predict-status" class="text-xs px-4 py-2 hidden border-b border-dark-700/30"></p>
@@ -1700,16 +1738,16 @@
                   <th class="py-3 px-4 text-left font-medium w-10">
                     <input type="checkbox" id="select-all-models" class="rounded bg-dark-700 border-dark-500">
                   </th>
-                  <th class="py-3 px-4 text-left font-medium">排名</th>
-                  <th class="py-3 px-4 text-left font-medium">資料來源</th>
+                  <th class="py-3 px-4 text-left font-medium" data-en="Rank">排名</th>
+                  <th class="py-3 px-4 text-left font-medium" data-en="Data Source">資料來源</th>
                   <th class="py-3 px-4 text-left font-medium cursor-pointer hover:text-dark-200 sortable" data-sort="name">演算法 <span class="sort-arrow">&#8597;</span></th>
                   <th id="lb-col1" class="py-3 px-4 text-left font-medium cursor-pointer hover:text-dark-200 sortable" data-sort="metric1">F1-Score <span class="sort-arrow">&#8597;</span></th>
                   <th id="lb-col2" class="py-3 px-4 text-left font-medium cursor-pointer hover:text-dark-200 sortable" data-sort="metric2">AUC-ROC <span class="sort-arrow">&#8597;</span></th>
                   <th id="lb-col3" class="py-3 px-4 text-left font-medium cursor-pointer hover:text-dark-200 sortable" data-sort="metric3">準確率 <span class="sort-arrow">&#8597;</span></th>
                   <th class="py-3 px-4 text-left font-medium cursor-pointer hover:text-dark-200 sortable" data-sort="time">訓練時間 <span class="sort-arrow">&#8597;</span></th>
                   <th class="py-3 px-4 text-left font-medium cursor-pointer hover:text-dark-200 sortable" data-sort="latency">推論延遲 <span class="sort-arrow">&#8597;</span></th>
-                  <th class="py-3 px-4 text-left font-medium">標籤</th>
-                  <th class="py-3 px-4 text-left font-medium">操作</th>
+                  <th class="py-3 px-4 text-left font-medium" data-en="Tag">標籤</th>
+                  <th class="py-3 px-4 text-left font-medium" data-en="Action">操作</th>
                 </tr>
               </thead>
               <tbody id="leaderboard-body">
@@ -1770,8 +1808,8 @@
           <div id="shap-section" class="card mb-6">
             <div class="card-header">
               <div>
-                <h3 class="card-title">SHAP 解釋分析</h3>
-                <p class="text-xs text-dark-400 mt-0.5">Global Importance / Local Waterfall / Interaction Dependence — 互動式 Plotly 圖表</p>
+                <h3 class="card-title" data-en="SHAP Explanation">SHAP 解釋分析</h3>
+                <p class="text-xs text-dark-400 mt-0.5" data-en="Global Importance / Local Waterfall / Interaction Dependence — interactive Plotly charts">Global Importance / Local Waterfall / Interaction Dependence — 互動式 Plotly 圖表</p>
               </div>
               <div class="flex items-center gap-2 text-xs flex-wrap">
                 <label class="text-dark-400">模型:</label>
@@ -1781,13 +1819,13 @@
                   <button id="shap-family-tabular" class="px-2 py-0.5 rounded text-[11px] font-medium bg-primary-500/20 text-primary-300" data-family="tabular">Tabular</button>
                   <button id="shap-family-dl" class="px-2 py-0.5 rounded text-[11px] font-medium text-dark-400 hover:text-dark-200" data-family="dl">DL</button>
                 </div>
-                <span id="shap-source-badge" class="hidden text-[10px] px-1.5 py-0.5 rounded font-mono bg-success-500/15 text-success-400 border border-success-500/30" title="訓練時已預計算,直接從 bundle 載入,秒級顯示">✓ 持久化</span>
+                <span id="shap-source-badge" class="hidden text-[10px] px-1.5 py-0.5 rounded font-mono bg-success-500/15 text-success-400 border border-success-500/30" title="訓練時已預計算,直接從 bundle 載入,秒級顯示" data-en="✓ Persistent">✓ 持久化</span>
                 <span id="shap-best-tag" class="hidden text-[10px] text-dark-500 font-mono"></span>
                 <label class="text-dark-400 ml-2">樣本 #</label>
                 <input type="number" id="shap-sample-index" value="0" min="0" class="bg-dark-800 border border-dark-600 rounded px-2 py-1 text-xs w-16 focus:border-primary-500 outline-none">
                 <label class="text-dark-400 ml-2">交互特徵:</label>
                 <select id="shap-target-feature" class="bg-dark-800 border border-dark-600 rounded px-2 py-1 text-xs focus:border-primary-500 outline-none max-w-[10rem]"></select>
-                <button id="btn-shap-refresh" class="px-3 py-1 bg-primary-600 hover:bg-primary-500 rounded text-white font-medium transition-colors">重新計算</button>
+                <button id="btn-shap-refresh" class="px-3 py-1 bg-primary-600 hover:bg-primary-500 rounded text-white font-medium transition-colors" data-en="Recompute">重新計算</button>
               </div>
             </div>
             <div class="px-4 pb-4">
@@ -1837,7 +1875,7 @@
                 </div>
               </div>
 
-              <p class="text-[10px] text-dark-500 mt-2">
+              <p class="text-[10px] text-dark-500 mt-2" data-en="💡 Vector Plotly charts — hover for values, drag to zoom, click camera icon to download PNG.">
                 💡 圖表為矢量 Plotly,可 hover 顯示精確數值、拖選縮放、點右上角相機圖示下載 PNG。
               </p>
             </div>
@@ -1850,7 +1888,7 @@
                 <svg class="w-5 h-5 text-primary-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"/></svg>
               </div>
               <div>
-                <p class="text-sm text-dark-400">最佳模型</p>
+                <p class="text-sm text-dark-400" data-en="Best Model">最佳模型</p>
                 <h3 class="text-lg font-bold" id="insight-best-model">--</h3>
               </div>
             </div>
@@ -1859,7 +1897,7 @@
                 <svg class="w-5 h-5 text-success-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
               </div>
               <div>
-                <p class="text-sm text-dark-400" id="insight-score-label">最佳分數</p>
+                <p class="text-sm text-dark-400" id="insight-score-label" data-en="Best Score">最佳分數</p>
                 <h3 class="text-lg font-bold" id="insight-best-score">--</h3>
               </div>
             </div>
@@ -1868,7 +1906,7 @@
                 <svg class="w-5 h-5 text-accent-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 21a4 4 0 01-4-4V5a2 2 0 012-2h4a2 2 0 012 2v12a4 4 0 01-4 4zm0 0h12a2 2 0 002-2v-4a2 2 0 00-2-2h-2.343M11 7.343l1.657-1.657a2 2 0 012.828 0l2.829 2.829a2 2 0 010 2.828l-8.486 8.485M7 17h.01"/></svg>
               </div>
               <div>
-                <p class="text-sm text-dark-400">使用特徵數量</p>
+                <p class="text-sm text-dark-400" data-en="Features Used">使用特徵數量</p>
                 <h3 class="text-lg font-bold" id="insight-feature-count">--</h3>
               </div>
             </div>
@@ -1877,7 +1915,7 @@
                 <svg class="w-5 h-5 text-warning-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
               </div>
               <div>
-                <p class="text-sm text-dark-400">已訓練模型</p>
+                <p class="text-sm text-dark-400" data-en="Trained Models">已訓練模型</p>
                 <h3 class="text-lg font-bold" id="insight-model-count">--</h3>
               </div>
             </div>
@@ -1930,28 +1968,28 @@
             <div class="grid grid-cols-1 lg:grid-cols-3 gap-6 p-4">
               <!-- Feature Sliders -->
               <div class="lg:col-span-2">
-                <p class="text-xs text-dark-400 mb-3">調整特徵值，即時觀察預測結果變化</p>
+                <p class="text-xs text-dark-400 mb-3" data-en="Adjust features and watch predictions update live">調整特徵值，即時觀察預測結果變化</p>
                 <div id="real-whatif-sliders" class="space-y-4 max-h-96 overflow-y-auto pr-2"></div>
               </div>
               <!-- Prediction Result -->
               <div>
                 <div class="p-5 bg-dark-800/50 border border-dark-700/50 rounded-xl">
-                  <p class="text-xs text-dark-400 mb-2">預測結果</p>
+                  <p class="text-xs text-dark-400 mb-2" data-en="Prediction">預測結果</p>
                   <h2 class="text-3xl font-bold mb-1 text-accent-400" id="real-whatif-prediction">—</h2>
-                  <p class="text-xs text-dark-500" id="real-whatif-target-label">目標變數</p>
+                  <p class="text-xs text-dark-500" id="real-whatif-target-label" data-en="Target">目標變數</p>
                   <div class="border-t border-dark-700/50 my-4"></div>
                   <div class="space-y-2">
                     <div class="flex items-center justify-between text-xs">
-                      <span class="text-dark-400">基準預測 (平均特徵)</span>
+                      <span class="text-dark-400" data-en="Baseline Prediction (mean features)">基準預測 (平均特徵)</span>
                       <span class="font-mono text-dark-200" id="real-whatif-baseline">—</span>
                     </div>
                     <div class="flex items-center justify-between text-xs">
-                      <span class="text-dark-400">變化量 Δ</span>
+                      <span class="text-dark-400" data-en="Delta Δ">變化量 Δ</span>
                       <span class="font-mono" id="real-whatif-delta">—</span>
                     </div>
                   </div>
                   <div class="mt-4 p-3 rounded-lg bg-dark-900/50 border border-dark-700/30">
-                    <p class="text-[10px] text-dark-500 mb-1">使用模型</p>
+                    <p class="text-[10px] text-dark-500 mb-1" data-en="Model Used">使用模型</p>
                     <p class="text-xs font-medium" id="real-whatif-model-name">—</p>
                   </div>
                 </div>
@@ -1992,7 +2030,7 @@
         <div class="card mb-6">
           <div class="card-header">
             <h3 class="card-title">SHAP 蜂群圖 (Beeswarm Plot)</h3>
-            <span class="text-xs text-dark-400">每一點代表一筆資料，顏色表示特徵值高低</span>
+            <span class="text-xs text-dark-400" data-en="Each point = a sample; color = feature value">每一點代表一筆資料，顏色表示特徵值高低</span>
           </div>
           <div id="chart-shap-beeswarm" class="h-72"></div>
         </div>
@@ -2077,24 +2115,24 @@
                 <div id="chart-whatif-gauge" class="h-56"></div>
                 <div class="text-center mt-2">
                   <p class="text-2xl font-bold" id="whatif-result-label">中風險</p>
-                  <p class="text-sm text-dark-400 mt-1" id="whatif-result-detail">此客戶有 42% 的流失機率</p>
+                  <p class="text-sm text-dark-400 mt-1" id="whatif-result-detail" data-en="This customer has 42% churn probability">此客戶有 42% 的流失機率</p>
                 </div>
                 <div class="mt-6 space-y-2">
                   <div class="flex items-center justify-between text-sm">
-                    <span class="text-dark-400">流失機率</span>
+                    <span class="text-dark-400" data-en="Churn Probability">流失機率</span>
                     <span class="font-mono text-warning-400" id="whatif-churn-pct">42%</span>
                   </div>
                   <div class="flex items-center justify-between text-sm">
-                    <span class="text-dark-400">留存機率</span>
+                    <span class="text-dark-400" data-en="Retention Probability">留存機率</span>
                     <span class="font-mono text-success-400" id="whatif-retain-pct">58%</span>
                   </div>
                   <div class="flex items-center justify-between text-sm">
-                    <span class="text-dark-400">預期客戶價值</span>
+                    <span class="text-dark-400" data-en="Expected Customer Value">預期客戶價值</span>
                     <span class="font-mono text-accent-400" id="whatif-clv">NT$28,400</span>
                   </div>
                 </div>
                 <div class="mt-6 p-3 rounded-lg bg-dark-800/50 border border-dark-700/50">
-                  <p class="text-xs text-dark-400 mb-1">建議行動</p>
+                  <p class="text-xs text-dark-400 mb-1" data-en="Recommended Action">建議行動</p>
                   <p class="text-sm" id="whatif-recommendation">建議提供個人化優惠或升級方案以降低流失風險</p>
                 </div>
               </div>
@@ -2123,22 +2161,22 @@
         <div class="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
           <div class="metric-card">
             <div class="flex items-center justify-between mb-3">
-              <span class="text-dark-400 text-sm">已部署模型</span>
+              <span class="text-dark-400 text-sm" data-en="Deployed Models">已部署模型</span>
               <span class="badge badge-success">正常運行</span>
             </div>
             <div class="text-3xl font-bold">5</div>
-            <div class="text-xs text-dark-400 mt-1">3 生產環境 / 2 測試環境</div>
+            <div class="text-xs text-dark-400 mt-1" data-en="3 production / 2 staging">3 生產環境 / 2 測試環境</div>
           </div>
           <div class="metric-card">
             <div class="flex items-center justify-between mb-3">
-              <span class="text-dark-400 text-sm">今日 API 呼叫</span>
+              <span class="text-dark-400 text-sm" data-en="API Calls Today">今日 API 呼叫</span>
             </div>
             <div class="text-3xl font-bold">14.2<span class="text-lg text-dark-400">K</span></div>
             <div class="flex items-center gap-1 mt-1 text-xs text-success-400"><svg class="w-3 h-3"><use href="#i-arrow-up"/></svg>+12% 較昨日</div>
           </div>
           <div class="metric-card">
             <div class="flex items-center justify-between mb-3">
-              <span class="text-dark-400 text-sm">平均推論延遲</span>
+              <span class="text-dark-400 text-sm" data-en="Avg Inference Latency">平均推論延遲</span>
             </div>
             <div class="text-3xl font-bold">23<span class="text-lg text-dark-400">ms</span></div>
             <div class="text-xs text-success-400 mt-1">P99: 45ms</div>
@@ -2162,7 +2200,7 @@
               </div>
               <div class="text-right flex-shrink-0">
                 <p class="text-sm font-mono">F1: 0.942</p>
-                <p class="text-xs text-dark-400">部署於 2024-03-15</p>
+                <p class="text-xs text-dark-400" data-en="Deployed 2024-03-15">部署於 2024-03-15</p>
               </div>
               <div class="flex items-center gap-2">
                 <button class="p-2 hover:bg-dark-700 rounded-lg transition-colors" title="查看詳情"><svg class="w-4 h-4 text-dark-400"><use href="#i-eye"/></svg></button>
@@ -2186,7 +2224,7 @@
               </div>
               <div class="text-right flex-shrink-0">
                 <p class="text-sm font-mono">AUC: 0.978</p>
-                <p class="text-xs text-dark-400">部署於 2024-03-10</p>
+                <p class="text-xs text-dark-400" data-en="Deployed 2024-03-10">部署於 2024-03-10</p>
               </div>
               <div class="flex items-center gap-2">
                 <button class="p-2 hover:bg-dark-700 rounded-lg transition-colors" title="查看詳情"><svg class="w-4 h-4 text-dark-400"><use href="#i-eye"/></svg></button>
@@ -2210,7 +2248,7 @@
               </div>
               <div class="text-right flex-shrink-0">
                 <p class="text-sm font-mono">AUC: 0.961</p>
-                <p class="text-xs text-dark-400">部署於 2024-02-28</p>
+                <p class="text-xs text-dark-400" data-en="Deployed 2024-02-28">部署於 2024-02-28</p>
               </div>
               <div class="flex items-center gap-2">
                 <button class="p-2 hover:bg-dark-700 rounded-lg transition-colors" title="查看詳情"><svg class="w-4 h-4 text-dark-400"><use href="#i-eye"/></svg></button>
@@ -2234,7 +2272,7 @@
               </div>
               <div class="text-right flex-shrink-0">
                 <p class="text-sm font-mono">RMSE: 1,247</p>
-                <p class="text-xs text-dark-400">部署於 2024-03-18</p>
+                <p class="text-xs text-dark-400" data-en="Deployed 2024-03-18">部署於 2024-03-18</p>
               </div>
               <div class="flex items-center gap-2">
                 <button class="p-2 hover:bg-dark-700 rounded-lg transition-colors" title="查看詳情"><svg class="w-4 h-4 text-dark-400"><use href="#i-eye"/></svg></button>
@@ -2258,7 +2296,7 @@
               </div>
               <div class="text-right flex-shrink-0">
                 <p class="text-sm font-mono">Precision: 0.89</p>
-                <p class="text-xs text-dark-400">部署於 2024-03-20</p>
+                <p class="text-xs text-dark-400" data-en="Deployed 2024-03-20">部署於 2024-03-20</p>
               </div>
               <div class="flex items-center gap-2">
                 <button class="p-2 hover:bg-dark-700 rounded-lg transition-colors" title="查看詳情"><svg class="w-4 h-4 text-dark-400"><use href="#i-eye"/></svg></button>
@@ -2305,7 +2343,7 @@
               <div class="flex flex-col items-end gap-2 shrink-0">
                 <span class="text-[10px] text-dark-400 uppercase tracking-wider">Reference</span>
                 <code class="text-xs text-accent-400 font-mono bg-dark-900/60 px-2 py-1 rounded border border-accent-500/20">pipeline.py</code>
-                <span class="text-[10px] text-dark-500">classification only · 數分鐘~小時級</span>
+                <span class="text-[10px] text-dark-500" data-en="classification only · minutes to hours">classification only · 數分鐘~小時級</span>
               </div>
             </div>
           </div>
@@ -2315,7 +2353,7 @@
         <div class="card mb-6">
           <div class="card-header">
             <h3 class="card-title">9 階段流程</h3>
-            <span class="text-xs text-dark-400">每階段都會回報進度到下方 log</span>
+            <span class="text-xs text-dark-400" data-en="Each stage reports progress to the log below">每階段都會回報進度到下方 log</span>
           </div>
           <div class="p-4 overflow-x-auto">
             <div id="pipeline-stages" class="flex items-stretch gap-3 min-w-fit"></div>
@@ -2328,7 +2366,7 @@
           <div class="card lg:col-span-2">
             <div class="card-header">
               <h3 class="card-title">在你的 CSV 上跑 Pipeline</h3>
-              <span class="text-xs text-dark-400" id="pipeline-status">就緒</span>
+              <span class="text-xs text-dark-400" id="pipeline-status" data-en="Ready">就緒</span>
             </div>
             <div class="p-4 space-y-4">
               <!-- Upload zone -->
@@ -2338,7 +2376,7 @@
                   <svg class="w-8 h-8 text-warning-400"><use href="#i-upload-cloud"/></svg>
                   <div class="text-left">
                     <p class="text-sm font-medium" id="pipeline-file-label">點擊或拖拽 CSV 檔案</p>
-                    <p class="text-[11px] text-dark-500" id="pipeline-file-meta">分類任務 · 數值欄位 · 目標欄會自動偵測</p>
+                    <p class="text-[11px] text-dark-500" id="pipeline-file-meta" data-en="Classification · numeric cols · target auto-detected">分類任務 · 數值欄位 · 目標欄會自動偵測</p>
                   </div>
                 </div>
               </div>
@@ -2347,8 +2385,8 @@
               <div class="grid grid-cols-2 md:grid-cols-4 gap-3">
                 <label class="setting-row cursor-pointer">
                   <div>
-                    <p class="text-xs font-medium">快速模式</p>
-                    <p class="text-[10px] text-dark-500">縮減 HPO trials</p>
+                    <p class="text-xs font-medium" data-en="Fast Mode">快速模式</p>
+                    <p class="text-[10px] text-dark-500" data-en="Reduce HPO trials">縮減 HPO trials</p>
                   </div>
                   <label class="toggle-switch">
                     <input type="checkbox" id="pipeline-fast" checked>
@@ -2357,8 +2395,8 @@
                 </label>
                 <label class="setting-row cursor-pointer">
                   <div>
-                    <p class="text-xs font-medium">跳過 DL</p>
-                    <p class="text-[10px] text-dark-500">只跑傳統 ML</p>
+                    <p class="text-xs font-medium" data-en="Skip DL">跳過 DL</p>
+                    <p class="text-[10px] text-dark-500" data-en="Traditional ML only">只跑傳統 ML</p>
                   </div>
                   <label class="toggle-switch">
                     <input type="checkbox" id="pipeline-skip-dl">
@@ -2367,8 +2405,8 @@
                 </label>
                 <label class="setting-row cursor-pointer">
                   <div>
-                    <p class="text-xs font-medium">跳過 NAS</p>
-                    <p class="text-[10px] text-dark-500">用預設架構</p>
+                    <p class="text-xs font-medium" data-en="Skip NAS">跳過 NAS</p>
+                    <p class="text-[10px] text-dark-500" data-en="Use default architecture">用預設架構</p>
                   </div>
                   <label class="toggle-switch">
                     <input type="checkbox" id="pipeline-no-nas">
@@ -2377,7 +2415,7 @@
                 </label>
                 <label class="setting-row cursor-pointer">
                   <div>
-                    <p class="text-xs font-medium">時序模式</p>
+                    <p class="text-xs font-medium" data-en="Time-series mode">時序模式</p>
                     <p class="text-[10px] text-dark-500">TCN/PatchTST</p>
                   </div>
                   <label class="toggle-switch">
@@ -2394,7 +2432,7 @@
                          class="w-full bg-dark-800 border border-dark-600 rounded-lg px-3 py-2 text-sm focus:border-warning-500 outline-none">
                 </div>
                 <div>
-                  <label class="block text-xs font-medium text-dark-400 mb-1.5">最佳化指標</label>
+                  <label class="block text-xs font-medium text-dark-400 mb-1.5" data-en="Optimization Metric">最佳化指標</label>
                   <select id="pipeline-metric" class="w-full bg-dark-800 border border-dark-600 rounded-lg px-3 py-2 text-sm focus:border-warning-500 outline-none">
                     <option value="f1">F1 (macro)</option>
                     <option value="accuracy">Accuracy</option>
@@ -2423,14 +2461,14 @@
           <!-- 右:結果 -->
           <div class="card">
             <div class="card-header">
-              <h3 class="card-title">最佳分數</h3>
+              <h3 class="card-title" data-en="Best Score">最佳分數</h3>
               <span id="pipeline-result-metric" class="text-xs text-dark-400">—</span>
             </div>
             <div class="p-5 space-y-3" id="pipeline-result-panel">
               <div class="text-center py-6">
-                <p class="text-[10px] text-dark-500 uppercase tracking-wider mb-2">尚未執行</p>
+                <p class="text-[10px] text-dark-500 uppercase tracking-wider mb-2" data-en="Not run yet">尚未執行</p>
                 <p class="text-4xl font-bold text-dark-600 mb-1">—</p>
-                <p class="text-xs text-dark-500">執行後會顯示 Blend / Stack 分數</p>
+                <p class="text-xs text-dark-500" data-en="After execution, Blend / Stack scores appear here">執行後會顯示 Blend / Stack 分數</p>
               </div>
             </div>
           </div>
@@ -2440,7 +2478,7 @@
         <div id="pipeline-runtime" class="card mb-6 hidden">
           <div class="card-header">
             <h3 class="card-title">執行進度</h3>
-            <span id="pipeline-progress-step" class="text-xs text-warning-400 font-mono">準備中...</span>
+            <span id="pipeline-progress-step" class="text-xs text-warning-400 font-mono" data-en="Preparing...">準備中...</span>
           </div>
           <div class="px-4 pb-2">
             <div class="w-full bg-dark-800 rounded-full h-2.5 mb-3">
@@ -2457,7 +2495,7 @@
           <div class="card-header">
             <h3 class="card-title">Pipeline vs AutoGluon Baseline</h3>
             <div class="flex items-center gap-2">
-              <span class="text-xs text-dark-400" id="pipeline-bench-meta">載入中...</span>
+              <span class="text-xs text-dark-400" id="pipeline-bench-meta" data-en="Loading...">載入中...</span>
               <button id="btn-pipeline-bench-reload" class="btn btn-xs btn-ghost">重新載入</button>
             </div>
           </div>
@@ -2465,7 +2503,7 @@
             <table class="w-full text-sm">
               <thead>
                 <tr class="text-dark-400 text-xs border-b border-dark-700/50">
-                  <th class="py-2.5 px-4 text-left font-medium">資料集</th>
+                  <th class="py-2.5 px-4 text-left font-medium" data-en="Dataset">資料集</th>
                   <th class="py-2.5 px-3 text-left font-medium">類型</th>
                   <th class="py-2.5 px-3 text-right font-medium">n_train</th>
                   <th class="py-2.5 px-3 text-right font-medium">n_test</th>
@@ -2500,7 +2538,7 @@
               <span class="px-2 py-0.5 bg-primary-500/10 border border-primary-500/30 rounded text-primary-300">LogReg</span>
               <span class="px-2 py-0.5 bg-primary-500/10 border border-primary-500/30 rounded text-primary-300">KNN</span>
             </div>
-            <p class="text-[10px] text-dark-500 mt-3 leading-relaxed">Scout HPO 先快篩 → Full HPO (Optuna TPE,5-Fold CV) → 黃金預設值保底。每模型保留 top_k 組超參。</p>
+            <p class="text-[10px] text-dark-500 mt-3 leading-relaxed" data-en="Scout HPO quick filter → Full HPO (Optuna TPE, 5-Fold CV) → golden defaults as fallback. Top-k hyperparams kept per model.">Scout HPO 先快篩 → Full HPO (Optuna TPE,5-Fold CV) → 黃金預設值保底。每模型保留 top_k 組超參。</p>
           </div>
           <div class="card p-4">
             <h4 class="text-sm font-semibold mb-3 text-dark-200 flex items-center gap-2">
@@ -2509,19 +2547,19 @@
             </h4>
             <div class="space-y-2 text-[11px]">
               <div class="flex items-center gap-2">
-                <span class="text-dark-500 w-16">表格:</span>
+                <span class="text-dark-500 w-16" data-en="Tabular:">表格:</span>
                 <span class="px-2 py-0.5 bg-accent-500/10 border border-accent-500/30 rounded text-accent-300">MLP (NAS)</span>
                 <span class="px-2 py-0.5 bg-accent-500/10 border border-accent-500/30 rounded text-accent-300">CNN1D / ResNet1D</span>
                 <span class="px-2 py-0.5 bg-accent-500/10 border border-accent-500/30 rounded text-accent-300">Transformer</span>
               </div>
               <div class="flex items-center gap-2">
-                <span class="text-dark-500 w-16">時序:</span>
+                <span class="text-dark-500 w-16" data-en="Time-series:">時序:</span>
                 <span class="px-2 py-0.5 bg-warning-500/10 border border-warning-500/30 rounded text-warning-300">TSNet (NAS)</span>
                 <span class="px-2 py-0.5 bg-warning-500/10 border border-warning-500/30 rounded text-warning-300">TCN</span>
                 <span class="px-2 py-0.5 bg-warning-500/10 border border-warning-500/30 rounded text-warning-300">PatchTST</span>
               </div>
             </div>
-            <p class="text-[10px] text-dark-500 mt-3 leading-relaxed">MLP NAS 在 OneShotSupernet 上共享權重搜尋;TSNet 搜尋 4 種算子 (conv_k3/k5/tcn_d2/d4)。所有 DL 模型再各自跑 HPO。</p>
+            <p class="text-[10px] text-dark-500 mt-3 leading-relaxed" data-en="MLP NAS searches shared weights on OneShotSupernet; TSNet searches 4 operators (conv_k3/k5/tcn_d2/d4). All DL models run their own HPO.">MLP NAS 在 OneShotSupernet 上共享權重搜尋;TSNet 搜尋 4 種算子 (conv_k3/k5/tcn_d2/d4)。所有 DL 模型再各自跑 HPO。</p>
           </div>
         </div>
 
@@ -2529,7 +2567,7 @@
         <div class="card mb-6">
           <div class="card-header">
             <h3 class="card-title">10 種特徵集 (FeatureBuilder)</h3>
-            <span class="text-xs text-dark-400">每個模型只用相容的特徵集,HPO 期間鎖定最佳組合</span>
+            <span class="text-xs text-dark-400" data-en="Each model uses only compatible feature sets; best locked during HPO">每個模型只用相容的特徵集,HPO 期間鎖定最佳組合</span>
           </div>
           <div class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-2 p-4 text-[11px]">
             <div class="bg-dark-800/50 rounded p-2 border border-dark-700">
@@ -2538,15 +2576,15 @@
             </div>
             <div class="bg-dark-800/50 rounded p-2 border border-dark-700">
               <p class="font-mono text-primary-300 mb-0.5">raw_stat</p>
-              <p class="text-dark-500 text-[10px]">+ 全域/局部統計 + KMeans</p>
+              <p class="text-dark-500 text-[10px]" data-en="+ global/local stats + KMeans">+ 全域/局部統計 + KMeans</p>
             </div>
             <div class="bg-dark-800/50 rounded p-2 border border-dark-700">
               <p class="font-mono text-primary-300 mb-0.5">raw_stat_fft</p>
-              <p class="text-dark-500 text-[10px]">+ FFT 頻域</p>
+              <p class="text-dark-500 text-[10px]" data-en="+ FFT frequency domain">+ FFT 頻域</p>
             </div>
             <div class="bg-dark-800/50 rounded p-2 border border-dark-700">
               <p class="font-mono text-primary-300 mb-0.5">poly2</p>
-              <p class="text-dark-500 text-[10px]">Top-N 二階交互</p>
+              <p class="text-dark-500 text-[10px]" data-en="Top-N 2nd-order interactions">Top-N 二階交互</p>
             </div>
             <div class="bg-dark-800/50 rounded p-2 border border-dark-700">
               <p class="font-mono text-primary-300 mb-0.5">signal</p>
@@ -2554,7 +2592,7 @@
             </div>
             <div class="bg-dark-800/50 rounded p-2 border border-dark-700">
               <p class="font-mono text-primary-300 mb-0.5">pca64 / svd64</p>
-              <p class="text-dark-500 text-[10px]">線性降維 64</p>
+              <p class="text-dark-500 text-[10px]" data-en="Linear reduction to 64">線性降維 64</p>
             </div>
             <div class="bg-dark-800/50 rounded p-2 border border-dark-700">
               <p class="font-mono text-primary-300 mb-0.5">kpca32</p>
@@ -2579,15 +2617,29 @@
       <section id="page-settings" class="page-section hidden">
         <div class="card">
           <div class="card-header">
-            <h3 class="card-title">系統設定</h3>
+            <h3 class="card-title" data-en="System Settings">系統設定</h3>
           </div>
           <div class="space-y-6 p-4">
+            <!-- 介面語言 -->
             <div>
-              <h4 class="text-sm font-medium text-dark-300 mb-3">後端串接</h4>
+              <h4 class="text-sm font-medium text-dark-300 mb-3" data-en="Interface">介面</h4>
+              <div class="setting-row">
+                <div>
+                  <p class="text-sm font-medium" data-en="Language">語言</p>
+                  <p class="text-xs text-dark-400" data-en="Switch UI language — applies to most visible labels and buttons in this page. Dynamic alerts / notifications stay in their original language.">切換 UI 語言 — 套用到本頁可見的標籤跟按鈕。動態 alert / notify 保留原語言</p>
+                </div>
+                <select id="setting-lang" class="w-40 bg-dark-700 border border-dark-600 rounded-lg px-3 py-1.5 text-sm focus:border-primary-500 outline-none">
+                  <option value="zh" data-en="Traditional Chinese">繁體中文</option>
+                  <option value="en">English</option>
+                </select>
+              </div>
+            </div>
+            <div>
+              <h4 class="text-sm font-medium text-dark-300 mb-3" data-en="Backend">後端串接</h4>
               <div class="space-y-4">
                 <div class="setting-row">
                   <div>
-                    <p class="text-sm font-medium">🖥️ 本地模式 (Local)</p>
+                    <p class="text-sm font-medium" data-en="🖥️ Local Mode">🖥️ 本地模式 (Local)</p>
                     <p class="text-xs text-dark-400">開啟 = 連本機後端 <span class="font-mono">127.0.0.1:8000</span>(後端 + DB 都跑在你電腦);關閉 = 連雲端 HuggingFace</p>
                   </div>
                   <label class="toggle-switch">
@@ -2606,8 +2658,8 @@
                 </div>
                 <div class="setting-row">
                   <div>
-                    <p class="text-sm font-medium">使用 Python 後端 API</p>
-                    <p class="text-xs text-dark-400">開啟後,預處理 / 訓練 / 可視化將呼叫隊友的 FastAPI 服務</p>
+                    <p class="text-sm font-medium" data-en="Use Python Backend API">使用 Python 後端 API</p>
+                    <p class="text-xs text-dark-400" data-en="When enabled, preprocessing / training / visualization use the FastAPI backend">開啟後,預處理 / 訓練 / 可視化將呼叫隊友的 FastAPI 服務</p>
                   </div>
                   <label class="toggle-switch">
                     <input type="checkbox" id="setting-use-api">
@@ -2616,8 +2668,8 @@
                 </div>
                 <div class="setting-row">
                   <div>
-                    <p class="text-sm font-medium">API Base URL</p>
-                    <p class="text-xs text-dark-400">FastAPI 監聽位址 — 預設選單可以新增自訂位址</p>
+                    <p class="text-sm font-medium" data-en="API Base URL">API Base URL</p>
+                    <p class="text-xs text-dark-400" data-en="FastAPI listen address — preset menu allows custom URLs">FastAPI 監聽位址 — 預設選單可以新增自訂位址</p>
                   </div>
                   <div class="flex items-center gap-2 flex-wrap justify-end">
                     <select id="setting-api-url-preset" class="w-64 bg-dark-700 border border-dark-600 rounded-lg px-3 py-1.5 text-sm focus:border-primary-500 outline-none">
@@ -2631,49 +2683,49 @@
                 </div>
                 <div class="setting-row">
                   <div>
-                    <p class="text-sm font-medium">連線測試</p>
-                    <p class="text-xs text-dark-400" id="setting-api-status">尚未測試</p>
+                    <p class="text-sm font-medium" data-en="Connection Test">連線測試</p>
+                    <p class="text-xs text-dark-400" id="setting-api-status" data-en="Not tested">尚未測試</p>
                   </div>
-                  <button id="btn-api-ping" class="btn btn-sm btn-primary">測試連線</button>
+                  <button id="btn-api-ping" class="btn btn-sm btn-primary" data-en="Test Connection">測試連線</button>
                 </div>
               </div>
             </div>
 
             <div>
-              <h4 class="text-sm font-medium text-dark-300 mb-3">訓練預設值 <span class="text-xs text-dark-500 font-normal">— 實驗室建立新實驗時會自動套用</span></h4>
+              <h4 class="text-sm font-medium text-dark-300 mb-3">訓練預設值 <span class="text-xs text-dark-500 font-normal" data-en="— auto-applied when creating new experiments in Lab">— 實驗室建立新實驗時會自動套用</span></h4>
               <div class="space-y-4">
                 <div class="setting-row">
                   <div>
-                    <p class="text-sm font-medium">預設測試集比例</p>
-                    <p class="text-xs text-dark-400">train_test_split 的 test_size,套用於「原始資料集」訓練</p>
+                    <p class="text-sm font-medium" data-en="Default Test Set Ratio">預設測試集比例</p>
+                    <p class="text-xs text-dark-400" data-en="train_test_split test_size, applied to 'Raw Dataset' training">train_test_split 的 test_size,套用於「原始資料集」訓練</p>
                   </div>
                   <div class="flex items-center gap-3">
-                    <input type="range" id="setting-test-size" min="0.1" max="0.5" step="0.05" value="0.2" class="w-40 accent-primary-500">
+                    <input type="range" id="setting-test-size" min="0" max="0.9" step="0.05" value="0.2" class="w-40 accent-primary-500">
                     <span id="setting-test-size-label" class="text-sm font-mono text-primary-400 w-12 text-right">20%</span>
                   </div>
                 </div>
                 <div class="setting-row">
                   <div>
-                    <p class="text-sm font-medium">隨機種子 (random_state)</p>
-                    <p class="text-xs text-dark-400">固定種子讓切分與模型結果可重現,改了就會得到不同切分</p>
+                    <p class="text-sm font-medium" data-en="Random Seed (random_state)">隨機種子 (random_state)</p>
+                    <p class="text-xs text-dark-400" data-en="Fixed seed makes splits and results reproducible; change for a different split">固定種子讓切分與模型結果可重現,改了就會得到不同切分</p>
                   </div>
                   <input type="number" id="setting-seed" value="42" min="0" class="w-24 bg-dark-700 border border-dark-600 rounded-lg px-3 py-1.5 text-sm text-right focus:border-primary-500 outline-none">
                 </div>
                 <div class="setting-row">
                   <div>
                     <p class="text-sm font-medium">預設任務類型</p>
-                    <p class="text-xs text-dark-400">實驗室「任務類型」的預設選項</p>
+                    <p class="text-xs text-dark-400" data-en="Default 'Task Type' for Lab">實驗室「任務類型」的預設選項</p>
                   </div>
                   <select id="setting-task-type" class="bg-dark-700 border border-dark-600 rounded-lg px-3 py-1.5 text-sm focus:border-primary-500 outline-none">
-                    <option value="auto" selected>自動偵測</option>
-                    <option value="regression">回歸</option>
-                    <option value="classification">分類</option>
+                    <option value="auto" selected data-en="Auto Detect">自動偵測</option>
+                    <option value="regression" data-en="Regression">回歸</option>
+                    <option value="classification" data-en="Classification">分類</option>
                   </select>
                 </div>
                 <div class="setting-row">
                   <div>
-                    <p class="text-sm font-medium">預設資料來源</p>
-                    <p class="text-xs text-dark-400">實驗室「資料來源」預先勾選哪些</p>
+                    <p class="text-sm font-medium" data-en="Default Data Source">預設資料來源</p>
+                    <p class="text-xs text-dark-400" data-en="Which 'Data Source' is pre-checked in Lab">實驗室「資料來源」預先勾選哪些</p>
                   </div>
                   <div class="flex gap-4 text-sm">
                     <label class="flex items-center gap-1.5 cursor-pointer"><input type="checkbox" id="setting-src-raw" class="accent-primary-500" checked> 原始資料集</label>
@@ -2684,7 +2736,7 @@
             </div>
 
             <div>
-              <h4 class="text-sm font-medium text-dark-300 mb-3">預設啟用演算法 <span class="text-xs text-dark-500 font-normal">— 實驗室會預先勾選這些(點擊切換)</span></h4>
+              <h4 class="text-sm font-medium text-dark-300 mb-3">預設啟用演算法 <span class="text-xs text-dark-500 font-normal" data-en="— Lab pre-checks these (click to toggle)">— 實驗室會預先勾選這些(點擊切換)</span></h4>
               <div class="flex flex-wrap gap-2 p-3 rounded-lg bg-dark-800/50" id="setting-algos-container">
                 <!-- 由 JS 依 MLEngine.ALGORITHMS 動態產生 -->
               </div>
@@ -2696,7 +2748,7 @@
                 <div class="setting-row">
                   <div>
                     <p class="text-sm font-medium">SHAP 最大樣本數</p>
-                    <p class="text-xs text-dark-400">洞察頁 SHAP 計算的樣本上限。樹/線性模型秒級無感,但 SVC/Voting/Stacking 走 Permutation 一個樣本約 3 秒 (50 樣本 ≈ 2-3 分鐘,200 樣本 ≈ 10 分鐘)</p>
+                    <p class="text-xs text-dark-400" data-en="SHAP sample limit for Insights page. Tree/linear models are instant, but SVC/Voting/Stacking with Permutation takes ~3s per sample (50 ≈ 2-3 min, 200 ≈ 10 min).">洞察頁 SHAP 計算的樣本上限。樹/線性模型秒級無感,但 SVC/Voting/Stacking 走 Permutation 一個樣本約 3 秒 (50 樣本 ≈ 2-3 分鐘,200 樣本 ≈ 10 分鐘)</p>
                   </div>
                   <input type="number" id="setting-shap-samples" value="50" min="20" max="2000" step="10" class="w-24 bg-dark-700 border border-dark-600 rounded-lg px-3 py-1.5 text-sm text-right focus:border-primary-500 outline-none">
                 </div>
@@ -2708,7 +2760,7 @@
               <div class="setting-row">
                 <div>
                   <p class="text-sm font-medium">重置所有設定</p>
-                  <p class="text-xs text-dark-400">清除瀏覽器儲存的設定,回到預設值</p>
+                  <p class="text-xs text-dark-400" data-en="Clear browser-stored settings, restore defaults">清除瀏覽器儲存的設定,回到預設值</p>
                 </div>
                 <button id="btn-reset-settings" class="btn btn-sm btn-danger">重置</button>
               </div>
@@ -2766,7 +2818,7 @@
           <div id="auth-form-error" class="hidden text-xs text-danger-400 px-3 py-2 bg-danger-500/10 border-l-2 border-danger-500 rounded-r"></div>
           <button type="submit" id="auth-form-submit" class="btn btn-primary w-full">登入</button>
         </form>
-        <p class="text-[10px] text-dark-500 text-center">登入是選用 — 不登入也能使用所有功能,但資料只存在本機</p>
+        <p class="text-[10px] text-dark-500 text-center" data-en="Login is optional — all features work without login, but data stays local">登入是選用 — 不登入也能使用所有功能,但資料只存在本機</p>
       </div>
     </div>
   </div>

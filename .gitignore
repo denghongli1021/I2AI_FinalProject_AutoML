@@ -14,6 +14,9 @@ autogluon/
 # Auth — 本機環境變數 / SQLite fallback DB,絕對不能 commit
 .env
 api/auth.db
+# SQLite WAL 模式產生的 transient 副檔,每次跑會自動重生,不要追蹤
+api/auth.db-wal
+api/auth.db-shm
 
 
 

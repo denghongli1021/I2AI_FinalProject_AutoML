@@ -180,7 +180,13 @@ const ApiClient = {
     fd.append('modelId', modelId);
     fd.append('file', file);
     if (sampleFile) fd.append('sampleFile', sampleFile);
-    const r = await fetch(`${this.baseUrl}/api/predict/batch`, { method: 'POST', body: fd });
+    // Bearer token 必帶 — 沒帶後端會把這個 request 當 guest 訪客,
+    // 找不到登入使用者 DB 裡的 model → 一律 404
+    const headers = {};
+    if (typeof AuthClient !== 'undefined' && AuthClient.token) {
+      headers['Authorization'] = `Bearer ${AuthClient.token}`;
+    }
+    const r = await fetch(`${this.baseUrl}/api/predict/batch`, { method: 'POST', body: fd, headers });
     if (!r.ok) throw new Error(`批次預測失敗 (${r.status}): ${await r.text()}`);
     return r.blob();  // CSV 檔
   },
