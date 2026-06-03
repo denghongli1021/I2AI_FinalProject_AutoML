@@ -25,13 +25,14 @@ httpx>=0.27.0
 # Load env vars from .env file during local dev.
 python-dotenv>=1.0.0
 # ─────────────────────────────────────────────────────────────────────────────
-# Daniel pipeline (測試模式專用) — 需本機後端執行。Render free tier 太弱不建議啟用。
-# CPU-only torch: pip install torch --index-url https://download.pytorch.org/whl/cpu
-# 開啟時把下面三行 uncomment:
-# torch>=2.0.0
-# optuna>=3.5.0
-# scipy>=1.10.0
-# tqdm>=4.65.0
+# Daniel pipeline 引擎 — Pipeline 引擎(實驗室「pipeline」訓練選項)必裝。
+# 沒裝 pip install -r 會跑得起來 sklearn 引擎,但點 pipeline 引擎會立即報錯。
+# CPU-only torch (省 ~2GB): pip install torch --index-url https://download.pytorch.org/whl/cpu
+# Render free tier 太弱不建議啟用 pipeline 引擎,但 deps 仍預裝確保不會 import 時崩。
+torch>=2.0.0
+optuna>=3.5.0
+scipy>=1.10.0
+tqdm>=4.65.0
 # ─────────────────────────────────────────────────────────────────────────────
 # Autogluon engine (baseline 對照組) — 需本機後端執行,~80MB 依賴。
 # 第一次 import 慢 (5-10 秒),但訓練本身一條龍夠自動。

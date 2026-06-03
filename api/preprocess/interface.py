@@ -453,10 +453,15 @@ def preprocess_for_training(
     # 【自動決策】MICE 補值 + MI 特徵選擇的 top_k
     # 不再 hard-code,改依資料特性動態決定。
     # ──────────────────────────────────────────────────────────────
-    numeric_cols_for_decision = feature_groups.get("numeric", [])
+    # feature_groups 是用 phase0 RobustDataCleaner 「拆過 datetime 之後」 的欄位算的,
+    # 所以可能含 date_year / date_month / date_dayofweek / date_dayofyear 這種衍生欄。
+    # 這些欄在 X_train_raw (還沒過 cleaner) 不存在 → 直接索引會 KeyError。
+    # 解法:篩出真正在 X_train_raw 也存在的子集再算 NaN ratio。
+    _numeric_from_router = feature_groups.get("numeric", [])
+    numeric_cols_for_decision = [c for c in _numeric_from_router if c in X_train_raw.columns]
     n_rows = len(X_train_raw)
-    n_numeric = len(numeric_cols_for_decision)
-    # 數值欄的 NaN 比例(用整個訓練集算,不是抽樣)
+    n_numeric = len(_numeric_from_router)   # 決策還是看 router 認的真實數值欄總數
+    # 數值欄的 NaN 比例(用整個訓練集算,不是抽樣) — 只算 raw 真的有的欄
     numeric_nan_ratio = (
         float(X_train_raw[numeric_cols_for_decision].isna().mean().mean())
         if numeric_cols_for_decision else 0.0
