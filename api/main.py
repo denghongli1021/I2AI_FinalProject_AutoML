@@ -1389,9 +1389,16 @@ async def train_autogluon_stream_endpoint(
 
     async def event_stream():
         nonlocal error_msg
+        _loop = asyncio.get_event_loop()
         try:
             while True:
-                ev = q.get()
+                # 用 run_in_executor 避免阻塞 event loop；timeout=20 讓無資料時
+                # 定期送 SSE comment ping，防止 ngrok/瀏覽器 idle 超時切斷連線
+                try:
+                    ev = await _loop.run_in_executor(None, lambda: q.get(timeout=20))
+                except queue.Empty:
+                    yield ": ping\n\n"   # SSE comment，前端不會觸發 onmessage
+                    continue
                 if ev is None: break
                 yield f"data: {json.dumps(ev, ensure_ascii=False)}\n\n"
                 try:
