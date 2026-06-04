@@ -308,6 +308,7 @@ def run_tabular_cv(
     save_artifacts: bool = True,
     global_cfg: dict = None,
     metric: str = "f1",
+    collect_folds: list = None,
 ) -> tuple:
     """
     對一個 tabular config 執行 5-Fold CV。
@@ -370,6 +371,9 @@ def run_tabular_cv(
                 best_fold_model = model
                 best_fold_fb    = fb
 
+            if collect_folds is not None:
+                collect_folds.append({"fb": fb, "model": model})
+
     oof /= np.maximum(oof_counts, 1.0)
     oof_score = calculate_score(y, oof.argmax(axis=1), metric=metric)
     print(f"  [CV] {tag:30s} OOF {get_metric_name(metric)} = {oof_score:.4f}")
@@ -398,6 +402,7 @@ def run_dl_cv(
     save_artifacts: bool = True,
     global_cfg: dict = None,
     metric: str = "f1",
+    collect_folds: list = None,
 ) -> tuple:
     """
     對一個 DL config 執行 5-Fold CV。
@@ -533,6 +538,15 @@ def run_dl_cv(
                 best_fold_state = best_state
                 best_fold_in_features = in_features
 
+            if collect_folds is not None and best_state is not None:
+                collect_folds.append({
+                    "fb": fb,
+                    "model_name": config["model_name"],
+                    "arch_params": arch_params_cfg,
+                    "in_features": in_features,
+                    "state_dict": best_state,
+                })
+
             if device.startswith("cuda"):
                 torch.cuda.empty_cache()
 
@@ -570,11 +584,12 @@ def run_cv(
     save_artifacts: bool = True,
     global_cfg: dict = None,
     metric: str = "f1",
+    collect_folds: list = None,
 ) -> tuple:
     """
     根據 config["model_name"] 自動選擇 run_tabular_cv 或 run_dl_cv。
     """
     dl_models = {"mlp", "cnn1d", "resnet1d", "transformer", "tcn", "patchtst", "tsnet"}
     if config["model_name"] in dl_models:
-        return run_dl_cv(config, X, y, X_test, n_classes, device, tag, save_artifacts, global_cfg, metric)
-    return run_tabular_cv(config, X, y, X_test, n_classes, device, tag, save_artifacts, global_cfg, metric)
+        return run_dl_cv(config, X, y, X_test, n_classes, device, tag, save_artifacts, global_cfg, metric, collect_folds)
+    return run_tabular_cv(config, X, y, X_test, n_classes, device, tag, save_artifacts, global_cfg, metric, collect_folds)

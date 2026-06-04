@@ -122,12 +122,22 @@ const ApiClient = {
     return r.json();
   },
 
+  // ---- 共用：取得帶 token 的 JSON headers ----
+  _authJsonHeaders() {
+    const h = { 'Content-Type': 'application/json' };
+    if (typeof AuthClient !== 'undefined' && AuthClient.token)
+      h['Authorization'] = `Bearer ${AuthClient.token}`;
+    else if (this.token)
+      h['Authorization'] = `Bearer ${this.token}`;
+    return h;
+  },
+
   // ---- 3. VISUALIZE ----
   // payload: { modelId, chartType, options }
   async visualize(payload) {
     const r = await fetch(`${this.baseUrl}/api/visualize`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: this._authJsonHeaders(),
       body: JSON.stringify(payload),
     });
     if (!r.ok) throw new Error(`visualize 失敗 (${r.status}): ${await r.text()}`);
@@ -141,7 +151,7 @@ const ApiClient = {
     const { signal, ...body } = payload;
     const r = await fetch(`${this.baseUrl}/api/visualize/shap`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: this._authJsonHeaders(),
       body: JSON.stringify(body),
       signal,
     });
@@ -154,7 +164,7 @@ const ApiClient = {
   async predict(payload) {
     const r = await fetch(`${this.baseUrl}/api/predict`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: this._authJsonHeaders(),
       body: JSON.stringify(payload),
     });
     if (!r.ok) throw new Error(`predict 失敗 (${r.status}): ${await r.text()}`);
@@ -180,7 +190,12 @@ const ApiClient = {
     fd.append('modelId', modelId);
     fd.append('file', file);
     if (sampleFile) fd.append('sampleFile', sampleFile);
-    const r = await fetch(`${this.baseUrl}/api/predict/batch`, { method: 'POST', body: fd });
+    const authHeaders = {};
+    if (typeof AuthClient !== 'undefined' && AuthClient.token)
+      authHeaders['Authorization'] = `Bearer ${AuthClient.token}`;
+    else if (this.token)
+      authHeaders['Authorization'] = `Bearer ${this.token}`;
+    const r = await fetch(`${this.baseUrl}/api/predict/batch`, { method: 'POST', body: fd, headers: authHeaders });
     if (!r.ok) throw new Error(`批次預測失敗 (${r.status}): ${await r.text()}`);
     return r.blob();  // CSV 檔
   },

@@ -33,11 +33,14 @@ def _detect_target_col(df, requested):
 
 
 def _detect_task(y_raw):
-    """object/bool → classification;整數且 nunique 小 → classification;否則 regression。"""
-    if y_raw.dtype == object or y_raw.dtype == bool:
+    """object/bool → classification;整數且 nunique 小 → classification;浮點 → regression。"""
+    if y_raw.dtype == object or str(y_raw.dtype) == 'bool' or y_raw.dtype == bool:
         return "classification"
+    import pandas as _pd
+    if _pd.api.types.is_float_dtype(y_raw):
+        return "regression"
     n_unique = y_raw.nunique()
-    return "classification" if (n_unique <= 50 and n_unique / max(len(y_raw), 1) < 0.30) else "regression"
+    return "classification" if (n_unique <= 20 and n_unique / max(len(y_raw), 1) < 0.30) else "regression"
 
 
 def _prepare_xy(df, target_col, np, le=None):
@@ -338,6 +341,8 @@ def main():
     parser.add_argument("--skip-tabular", action="store_true")
     parser.add_argument("--skip-dl", action="store_true")
     parser.add_argument("--no-nas", action="store_true")
+    parser.add_argument("--task-type", default="auto", choices=["auto", "classification", "regression"],
+                        help="強制指定任務類型，auto 表示自動偵測")
     args = parser.parse_args()
 
     # Windows cp950 → utf-8 (Daniel 的 emoji/中文 print 才不會炸)
@@ -385,7 +390,7 @@ def main():
             # test CSV 是否有 target 欄? 沒有就是 Kaggle 風的「無 label predict」模式
             test_has_label = target_col in df_te.columns
 
-            # 任務判斷:用 train (有時加 test) 的 y 集合
+            # 任務判斷:用 train (有時加 test) 的 y 集合；若使用者明確指定則覆蓋自動偵測
             from sklearn.preprocessing import LabelEncoder
             if test_has_label:
                 y_combined = pd.concat([df_tr[target_col], df_te[target_col]], ignore_index=True)
@@ -394,6 +399,8 @@ def main():
             else:
                 task = _detect_task(df_tr[target_col])
                 fit_target_series = df_tr[target_col]
+            if getattr(args, 'task_type', 'auto') != 'auto':
+                task = args.task_type
 
             if task == "regression":
                 # TS / 非 TS 回歸都走 pipeline_time.run_regression (daniel 架構設計)
@@ -451,6 +458,8 @@ def main():
             target_col = _detect_target_col(df, args.target)
             y_raw = df[target_col]
             task = _detect_task(y_raw)
+            if getattr(args, 'task_type', 'auto') != 'auto':
+                task = args.task_type
 
             if task == "regression":
                 # 共用:抽特徵 + 原始欄名

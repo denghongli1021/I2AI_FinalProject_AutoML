@@ -37,7 +37,7 @@ from pydantic import BaseModel
 from api import preprocess, train, visualize
 from api import storage
 from api.auth import init_db, router as auth_router, get_current_user
-from api.auth.db import get_db
+from api.auth.db import get_db, SessionLocal
 from api.preprocess import (
     run_data_audit,
     preprocess_for_training,
@@ -78,28 +78,28 @@ def _serve_ui():
 
 
 
-def _infer_task_type(y_series) -> str:
-    """跟 _runner_entry._detect_task 同一條 heuristic — 用在 create_training_run
-    前先把 task_type 推對,進行中也顯示正確的 metric/欄位。
+def _infer_task_type(y_series, override: str = "auto") -> str:
+    """object / bool → classification；浮點 → regression；
+    整數且 nunique <= 20 且佔比 < 30% → classification；否則 regression。
 
-    object / bool → classification;
-    數值且 nunique <= 50 且佔比 < 30% → classification;
-    其它 → regression。
-
-    抓不到 / series 為 None → fallback "classification" (跟舊行為一致)。
+    override != "auto" 時直接回傳 override，跳過自動偵測。
     """
+    if override and override != "auto":
+        return override
     try:
         import pandas as _pd
         if y_series is None:
             return "classification"
         s = y_series if isinstance(y_series, _pd.Series) else _pd.Series(y_series)
-        if s.dtype == object or s.dtype == bool:
+        if s.dtype == object or s.dtype == bool or str(s.dtype) == 'bool':
             return "classification"
         n = len(s)
         if n == 0:
             return "classification"
+        if _pd.api.types.is_float_dtype(s):
+            return "regression"
         n_unique = s.nunique(dropna=True)
-        return "classification" if (n_unique <= 50 and n_unique / n < 0.30) else "regression"
+        return "classification" if (n_unique <= 20 and n_unique / n < 0.30) else "regression"
     except Exception:
         return "classification"
 
@@ -600,6 +600,7 @@ async def train_pipeline_stream_endpoint(
     skipTabular: bool = Form(False),
     skipDl: bool = Form(False),
     noNas: bool = Form(False),
+    taskType: str = Form("auto"),
     user = Depends(get_current_user),
     db: DbSession = Depends(get_db),
 ):
@@ -635,7 +636,7 @@ async def train_pipeline_stream_endpoint(
     base_options = {
         "target": target, "timeSeries": timeSeries, "metric": metric, "regMetric": regMetric,
         "fast": fast, "timeLimit": timeLimit, "skipTabular": skipTabular, "skipDl": skipDl,
-        "noNas": noNas,
+        "noNas": noNas, "taskType": taskType,
     }
     dataset_name_for_run = "(uploaded)"
     # 為了在 create_training_run 之前推 task_type:三個 source 分支都會在這存一份 target 欄
@@ -803,7 +804,7 @@ async def train_pipeline_stream_endpoint(
     # 建 TrainingRun (running 狀態,完成後再 update)
     # task_type 從 target 欄推;subprocess 跑完 finish_training_run 還會用真正的 result 再覆寫一次,
     # 但訓練 *進行中* hydration 用 r.taskType 推 metric label 就不會錯 (回歸顯示 R² 不是 Accuracy)
-    inferred_task_type = _infer_task_type(target_col_sample)
+    inferred_task_type = _infer_task_type(target_col_sample, override=taskType)
     pipeline_run_id = storage.create_training_run(
         dataset_id=datasetId or "uploaded",
         dataset_name=dataset_name_for_run,
@@ -859,6 +860,11 @@ async def train_pipeline_stream_endpoint(
 
         def worker():
             nonlocal error_msg
+            # 獨立 DB session：worker 跑在背景執行緒，event_stream 跑在另一執行緒
+            # 兩者同時 db.commit() 會觸發 SQLAlchemy IllegalStateChangeError
+            # 用新 session 讓 save_model / save_prediction_artifact 的 commit 與
+            # event_stream 的 update_training_progress commit 完全隔離
+            _wdb = SessionLocal()
             try:
                 for job in jobs:
                     label = job["label"]
@@ -1003,7 +1009,7 @@ async def train_pipeline_stream_endpoint(
                                        "msg": f"[{label}] 持久化 ensemble bundle ({size_mb:.0f}MB) 到{'檔案系統' if size_mb > 50 else 'DB'}..."})
                                 _mid = storage.save_model(
                                     bundle=_ens_bundle, estimator=None, scaler=None,
-                                    X_test_df=_x_test_df, user=user, db=db,
+                                    X_test_df=_x_test_df, user=user, db=_wdb,
                                     preprocessor_id=job.get("preprocessorId"),
                                     dataset_id=datasetId,
                                     training_run_id=pipeline_run_id,
@@ -1024,14 +1030,13 @@ async def train_pipeline_stream_endpoint(
                             import traceback as _tb
                             print(f"[Pipeline] ensemble save_model 失敗 (不影響分數): {_me}", flush=True)
                             _tb.print_exc()
-                            # CRITICAL:save_model 失敗時 session 是 pending-rollback 狀態,
-                            # 不 rollback 後續 finish_training_run 用同 session 會炸 PendingRollbackError
-                            # → SSE stream crash → 瀏覽器 "network error"。一定要主動 rollback。
+                            # save_model 用 _wdb (worker 自己的 session),失敗時 rollback _wdb 就好,
+                            # 不影響 event_stream 用的 db session (finish_training_run 還能正常跑)
                             try:
-                                db.rollback()
-                                print(f"[Pipeline] db.rollback() 完成,session 恢復可用", flush=True)
+                                _wdb.rollback()
+                                print(f"[Pipeline] _wdb.rollback() 完成", flush=True)
                             except Exception as _re:
-                                print(f"[Pipeline] db.rollback() 也失敗: {_re}", flush=True)
+                                print(f"[Pipeline] _wdb.rollback() 也失敗: {_re}", flush=True)
                     elif r.get("ok"):
                         # subprocess 成功但沒回 bundle 路徑 — 通常是 _dump_ensemble_bundle 拒絕 persist
                         # (某 config 來自快取沒有 fold artifacts → bundle 沒被 dump)
@@ -1052,7 +1057,7 @@ async def train_pipeline_stream_endpoint(
                             storage.save_prediction_artifact(
                                 training_run_id=pipeline_run_id, kind=kind,
                                 file_name=f"submission_{job['source']}.csv",
-                                content_bytes=submission_bytes, user=user, db=db,
+                                content_bytes=submission_bytes, user=user, db=_wdb,
                             )
                             r["submissionAvailable"] = True
                             r["submissionKind"] = kind
@@ -1070,6 +1075,8 @@ async def train_pipeline_stream_endpoint(
                     for _p in _job.get("_temp_paths") or []:
                         try: _os.unlink(_p)
                         except Exception: pass
+                try: _wdb.close()
+                except Exception: pass
                 q.put(None)
 
         worker_thread = threading.Thread(target=worker, daemon=True)
@@ -2165,22 +2172,31 @@ def _compute_shap_for_ensemble_bundle(bundle: dict, per_model: list,
     return results
 
 
+# SHAP 預計算期間 DL 模型快取 — key: id(fold)，避免每次 SHAP 迭代重建模型（百倍加速）
+_dl_fold_model_cache: dict = {}
+
 def _predict_dl_fold(fold: dict, X_fb: "np.ndarray", n_classes: int) -> "np.ndarray":
     """重建 DL 模型 → load_state_dict → 推論。
     分類:回 N×C 機率矩陣 (softmax)。
-    回歸:回 N 維 (model.forward 直接輸出,沒有 activation)。"""
+    回歸:回 N 維 (model.forward 直接輸出,沒有 activation)。
+    同一個 fold dict 在 SHAP 迭代中只建模一次，結果快取於 _dl_fold_model_cache。"""
     import torch
     _ensure_pipeline_path_for_unpickle()
-    from src.train import _build_dl_model
-    model = _build_dl_model(fold["model_name"], fold["arch_params"],
+
+    cache_key = id(fold)
+    if cache_key not in _dl_fold_model_cache:
+        from src.train import _build_dl_model
+        m = _build_dl_model(fold["model_name"], fold["arch_params"],
                             fold["in_features"], n_classes)
-    model.load_state_dict(fold["state_dict"])
-    model.eval()
+        m.load_state_dict(fold["state_dict"])
+        m.eval()
+        _dl_fold_model_cache[cache_key] = m
+
+    model = _dl_fold_model_cache[cache_key]
     X_t = torch.tensor(X_fb, dtype=torch.float32)
     with torch.no_grad():
         out = model(X_t)
         if n_classes == 1:
-            # 回歸:回 1D 預測值 (n_classes=1)
             arr = out.squeeze(-1).cpu().numpy()
         else:
             arr = torch.softmax(out, dim=1).cpu().numpy()

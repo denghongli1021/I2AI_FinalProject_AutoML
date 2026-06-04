@@ -406,14 +406,21 @@ class TabularHPO:
                 for _fi, (tr_idx, val_idx) in enumerate(hpo_folds):
                     X_tr, X_val = _feat_cache[(fs, _fi)]
                     m = build_tabular_model(_name, model_params, device=_device, class_weight=_cw)
+                    _unseen = set(np.unique(y[val_idx])) - set(np.unique(y[tr_idx]))
                     if _name == "lgbm":
                         import lightgbm as _lgb
-                        m.fit(X_tr, y[tr_idx],
-                              eval_set=[(X_val, y[val_idx])],
-                              callbacks=[_lgb.early_stopping(100, verbose=False),
-                                         _lgb.log_evaluation(-1)])
+                        if _unseen:
+                            m.fit(X_tr, y[tr_idx], callbacks=[_lgb.log_evaluation(-1)])
+                        else:
+                            m.fit(X_tr, y[tr_idx],
+                                  eval_set=[(X_val, y[val_idx])],
+                                  callbacks=[_lgb.early_stopping(100, verbose=False),
+                                             _lgb.log_evaluation(-1)])
                     elif hasattr(m, "early_stopping_rounds") and m.early_stopping_rounds:
-                        m.fit(X_tr, y[tr_idx], eval_set=[(X_val, y[val_idx])], verbose=False)
+                        if _unseen:
+                            m.fit(X_tr, y[tr_idx])
+                        else:
+                            m.fit(X_tr, y[tr_idx], eval_set=[(X_val, y[val_idx])], verbose=False)
                     else:
                         m.fit(X_tr, y[tr_idx])
                     y_hat = m.predict(X_val)
@@ -536,14 +543,21 @@ class TabularHPO:
                 for _fi, (tr_idx, val_idx) in enumerate(scout_folds):
                     X_t, X_v = _scout_cache[(fs, _fi)]
                     m = build_tabular_model(_name, merged, device=self.device, class_weight=_scout_cw)
+                    _unseen = set(np.unique(y[val_idx])) - set(np.unique(y[tr_idx]))
                     if _name == "lgbm":
                         import lightgbm as _lgb
-                        m.fit(X_t, y[tr_idx],
-                              eval_set=[(X_v, y[val_idx])],
-                              callbacks=[_lgb.early_stopping(30, verbose=False),
-                                         _lgb.log_evaluation(-1)])
+                        if _unseen:
+                            m.fit(X_t, y[tr_idx], callbacks=[_lgb.log_evaluation(-1)])
+                        else:
+                            m.fit(X_t, y[tr_idx],
+                                  eval_set=[(X_v, y[val_idx])],
+                                  callbacks=[_lgb.early_stopping(30, verbose=False),
+                                             _lgb.log_evaluation(-1)])
                     elif hasattr(m, "early_stopping_rounds") and m.early_stopping_rounds:
-                        m.fit(X_t, y[tr_idx], eval_set=[(X_v, y[val_idx])], verbose=False)
+                        if _unseen:
+                            m.fit(X_t, y[tr_idx])
+                        else:
+                            m.fit(X_t, y[tr_idx], eval_set=[(X_v, y[val_idx])], verbose=False)
                     else:
                         m.fit(X_t, y[tr_idx])
                     y_hat = m.predict(X_v)

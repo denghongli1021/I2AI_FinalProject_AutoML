@@ -457,6 +457,9 @@ async function hydrateUserHistoryFromDb() {
               scoreBlend: p.scoreBlend,
               scoreStack: p.scoreStack,
             },
+            featureNames: [],
+            means: [], stds: [], featureStats: [],
+            featureImportance: [], testTrue: [], testPred: [],
             trainTime: (p.elapsedSec || 0) * 1000,
             _fromDb: true,
           };
@@ -4153,6 +4156,7 @@ function renderRealExperimentsPage() {
         metric: document.getElementById('exp-daniel-metric')?.value || 'f1',
         timeLimit: parseFloat(document.getElementById('exp-daniel-time-limit')?.value) || 0,
         timeSeries: timeSeries,
+        taskType: taskType,
         target: targetSel.value,
         sources: sources,
         preprocessorId: preprocessorId,
@@ -4681,6 +4685,7 @@ async function startDanielExperimentTraining(ds, targetCol, options) {
     form.append('skipDl', options.skipDl ? 'true' : 'false');
     form.append('noNas', options.noNas ? 'true' : 'false');
     form.append('timeLimit', String(options.timeLimit || 0));
+    form.append('taskType', options.taskType || 'auto');
     // Option B:訓練時上傳的 predict.csv (可選)
     if (options.predictFile) {
       form.append('predictFile', options.predictFile);
@@ -5787,7 +5792,7 @@ function renderRealInsights() {
   document.getElementById('insight-best-score').textContent = isReg
     ? (typeof best.metrics?.testR2 === 'number' ? best.metrics.testR2.toFixed(4) : '—')
     : (typeof best.metrics?.testAccuracy === 'number' ? (best.metrics.testAccuracy * 100).toFixed(2) + '%' : '—');
-  document.getElementById('insight-feature-count').textContent = best.featureNames.length;
+  document.getElementById('insight-feature-count').textContent = best.featureNames?.length ?? '—';
   document.getElementById('insight-model-count').textContent = models.length;
 
   // SHAP section (隊友 AutoMLVisualizer)
@@ -6570,10 +6575,16 @@ async function loadShapFigures() {
       return;
     }
     errEl.classList.remove('hidden');
-    // 訊息明顯一點 — 通常是後端 model 找不到 (重啟過 / 歷史紀錄但 model 沒持久化)
-    const msg = e.message.includes('404') || e.message.includes('不存在')
-      ? '⚠ 此歷史模型已不在後端記憶體 (uvicorn 重啟後會丟失)。請重新訓練以查看 SHAP 解釋。'
-      : `SHAP 載入失敗:${e.message}`;
+    let msg;
+    if (e.message.includes('401') || e.message.includes('未登入') || e.message.includes('token')) {
+      msg = '⚠ 身份驗證失敗，請重新登入後再試。';
+    } else if (e.message.includes('file blob') || e.message.includes('file_missing') || e.message.includes('已不存在')) {
+      msg = '⚠ 模型檔案已遺失（伺服器重啟或磁碟清空）。請重新訓練以恢復 SHAP 解釋。';
+    } else if (e.message.includes('404')) {
+      msg = '⚠ 找不到此模型（可能已刪除或登入逾時）。請重新登入或重新訓練。';
+    } else {
+      msg = `SHAP 載入失敗：${e.message}`;
+    }
     errEl.textContent = msg;
     _clearShapFigures();
   } finally {

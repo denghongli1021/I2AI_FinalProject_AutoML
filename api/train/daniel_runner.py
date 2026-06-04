@@ -156,6 +156,9 @@ def run_pipeline(
         cmd.append("--skip-dl")
     if options.get("noNas"):
         cmd.append("--no-nas")
+    _task_type = options.get("taskType", "auto")
+    if _task_type and _task_type != "auto":
+        cmd += ["--task-type", _task_type]
 
     mode_label = "pre-split (從預處理)" if tmp_train else "single CSV"
     _emit({"type": "log", "msg": f"啟動 pipeline [{mode_label}], fast={options.get('fast', False)}", "level": "info"})

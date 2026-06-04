@@ -289,7 +289,13 @@ def preprocess_for_training(
         raise ValueError("清理後資料集為空（0 列），無法訓練。")
 
     # 2. 嚴格時間與空間切割
-    stratify = y if (y.nunique() <= 20 and y.nunique() >= 2) else None
+    _is_clf_target = (
+        pd.api.types.is_bool_dtype(y) or
+        y.dtype == object or
+        str(y.dtype) == 'category' or
+        (pd.api.types.is_integer_dtype(y) and y.nunique() <= 20)
+    )
+    stratify = y if (_is_clf_target and y.nunique() >= 2) else None
     X_train_raw, X_test_raw, y_train, y_test = train_test_split(
         X, y, test_size=test_size, random_state=42, stratify=stratify
     )
@@ -361,8 +367,14 @@ def preprocess_for_training(
     else:
         # ── 情況 B：使用者只給了 Train 集，啟動傳統的 80/20 分割 ──
         print(f">>> [Phase 1.5] 無獨立測試集，自動進行 {test_size*100}% 驗證集隨機切割")
-        stratify = y if (y.nunique() <= 20 and y.nunique() >= 2) else None
-        
+        _is_clf_target2 = (
+            pd.api.types.is_bool_dtype(y) or
+            y.dtype == object or
+            str(y.dtype) == 'category' or
+            (pd.api.types.is_integer_dtype(y) and y.nunique() <= 20)
+        )
+        stratify = y if (_is_clf_target2 and y.nunique() >= 2) else None
+
         X_train_raw, X_test_raw, y_train, y_test = train_test_split(
             X, y, test_size=test_size, random_state=42, stratify=stratify
         )
@@ -413,8 +425,13 @@ def preprocess_for_training(
     print("[預處理模組] 啟動雙軌制管線 (Dual-Track Pipeline) 組裝...")
     assembler = PipelineAssembler(feature_groups)
 
-    # 判斷任務類型
-    is_classification = (y_train.nunique() <= 50)
+    # 判斷任務類型 — 浮點數型別強制視為回歸，防止 mutual_info_classif 拋 "Unknown label type: continuous"
+    is_classification = (
+        pd.api.types.is_bool_dtype(y_train) or
+        y_train.dtype == object or
+        str(y_train.dtype) == 'category' or
+        (pd.api.types.is_integer_dtype(y_train) and y_train.nunique() <= 50)
+    )
 
     # ==========================================
     # 🌳 第一軌：樹狀模型專用 (Tree Track - 生肉)
