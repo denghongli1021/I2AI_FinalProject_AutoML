@@ -39,6 +39,10 @@ def _find_best_threshold(
     """
     if proba.shape[1] != 2:
         return 0.5, float("nan")
+    # AUC 與閾值無關，直接回傳 0.5 並計算 AUC 分數
+    if metric == "roc_auc":
+        score = calculate_score(y, proba.argmax(axis=1), metric=metric, y_score=proba)
+        return 0.5, score
     best_t, best_score = 0.5, -np.inf
     for t in np.linspace(0.10, 0.90, 81):
         preds = (proba[:, 1] >= t).astype(int)
@@ -90,8 +94,8 @@ class NelderMeadBlender:
             w = softmax(logit_w)
             blended = _geometric_blend(oof_list, w)
             preds = blended.argmax(axis=1)
-            # 最大化指標 = 最小化負指標
-            return -calculate_score(y, preds, metric=self.metric)
+            y_sc = blended if self.metric == "roc_auc" else None
+            return -calculate_score(y, preds, metric=self.metric, y_score=y_sc)
 
         best_val, best_x = np.inf, np.zeros(n_models)
 
@@ -217,7 +221,8 @@ class MetaLearnerStacker:
                 m = model_fn(params)
                 m.fit(X_meta[tr_i], y[tr_i])
                 y_hat = m.predict(X_meta[val_i])
-                scores.append(calculate_score(y[val_i], y_hat, metric=self.metric))
+                y_sc = m.predict_proba(X_meta[val_i]) if self.metric == "roc_auc" else None
+                scores.append(calculate_score(y[val_i], y_hat, metric=self.metric, y_score=y_sc))
 
             trial.set_user_attr("meta_type", meta_type)
             trial.set_user_attr("params", params)

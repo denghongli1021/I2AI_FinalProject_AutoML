@@ -959,6 +959,27 @@ def sanitize_for_json(obj):
 
 
 # ============================================================
+# SHAP 快取回存
+# ============================================================
+def patch_model_shap_plots(model_id: str, shap_plots: dict, user, db: Session) -> None:
+    """SHAP 即時計算完成後，將結果回存至 bundle["shapPlots"]，下次開啟走快取秒速載入。"""
+    if not _is_authed(user):
+        entry = MODELS.get(model_id)
+        if entry and entry.get("_owner") == stamp({}, user).get("_owner"):
+            entry.setdefault("bundle", {})["shapPlots"] = shap_plots
+        return
+    try:
+        m = db.query(DbModel).filter_by(id=model_id, user_id=user.id).first()
+        if m and m.bundle_json:
+            b = json.loads(m.bundle_json)
+            b["shapPlots"] = shap_plots
+            m.bundle_json = json.dumps(sanitize_for_json(b), ensure_ascii=False, default=_json_default)
+            db.commit()
+    except Exception as _e:
+        print(f"[storage] patch_model_shap_plots 失敗(非致命): {_e}", flush=True)
+
+
+# ============================================================
 # GUEST PERSISTENCE — pipeline ensemble bundles 重啟後存活
 # ============================================================
 

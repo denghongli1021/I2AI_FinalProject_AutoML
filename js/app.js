@@ -6471,6 +6471,7 @@ function _clearShapFigures() {
 let _shapInFlightController = null;
 let _shapInFlightKey = null;
 let _shapLastLoadedKey = null;
+let _shapLoadingTimer = null;
 
 async function loadShapFigures() {
   if (typeof Plotly === 'undefined') {
@@ -6515,6 +6516,14 @@ async function loadShapFigures() {
 
   errEl.classList.add('hidden');
   loadEl.classList.remove('hidden');
+  // 初始顯示中性文字；若 1.5s 後仍在等待，切換為「計算中」提示
+  const loadTextEl = document.getElementById('shap-loading-text');
+  if (loadTextEl) loadTextEl.textContent = '載入 SHAP 分析中...';
+  if (_shapLoadingTimer) clearTimeout(_shapLoadingTimer);
+  _shapLoadingTimer = setTimeout(() => {
+    if (loadTextEl && !loadEl.classList.contains('hidden'))
+      loadTextEl.textContent = '計算 SHAP values 中 (樣本多時可能需數秒)...';
+  }, 1500);
   // 先清空舊圖,讓使用者看到 loading 狀態,避免誤以為沒切換
   _clearShapFigures();
 
@@ -6589,6 +6598,7 @@ async function loadShapFigures() {
     _clearShapFigures();
   } finally {
     loadEl.classList.add('hidden');
+    if (_shapLoadingTimer) { clearTimeout(_shapLoadingTimer); _shapLoadingTimer = null; }
     // 只清掉「自己」的 in-flight 標記;若中間又有新請求進來,別誤清新的
     if (_shapInFlightController === myController) {
       _shapInFlightController = null;

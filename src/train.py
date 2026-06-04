@@ -232,8 +232,11 @@ def train_dl_single_fold(
 
         # 驗證
         with torch.no_grad():
-            preds = model(X_val_t).argmax(dim=1).cpu().numpy()
-        val_score = calculate_score(y_val, preds, metric=metric)
+            logits = model(X_val_t)
+            proba = torch.softmax(logits, dim=1).cpu().numpy()
+            preds = proba.argmax(axis=1)
+        y_sc = proba if metric == "roc_auc" else None
+        val_score = calculate_score(y_val, preds, metric=metric, y_score=y_sc)
 
         if val_score > best_f1:
             best_f1 = val_score
@@ -361,8 +364,10 @@ def run_tabular_cv(
             oof_counts[val_idx] += 1
             test_preds += model.predict_proba(X_te) / (len(folds) * n_seeds)
 
+            _proba_val = model.predict_proba(X_val)
+            _y_sc = _proba_val if metric == "roc_auc" else None
             val_score = calculate_score(
-                y[val_idx], model.predict_proba(X_val).argmax(axis=1), metric=metric
+                y[val_idx], _proba_val.argmax(axis=1), metric=metric, y_score=_y_sc
             )
             fold_pbar.set_postfix({f"fold_{metric}": f"{val_score:.4f}"})
 
@@ -375,7 +380,8 @@ def run_tabular_cv(
                 collect_folds.append({"fb": fb, "model": model})
 
     oof /= np.maximum(oof_counts, 1.0)
-    oof_score = calculate_score(y, oof.argmax(axis=1), metric=metric)
+    _oof_sc = oof if metric == "roc_auc" else None
+    oof_score = calculate_score(y, oof.argmax(axis=1), metric=metric, y_score=_oof_sc)
     print(f"  [CV] {tag:30s} OOF {get_metric_name(metric)} = {oof_score:.4f}")
 
     if save_artifacts:
@@ -510,8 +516,11 @@ def run_dl_cv(
                 scheduler.step()
 
                 with torch.no_grad():
-                    preds = model(X_val_t).argmax(dim=1).cpu().numpy()
-                val_score = calculate_score(y[val_idx], preds, metric=metric)
+                    _logits = model(X_val_t)
+                    _proba = torch.softmax(_logits, dim=1).cpu().numpy()
+                    preds = _proba.argmax(axis=1)
+                _y_sc = _proba if metric == "roc_auc" else None
+                val_score = calculate_score(y[val_idx], preds, metric=metric, y_score=_y_sc)
                 epoch_pbar.set_postfix({f"val_{metric}": f"{val_score:.4f}", "lr": f"{scheduler.get_last_lr()[0]:.2e}"})
 
                 if val_score > best_f1:
@@ -551,7 +560,8 @@ def run_dl_cv(
                 torch.cuda.empty_cache()
 
     oof /= np.maximum(oof_counts, 1.0)
-    oof_score = calculate_score(y, oof.argmax(axis=1), metric=metric)
+    _oof_sc = oof if metric == "roc_auc" else None
+    oof_score = calculate_score(y, oof.argmax(axis=1), metric=metric, y_score=_oof_sc)
     print(f"  [CV] {tag:30s} OOF {get_metric_name(metric)} = {oof_score:.4f}")
 
     if save_artifacts:

@@ -424,7 +424,8 @@ class TabularHPO:
                     else:
                         m.fit(X_tr, y[tr_idx])
                     y_hat = m.predict(X_val)
-                    scores.append(calculate_score(y[val_idx], y_hat, metric=self.metric))
+                    y_sc = m.predict_proba(X_val) if self.metric == "roc_auc" else None
+                    scores.append(calculate_score(y[val_idx], y_hat, metric=self.metric, y_score=y_sc))
 
                 score = float(np.mean(scores))
                 trial.set_user_attr("feature_set", fs)
@@ -561,7 +562,8 @@ class TabularHPO:
                     else:
                         m.fit(X_t, y[tr_idx])
                     y_hat = m.predict(X_v)
-                    fold_scores.append(calculate_score(y[val_idx], y_hat, metric=self.metric))
+                    y_sc = m.predict_proba(X_v) if self.metric == "roc_auc" else None
+                    fold_scores.append(calculate_score(y[val_idx], y_hat, metric=self.metric, y_score=y_sc))
                 score = float(np.mean(fold_scores))
                 trial.set_user_attr("feature_set", fs)
                 return score
@@ -703,6 +705,7 @@ class DLHPO:
                     n_classes=n_classes,
                     device=device,
                     global_cfg=global_cfg,
+                    metric=self.metric,
                 )
                 scores.append(score)
 

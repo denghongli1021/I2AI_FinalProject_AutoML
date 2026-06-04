@@ -1764,7 +1764,8 @@ def visualize_shap_endpoint(
     is_ensemble = bundle_meta.get("type") == "daniel_pipeline_ensemble"
 
     # Item 1C:若 bundle 已預計算 SHAP 持久化,優先直接回(秒級;不用算)
-    if is_ensemble and isinstance(bundle_meta.get("shapPlots"), dict) and bundle_meta["shapPlots"]:
+    # is_ensemble 不是必要條件——即時計算後回存的非 ensemble 模型同樣走快取路徑
+    if isinstance(bundle_meta.get("shapPlots"), dict) and bundle_meta["shapPlots"]:
         # 前端傳了 family 就只給該 family,沒傳就回整包
         _sp = bundle_meta["shapPlots"]
         # 兼容舊請求 (sampleIndex / targetFeature 對預計算版無作用),前端用 family field 切換
@@ -1819,15 +1820,27 @@ def visualize_shap_endpoint(
     def _f(fig):
         return json.loads(pio.to_json(fig))
 
+    g, w, d = _f(fig_global), _f(fig_waterfall), _f(fig_dependence)
+
+    # 計算完成後回存 shapPlots，下次開啟走快取秒速載入（非致命，失敗不影響回傳）
+    _shap_cache = {
+        "tabular": {
+            "global": g, "waterfall": w, "dependence": d,
+            "featureNames": feature_names,
+            "modelTag": None, "oofScore": None,
+        }
+    }
+    storage.patch_model_shap_plots(req.modelId, _shap_cache, user, db)
+
     return {
         "modelId": req.modelId,
         "sampleIndex": sample_idx,
         "targetFeature": target_feat,
         "sampleCount": int(len(X_sub)),
         "featureNames": feature_names,
-        "global": _f(fig_global),
-        "waterfall": _f(fig_waterfall),
-        "dependence": _f(fig_dependence),
+        "global": g,
+        "waterfall": w,
+        "dependence": d,
     }
 
 
