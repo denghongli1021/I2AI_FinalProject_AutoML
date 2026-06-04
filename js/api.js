@@ -2,6 +2,17 @@
 // 啟用方式:在「系統設定」頁面打開「使用 Python 後端 API」開關。
 // 也可在 console 執行: ApiClient.setEnabled(true) 或修改 localStorage.useApi。
 
+// ngrok 免費版會對瀏覽器請求注入 warning 頁面，導致 fetch 收到 HTML 而非 JSON。
+// 加上此 header 後 ngrok 直接放行，對非 ngrok 的伺服器無影響。
+;(function () {
+  const _orig = window.fetch;
+  window.fetch = function (url, opts) {
+    opts = opts || {};
+    opts.headers = Object.assign({ 'ngrok-skip-browser-warning': 'true' }, opts.headers || {});
+    return _orig.call(this, url, opts);
+  };
+})();
+
 const ApiClient = {
   baseUrl: localStorage.getItem('apiBaseUrl') || 'https://i2ai-automl-api.onrender.com',
   enabled: localStorage.getItem('useApi') === 'true',
