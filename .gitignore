@@ -60,7 +60,7 @@ api/auth.db
 
 # ── Node / Tailwind build ────────────────────────────────────────────────────
 node_modules/
-css/tailwind.css
+# css/tailwind.css — 已改為 track，讓 Colab / CI 不需要本地 build 就能顯示 UI
 
 # ── Git worktree / IDE ────────────────────────────────────────────────────────
 teammate-branches/
