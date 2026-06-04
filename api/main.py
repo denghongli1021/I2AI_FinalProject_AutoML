@@ -226,6 +226,9 @@ async def preprocess_transform_endpoint(
     useMice: bool = Form(False),
     useMiSelection: bool = Form(False),
     miThreshold: float = Form(0.01),
+    # 時序模式 — 勾起後預處理改 chronological split (取最後 X% 當 holdout,no shuffle),
+    # 避免隨機切讓未來資料混進 train → 時序模型 leak。預設 False 維持原 sklearn 隨機切。
+    timeSeries: bool = Form(False),
     # 對抗驗證測試集 — 可選 Kaggle 風 test.csv。傳了會啟動 daniel 的
     # adversarial validation,偵測 train/test 分佈漂移的「間諜特徵」並剔除
     adversarialTestFile: UploadFile | None = File(None),
@@ -260,6 +263,7 @@ async def preprocess_transform_endpoint(
             df, target, test_size=testSize,
             test_data_source=adv_test_df,
             enable_adv_val=(adv_test_df is not None),
+            is_time_series=timeSeries,
         )
     except Exception as e:
         # 把完整 traceback 印到 stderr,前端只看 e.__class__ + message 沒辦法 debug

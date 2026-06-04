@@ -84,6 +84,8 @@ const ApiClient = {
     if (payload.useMice != null) fd.append('useMice', String(!!payload.useMice));
     if (payload.useMiSelection != null) fd.append('useMiSelection', String(!!payload.useMiSelection));
     if (payload.miThreshold != null) fd.append('miThreshold', String(payload.miThreshold));
+    // TS toggle:後端切分用 chronological (shuffle=False),避免時序資料隨機切 leak
+    if (payload.timeSeries != null) fd.append('timeSeries', String(!!payload.timeSeries));
     if (payload.adversarialTestFile) fd.append('adversarialTestFile', payload.adversarialTestFile);
     const r = await fetch(`${this.baseUrl}/api/preprocess/transform`, {
       method: 'POST',

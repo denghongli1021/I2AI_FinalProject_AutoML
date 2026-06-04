@@ -491,6 +491,50 @@ async function hydrateUserHistoryFromDb() {
       });
     }
 
+    // 【訪客模式特例】guest 後端不寫 training_runs → runs 永遠空 → dbHistory 也空。
+    // 若這裡照常 `_trainingHistory = dbHistory` 會把 pushTrainingHistory 剛塞的 placeholder 整個擦掉,
+    // 結果 MLEngine 卡在舊狀態,SHAP 用 placeholder fake id 撞 404。
+    // 解法:guest 不擦本地 history,改成 in-place 把 placeholder model 的 fake id 換成
+    // /api/models 回來的真實 modelId (用 datasetName + label 配對)。
+    const isGuest = !(typeof AuthClient !== 'undefined' && AuthClient.token);
+    if (isGuest && runs.length === 0 && models.length > 0) {
+      // 用 models 回應(已含真實 modelId)倒推:對每筆 _trainingHistory 的 model,
+      // 用 dataSourceLabel / dataSource / name 去 models 裡找 bundle 同名的那個,替換 id
+      const apiModelsByDataset = {};
+      for (const m of models) {
+        const dsId = m.datasetId || m.bundle?.datasetId || '__';
+        (apiModelsByDataset[dsId] = apiModelsByDataset[dsId] || []).push(m);
+      }
+      for (const h of _trainingHistory) {
+        // 先試精確配對 (同 datasetId),沒有的話 fallback 用全部 models — 因為 guest 路徑後端
+        // 不一定有寫 datasetId 進 bundle,寬一點配對才不會漏。
+        let candidates = apiModelsByDataset[h.datasetId] || [];
+        if (!candidates.length) candidates = models;
+        if (!candidates.length) continue;
+        for (const localM of (h.models || [])) {
+          // 配對策略:① 完全 name 配對 → ② 同 dataSource 唯一候選 → 跳過
+          let realM = candidates.find(c => (c.bundle?.name || '') === localM.name);
+          if (!realM) {
+            const sameSrc = candidates.filter(c => c.bundle?.dataSource === localM.dataSource);
+            if (sameSrc.length === 1) realM = sameSrc[0];
+          }
+          if (realM) {
+            localM.id = realM.id;       // 把 placeholder id 換成真實 model_xxx
+            localM.type = realM.bundle?.type || localM.type;
+            localM._fromDb = true;
+            // 把 bundle 內的 estimatorMb / shapPlots 等元資料補上 (precomputed SHAP 用得到)
+            if (realM.bundle?.shapPlots) localM.shapPlots = realM.bundle.shapPlots;
+            if (realM.bundle?.bestTabularModel) localM.bestTabularModel = realM.bundle.bestTabularModel;
+            if (realM.bundle?.bestDLModel) localM.bestDLModel = realM.bundle.bestDLModel;
+            if (realM.bundle?.estimatorMb) localM.estimatorMb = realM.bundle.estimatorMb;
+          }
+        }
+      }
+      console.log(`[hydrate:guest] in-place 把 ${_trainingHistory.length} 筆 history 內的 placeholder id 替換成真實 modelId (沒擦掉 local)`);
+      _persistTrainingHistory();
+      return;   // guest 路徑這邊就結束,不走下面的 DB 為準覆蓋
+    }
+
     // DB 為唯一真相 (authoritative):fetch 成功 → 直接用 DB 結果取代,不再 merge localStorage。
     // 這樣 `python tools/wipe_data.py --all` 清空 DB 後,使用者重新整理頁面就會自動看到乾淨畫面
     // (DB 0 筆 → dbHistory 0 筆 → 覆蓋掉殘留的 localStorage 舊歷史),不需要手動清 local。
@@ -2945,6 +2989,8 @@ async function runPreprocessTransform() {
   const testSize = parseFloat(document.getElementById('pp-test-size').value);
   const useMice = document.getElementById('pp-opt-mice')?.checked || false;
   const useMiSelection = document.getElementById('pp-opt-mi')?.checked || false;
+  // TS toggle:勾起 → 後端改用 chronological 切 (取最後 X% 當 holdout),避免時序資料隨機切 leak
+  const timeSeries = document.getElementById('pp-time-series')?.checked || false;
   // 對抗驗證測試集 — 上傳 Kaggle 風 test.csv 觸發 daniel 的 adv val 防護
   const advFile = document.getElementById('pp-adv-file')?.files?.[0] || null;
   ppSetStatus(true, advFile
@@ -2952,7 +2998,7 @@ async function runPreprocessTransform() {
     : '執行完整預處理管線...');
   try {
     const res = await ApiClient.preprocessTransform({
-      datasetId: ds.id, target, testSize, useMice, useMiSelection,
+      datasetId: ds.id, target, testSize, useMice, useMiSelection, timeSeries,
       adversarialTestFile: advFile,
     });
     renderAuditReport(res.auditReport);
@@ -3727,26 +3773,24 @@ function renderRealExperimentsPage() {
     targetSel.appendChild(opt);
   });
 
-  // 【非 numeric target 自動鎖原始資料集】
-  // 原始資料集那條 ML 路徑只接 numeric target (回歸/分類都要先 to-number),
-  // 選 categorical/text/datetime 時自動 uncheck + disable 原始資料集 checkbox,
-  // 強制 user 走預處理過的資料。
+  // 【非 numeric target 自動 uncheck 原始資料集 — 不 disable,讓 user 可以強制覆蓋】
+  // 原始資料集那條 ML 路徑只接 numeric target,但 disable=true 會卡住合法 case
+  // (例 datetime target 排第一→初始鎖死、target 雖換成 numeric 但有些路徑沒重評估鎖)。
+  // 改成柔性提示:預設幫 user 取消勾,但不鎖,user 想試還是可以勾回去。
+  // 後端遇到 non-numeric target + raw 會在訓練時拒絕,UI 不用扛這道閘。
   const srcRawCb = document.getElementById('exp-src-raw');
   const srcPpCb  = document.getElementById('exp-src-pp');
   const _applyTargetTypeLock = () => {
     const selected = targetSel.options[targetSel.selectedIndex];
     if (!selected || !srcRawCb) return;
+    // 永遠保持 enabled (即使是 datetime / categorical target,user 還是能勾 raw 自找麻煩)
+    srcRawCb.disabled = false;
+    const lbl = srcRawCb.closest('label');
+    if (lbl) lbl.classList.remove('opacity-40', 'cursor-not-allowed');
     const isNumeric = (selected.dataset.colType === 'numeric');
-    if (isNumeric) {
-      srcRawCb.disabled = false;
-      const lbl = srcRawCb.closest('label');
-      if (lbl) lbl.classList.remove('opacity-40', 'cursor-not-allowed');
-    } else {
+    if (!isNumeric) {
+      // 預設幫 user 取消勾(但不鎖) + 自動勾起預處理(確保有路可走)
       srcRawCb.checked = false;
-      srcRawCb.disabled = true;
-      const lbl = srcRawCb.closest('label');
-      if (lbl) lbl.classList.add('opacity-40', 'cursor-not-allowed');
-      // 自動勾起預處理 (確保 user 還有路可走)
       if (srcPpCb && !srcPpCb.disabled) srcPpCb.checked = true;
     }
   };
@@ -4012,6 +4056,10 @@ function renderRealExperimentsPage() {
     if (inDropdown) {
       if (targetSel.value !== sel.target) {
         targetSel.value = sel.target;
+        // 程式碼改 .value 不會自動 fire change → 手動 dispatch,
+        // 讓 _applyTargetTypeLock (鎖原始資料集 by target type) 重新評估,
+        // 避免初始 target 是 datetime → 鎖了 raw → 同步成 numeric 後鎖沒解開、user 點不動的狀況
+        targetSel.dispatchEvent(new Event('change'));
         updateTargetInfo();
       }
       if (ppHint) ppHint.textContent = `目標變數已同步為「${sel.target}」(預處理時設定的)`;
@@ -5157,9 +5205,12 @@ function renderExperimentResults(models, data) {
 
   // Daniel pipeline 跑出來的 model 沒有 per-feature importance / per-sample 預測 / 後端 estimator,
   // 顯示這些區塊只會看到「不支援」訊息或空下拉,直接隱藏更乾淨。
-  const isPipelineRun = models.length > 0 && models.every(m => m.type === 'daniel_pipeline');
-  // daniel ensemble (hydrated 後 type='daniel_pipeline_ensemble') 或 autogluon_model
-  // 同樣的:訓練結果表的 3 個指標欄+訓練時間 跟「Pipeline 詳細」「排行榜」重複,隱藏整張表
+  // 認舊 placeholder 'daniel_pipeline' 跟新版 hydrated 'daniel_pipeline_ensemble' 兩個 type
+  // (不然新版訓練完 View model charts + Batch Predict 區塊還是會跑出來)
+  const isPipelineRun = models.length > 0 && models.every(m =>
+    m.type === 'daniel_pipeline' || m.type === 'daniel_pipeline_ensemble'
+  );
+  // autogluon_model 也算 ensemble-ish (隱藏結果表)
   const isEnsembleish = models.length > 0 && models.every(m =>
     m.type === 'daniel_pipeline_ensemble' || m.type === 'autogluon_model'
   );
@@ -5865,7 +5916,8 @@ function renderRealInsights() {
   document.getElementById('insight-best-score').textContent = isReg
     ? (typeof best.metrics?.testR2 === 'number' ? best.metrics.testR2.toFixed(4) : '—')
     : (typeof best.metrics?.testAccuracy === 'number' ? (best.metrics.testAccuracy * 100).toFixed(2) + '%' : '—');
-  document.getElementById('insight-feature-count').textContent = best.featureNames.length;
+  // best.featureNames 對 daniel_pipeline placeholder 來說可能 undefined → 防呆顯示 '—'
+  document.getElementById('insight-feature-count').textContent = best.featureNames?.length ?? '—';
   document.getElementById('insight-model-count').textContent = models.length;
 
   // SHAP section (隊友 AutoMLVisualizer)

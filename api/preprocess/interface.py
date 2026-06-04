@@ -225,13 +225,14 @@ def run_data_audit(
 
 
 def preprocess_for_training(
-    data_source: Union[pd.DataFrame, str, List[str]],  
+    data_source: Union[pd.DataFrame, str, List[str]],
     target_col: str,
     test_data_source: Optional[Union[pd.DataFrame, str, List[str]]] = None, # 🆕 新增：獨立測試集
     test_size: float = 0.2,
     schema_override: Optional[Dict[str, str]] = None,
-    main_file_index: int = 0, 
-    enable_adv_val: bool = True # 🆕 新增：對抗驗證開關
+    main_file_index: int = 0,
+    enable_adv_val: bool = True, # 🆕 新增：對抗驗證開關
+    is_time_series: bool = False,  # 🆕 時序模式 — True 改 chronological 切 (取最後 X% 當 holdout,no shuffle)
 ) -> Tuple[pd.DataFrame, pd.DataFrame, pd.Series, pd.Series, Any]:
     """
     [提供給 模型組] 執行端對端的預處理管線。
@@ -296,6 +297,11 @@ def preprocess_for_training(
         X_test_raw = X.iloc[0:0].copy()
         y_train = y
         y_test = None
+    elif is_time_series:
+        # 時序:取最後 X% 當 holdout,不 shuffle,不 stratify
+        _idx = int(len(X) * (1.0 - float(test_size)))
+        X_train_raw, X_test_raw = X.iloc[:_idx], X.iloc[_idx:]
+        y_train, y_test = y.iloc[:_idx], y.iloc[_idx:]
     else:
         stratify = y if (y.nunique() <= 20 and y.nunique() >= 2) else None
         X_train_raw, X_test_raw, y_train, y_test = train_test_split(
@@ -376,6 +382,11 @@ def preprocess_for_training(
             X_test_raw = X.iloc[0:0].copy()
             y_train = y
             y_test = None
+        elif is_time_series:
+            print(f">>> [Phase 1.5b] 時序模式 — 取最後 {test_size*100}% 當 holdout (chronological,no shuffle)")
+            _idx = int(len(X) * (1.0 - float(test_size)))
+            X_train_raw, X_test_raw = X.iloc[:_idx], X.iloc[_idx:]
+            y_train, y_test = y.iloc[:_idx], y.iloc[_idx:]
         else:
             print(f">>> [Phase 1.5b] 對抗驗證後,從 train 切 {test_size*100}% 當 holdout")
             stratify = y if (y.nunique() <= 20 and y.nunique() >= 2) else None
@@ -400,6 +411,11 @@ def preprocess_for_training(
             X_test_raw = X.iloc[0:0].copy()   # 空 DataFrame,保留欄位 schema 給下游 transform
             y_train = y
             y_test = None
+        elif is_time_series:
+            print(f">>> [Phase 1.5] 時序模式 — 取最後 {test_size*100}% 當 holdout (chronological,no shuffle)")
+            _idx = int(len(X) * (1.0 - float(test_size)))
+            X_train_raw, X_test_raw = X.iloc[:_idx], X.iloc[_idx:]
+            y_train, y_test = y.iloc[:_idx], y.iloc[_idx:]
         else:
             print(f">>> [Phase 1.5] 無獨立測試集，自動進行 {test_size*100}% 驗證集隨機切割")
             stratify = y if (y.nunique() <= 20 and y.nunique() >= 2) else None

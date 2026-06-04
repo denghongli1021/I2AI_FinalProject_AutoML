@@ -582,11 +582,16 @@ def list_models(user, db: Session, *, training_run_id: Optional[str] = None,
         for mid, entry in list_owned(MODELS, user):
             bundle = entry.get("bundle", {})
             bundle["id"] = mid
+            # 從 bundle 撈 datasetId,給前端 hydrate 配對 placeholder model 用。
+            # bundle["datasetId"] 由 save_model 鏈路寫進去 (train_pipeline_stream_endpoint 跟
+            # _stash_dataset_id_in_bundle 兩條路徑都會帶);沒有的話 fallback None。
+            _ds = bundle.get("datasetId") or entry.get("datasetId")
             items.append({
                 "id": mid,
                 "bundle": bundle,
                 "hyperparameters": entry.get("hyperparameters", {}),
                 "preprocessorId": entry.get("preprocessorId"),
+                "datasetId": _ds,
                 "createdAt": None,
             })
         return items
@@ -620,7 +625,17 @@ def list_models(user, db: Session, *, training_run_id: Optional[str] = None,
 
 def get_model(model_id: str, user, db: Session) -> dict:
     if not _is_authed(user):
-        return get_owned(MODELS, model_id, user, "model")
+        try:
+            return get_owned(MODELS, model_id, user, "model")
+        except HTTPException as he:
+            # 診斷:guest 撞 404 時印 MODELS 實際狀態,看是「整個沒了」還是「id 不對」
+            from api.store import owner_id as _oid
+            _all_keys = list(MODELS.keys())
+            _guest_keys = [k for k, v in MODELS.items() if v.get("_owner") == _oid(user)]
+            print(f"[storage.get_model:guest 404] req_id={model_id} "
+                  f"MODELS total={len(_all_keys)} guest-owned={len(_guest_keys)} "
+                  f"keys={_guest_keys[:10]}", flush=True)
+            raise he
     m = db.query(DbModel).filter_by(id=model_id, user_id=user.id).first()
     if m is None:
         raise HTTPException(status_code=404, detail="model 不存在")

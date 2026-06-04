@@ -83,8 +83,8 @@
     <!-- Logo -->
     <div class="p-5 border-b border-dark-700/50">
       <div class="flex items-center gap-3">
-        <div class="w-9 h-9 rounded-lg bg-gradient-to-br from-primary-500 to-accent-500 flex items-center justify-center">
-          <svg class="w-5 h-5 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"/></svg>
+        <div class="w-9 h-9 rounded-lg overflow-hidden flex items-center justify-center bg-dark-800">
+          <img src="icon.png" alt="AutoML" class="w-full h-full object-contain">
         </div>
         <div>
           <h1 class="text-lg font-bold bg-gradient-to-r from-primary-400 to-accent-400 bg-clip-text text-transparent">AutoML</h1>
@@ -160,7 +160,7 @@
           <button id="btn-sidebar-toggle" class="hamburger-btn" aria-label="開啟側邊選單" aria-controls="sidebar" aria-expanded="false">
             <svg class="w-5 h-5"><use href="#i-menu"/></svg>
           </button>
-          <span class="text-dark-400 hidden sm:inline">AutoML Pro</span>
+          <!-- <span class="text-dark-400 hidden sm:inline">AutoML Pro</span> -->
           <svg class="w-4 h-4 text-dark-600 hidden sm:inline" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/></svg>
           <span id="breadcrumb-current" class="text-dark-100 font-medium truncate">總覽儀表板</span>
         </div>
@@ -259,7 +259,8 @@
             <div class="text-3xl font-bold">47</div>
             <div class="flex items-center gap-1 mt-1 text-xs text-success-400"><svg class="w-3 h-3"><use href="#i-arrow-up"/></svg>+8 本週</div>
           </div>
-          <div class="metric-card">
+          <!-- 隱藏:歷史最佳 R² / 當前訓練模型數 — user 要求拿掉 -->
+          <div class="metric-card hidden">
             <div class="flex items-center justify-between mb-3">
               <span class="text-dark-400 text-sm" data-en="Best Model Accuracy">最佳模型準確率</span>
               <div class="w-8 h-8 rounded-lg bg-success-500/10 flex items-center justify-center"><svg class="w-4 h-4 text-success-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/></svg></div>
@@ -267,7 +268,7 @@
             <div class="text-3xl font-bold">96.8<span class="text-lg text-dark-400">%</span></div>
             <div class="flex items-center gap-1 mt-1 text-xs text-success-400"><svg class="w-3 h-3"><use href="#i-arrow-up"/></svg>+1.2% 較上次</div>
           </div>
-          <div class="metric-card">
+          <div class="metric-card hidden">
             <div class="flex items-center justify-between mb-3">
               <span class="text-dark-400 text-sm" data-en="Deployed Models">已部署模型</span>
               <div class="w-8 h-8 rounded-lg bg-warning-500/10 flex items-center justify-center"><svg class="w-4 h-4 text-warning-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 12h14M12 5l7 7-7 7"/></svg></div>
@@ -650,7 +651,12 @@
                   <input type="range" id="pp-test-size" min="0" max="0.9" step="0.05" value="0.2" class="flex-1 accent-primary-500">
                   <span id="pp-test-size-label" class="text-sm font-mono text-primary-400 w-12 text-right">20%</span>
                 </div>
-                <p class="text-xs text-dark-500 mt-1.5" data-en="train_test_split ratio, fixed random_state=42.">train_test_split 切分比例,固定 random_state=42。</p>
+                <p class="text-xs text-dark-500 mt-1.5" id="pp-test-size-hint" data-en="train_test_split ratio, fixed random_state=42.">train_test_split 切分比例,固定 random_state=42。</p>
+                <!-- TS toggle:勾起 → 改 chronological 切 (取最後 X% 當 holdout),避免時序資料隨機切造成 leakage -->
+                <label class="flex items-center gap-2 mt-2 cursor-pointer">
+                  <input type="checkbox" id="pp-time-series" class="rounded bg-dark-700 border-dark-500 accent-primary-500">
+                  <span class="text-xs text-dark-300" data-en="Time Series — chronological split (last X% as holdout)">時間序列 — 依時間順序切(取最後 X% 當 holdout)</span>
+                </label>
               </div>
               <div class="flex items-end gap-2">
                 <button id="btn-pp-audit" class="btn btn-tertiary flex-1" data-en="Quick Audit">快速健檢</button>
@@ -1190,21 +1196,21 @@
                       <input type="radio" name="exp-engine" value="sklearn" checked class="accent-primary-500 mt-0.5">
                       <div>
                         <p class="text-sm font-medium">sklearn</p>
-                        <p class="text-xs text-dark-400" data-en="Runs multiple algorithms in seconds to minutes. Select below.">同時跑多個演算法,秒級到分鐘級。可勾選下方演算法。</p>
+                        <p class="text-xs text-dark-400">Runs multiple algorithms in seconds to minutes. Select below.</p>
                       </div>
                     </label>
                     <label class="flex items-start gap-3 px-3 py-2.5 rounded-lg bg-dark-800 border border-dark-600 cursor-pointer hover:border-warning-500 transition-colors has-[:checked]:border-warning-500 has-[:checked]:bg-warning-500/10">
                       <input type="radio" name="exp-engine" value="daniel" class="accent-warning-500 mt-0.5">
                       <div>
                         <p class="text-sm font-medium">pipeline</p>
-                        <p class="text-xs text-dark-400" data-en="HPO + NAS + 5-Fold CV + 2-layer Ensemble. Minutes-plus.">HPO + NAS + 5-Fold CV + 雙層 Ensemble,數分鐘起跳。</p>
+                        <p class="text-xs text-dark-400">HPO + NAS + 5-Fold CV + 2-layer Ensemble. Minutes-plus.</p>
                       </div>
                     </label>
                     <label class="flex items-start gap-3 px-3 py-2.5 rounded-lg bg-dark-800 border border-dark-600 cursor-pointer hover:border-accent-500 transition-colors has-[:checked]:border-accent-500 has-[:checked]:bg-accent-500/10">
                       <input type="radio" name="exp-engine" value="autogluon" class="accent-accent-500 mt-0.5">
                       <div>
                         <p class="text-sm font-medium">autogluon</p>
-                        <p class="text-xs text-dark-400" data-en="TabularPredictor end-to-end as baseline. MVP: no batch predict / SHAP yet.">TabularPredictor 一條龍,當基準對照組。MVP 暫不支援 batch predict / SHAP。</p>
+                        <p class="text-xs text-dark-400">TabularPredictor end-to-end as baseline. MVP: no batch predict / SHAP yet.</p>
                       </div>
                     </label>
                   </div>
@@ -1291,7 +1297,8 @@
                     </label>
                   </div>
                   <!-- Option B: 上傳預測 CSV (Kaggle 風,無 label OK) — 訓練完直接給 submission.csv 下載 -->
-                  <div class="mt-3 p-3 rounded-lg bg-dark-800/40 border border-dark-700/50">
+                  <!-- 隱藏:批次預測流程改走「模型排行榜」頁的 batch predict,避免兩處 UI 混淆 -->
+                  <div class="mt-3 p-3 rounded-lg bg-dark-800/40 border border-dark-700/50 hidden">
                     <div class="flex items-center justify-between gap-3 flex-wrap">
                       <div class="flex-1 min-w-0">
                         <p class="text-xs font-medium text-dark-200" data-en="📄 Prediction CSV (optional)">📄 預測 CSV (可選)</p>
@@ -1819,7 +1826,7 @@
                   <button id="shap-family-tabular" class="px-2 py-0.5 rounded text-[11px] font-medium bg-primary-500/20 text-primary-300" data-family="tabular">Tabular</button>
                   <button id="shap-family-dl" class="px-2 py-0.5 rounded text-[11px] font-medium text-dark-400 hover:text-dark-200" data-family="dl">DL</button>
                 </div>
-                <span id="shap-source-badge" class="hidden text-[10px] px-1.5 py-0.5 rounded font-mono bg-success-500/15 text-success-400 border border-success-500/30" title="訓練時已預計算,直接從 bundle 載入,秒級顯示" data-en="✓ Persistent">✓ 持久化</span>
+                <!-- <span id="shap-source-badge" class="hidden text-[10px] px-1.5 py-0.5 rounded font-mono bg-success-500/15 text-success-400 border border-success-500/30" title="訓練時已預計算,直接從 bundle 載入,秒級顯示" data-en="✓ Persistent">✓ 持久化</span> -->
                 <span id="shap-best-tag" class="hidden text-[10px] text-dark-500 font-mono"></span>
                 <label class="text-dark-400 ml-2">樣本 #</label>
                 <input type="number" id="shap-sample-index" value="0" min="0" class="bg-dark-800 border border-dark-600 rounded px-2 py-1 text-xs w-16 focus:border-primary-500 outline-none">
@@ -2647,15 +2654,9 @@
                     <span class="toggle-slider"></span>
                   </label>
                 </div>
-                <div id="setting-local-hint" class="hidden text-xs text-dark-300 bg-dark-800/60 border border-dark-700 rounded-lg p-3 leading-relaxed">
-                  ⚠️ 本地模式需要你先在終端機(專案根目錄)啟動本地後端:
-                  <div class="font-mono text-[11px] text-primary-300 mt-1.5 mb-1.5 select-all">$env:DB_LOCAL='1'; python -m uvicorn api.main:app --reload --port 8000</div>
-                  後端 + 資料庫 (SQLite, <span class="font-mono">api/auth.db</span>) 都會跑在本機、不連雲端。本地 DB 是全新空的,第一次請註冊一個 email/密碼帳號。
-                  <div class="mt-2 pt-2 border-t border-dark-700 text-warning-300">
-                    ❗ 這個頁面也要用 <span class="font-mono">http</span> 開(本機 / Live Server),<b>不能在 https 的 GitHub Pages 上用本地模式</b> —— HTTPS 頁面無法呼叫 http 的本機後端,瀏覽器會擋(Failed to fetch)。<br>
-                    ※ 用 <span class="font-mono">127.0.0.1</span> 而非 <span class="font-mono">localhost</span>:Windows 上 localhost 常被解析成 IPv6,但後端只聽 IPv4 → 也會 Failed to fetch。
-                  </div>
-                </div>
+                <!-- 隱藏:本地模式提示文字(user 要求拿掉)。div 跟 id 保留讓 JS toggle 不出錯,
+                     用 inline style display:none 覆蓋 JS 加減 hidden class 的行為。 -->
+                <div id="setting-local-hint" class="hidden" style="display:none !important"></div>
                 <div class="setting-row">
                   <div>
                     <p class="text-sm font-medium" data-en="Use Python Backend API">使用 Python 後端 API</p>
