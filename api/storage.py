@@ -485,6 +485,11 @@ def save_model(
         # 若有 pre-pickled bytes (daniel ensemble) → 直接 loads 一次,讓 get_model 拿到的 entry["estimator"] 永遠是物件
         _guest_estimator = estimator
         if _guest_estimator is None and estimator_pkl_bytes is not None:
+            # bundle pickle 含 src.ensemble / src.preprocess 等模組，需先確保 pipeline 路徑在 sys.path
+            import sys as _sys
+            _pipe_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "train", "pipeline")
+            if _pipe_path not in _sys.path:
+                _sys.path.insert(0, _pipe_path)
             try:
                 _guest_estimator = pickle.loads(estimator_pkl_bytes)
             except Exception as e:
@@ -989,6 +994,11 @@ def restore_guest_models() -> int:
     d = os.path.join(MODEL_BLOB_DIR, "guest")
     if not os.path.isdir(d):
         return 0
+    # bundle pickle 含 src.ensemble / src.preprocess 等模組，unpickle 前補上 pipeline 路徑
+    import sys as _sys
+    _pipe_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "train", "pipeline")
+    if _pipe_path not in _sys.path:
+        _sys.path.insert(0, _pipe_path)
     restored = 0
     for fname in sorted(os.listdir(d)):
         if not fname.endswith("_meta.pkl"):
@@ -1007,6 +1017,7 @@ def restore_guest_models() -> int:
                 meta = pickle.load(f)
             MODELS[model_id] = {**meta, "estimator": estimator}
             restored += 1
+            print(f"[guest persist] 還原 {model_id}", flush=True)
         except Exception as e:
             print(f"[guest persist] 還原失敗 {model_id}: {e}", flush=True)
     if restored:
