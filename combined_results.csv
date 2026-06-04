@@ -17,4 +17,4 @@ baseline,REG_AcousticContaminationMadrid_nmv,TS,regression,166,72,,,5.329,0.3022
 baseline,REG_AluminiumConcentration,TS,regression,440,189,,,217.3956,0.7887,0.7887,375.1,False
 baseline,REG_AppliancesEnergy,TS,regression,95,42,,,3.5158,-0.0455,-0.0455,60.5,False
 baseline,REG_AustraliaRainfall,TS,regression,112186,48081,,,8.1249,0.1204,0.1204,234.2,False
-baseline,REG_BIDMC32HR,TS,regression,5550,2399,,,14.0154,0.0065,0.0065,612.6,False
+

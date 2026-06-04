@@ -139,6 +139,32 @@ class RobustDataCleaner(BaseEstimator, TransformerMixin):
         return np.array(self._out_columns)
 
 
+class TargetDropper(BaseEstimator, TransformerMixin):
+    """
+    [Phase0→Phase1 安全隔離層]
+    RobustDataCleaner 回傳 DataFrame，若 target 欄意外殘留，
+    ColumnTransformer(phase1) 的 feature_names_in_ 就會記錄它，
+    導致 transform(X_test) 時因 test 無此欄而拋 ValueError。
+    此步驟在 phase0 輸出後、phase1 fit 前強制移除 target 欄，
+    同時在 transform 時也做同樣的移除，確保 fit/transform 一致。
+    """
+    def __init__(self, target_col: str = None):
+        self.target_col = target_col
+
+    def fit(self, X, y=None):
+        return self
+
+    def transform(self, X):
+        if isinstance(X, pd.DataFrame) and self.target_col and self.target_col in X.columns:
+            return X.drop(columns=[self.target_col])
+        return X
+
+    def get_feature_names_out(self, input_features=None):
+        if input_features is None:
+            return np.array([])
+        return np.array([f for f in input_features if f != (self.target_col or "")])
+
+
 # =====================================================================
 # ⚙️ 以下為原有 AutoML 2.0 核心煉金模組 (註解與邏輯完全保留)
 # =====================================================================

@@ -32,7 +32,7 @@ from .utils.data_health import (
 )
 from .processors.feature_generator import MIFeatureSelector
 from .data_loader import load_and_merge_data
-from .processors.feature_generator import RobustDataCleaner
+from .processors.feature_generator import RobustDataCleaner, TargetDropper
 
 # 💡 新增功能: 對抗驗證
 try:
@@ -264,46 +264,6 @@ def preprocess_for_training(
     (X_train_clean, X_test_clean, y_train, y_test, fitted_preprocessor)
 
     """
-    print(">>> [Phase 1] 資料載入與整合 (Data Ingestion)")
-    raw_df = load_and_merge_data(data_source, main_file_index=main_file_index)
-
-    print(">>> [Phase 2] 特徵預處理管線 (Feature Engineering)")
-
-    if target_col not in raw_df.columns:
-        raise ValueError(f"找不到目標欄位 '{target_col}'，現有欄位：{list(raw_df.columns)}")
-
-    clean_df = _clean_raw_data(raw_df)
-
-    # 1. 切割特徵與標籤
-    X = clean_df.drop(columns=[target_col])
-    y = clean_df[target_col]
-
-    valid_mask = y.notna()
-    if not valid_mask.all():
-        n_invalid = (~valid_mask).sum()
-        print(f"  [前處理] 目標欄有 {n_invalid:,} 筆缺失，對應列已刪除")
-        X = X[valid_mask].reset_index(drop=True)
-        y = y[valid_mask].reset_index(drop=True)
-
-    if len(X) == 0:
-        raise ValueError("清理後資料集為空（0 列），無法訓練。")
-
-    # 2. 嚴格時間與空間切割
-    _is_clf_target = (
-        pd.api.types.is_bool_dtype(y) or
-        y.dtype == object or
-        str(y.dtype) == 'category' or
-        (pd.api.types.is_integer_dtype(y) and y.nunique() <= 20)
-    )
-    stratify = y if (_is_clf_target and y.nunique() >= 2) else None
-    X_train_raw, X_test_raw, y_train, y_test = train_test_split(
-        X, y, test_size=test_size, random_state=42, stratify=stratify
-    )
-
-    # 🚀 新增這行：立刻超渡舊的肥大變數，釋放記憶體！
-    del raw_df, clean_df, X, y
-    import gc; gc.collect()
-
     # 3. 🛡️ 測試集處理與切割邏輯
     print(">>> [Phase 1] 訓練資料載入與整合 (Train Ingestion)")
     raw_df = load_and_merge_data(data_source, main_file_index=main_file_index)
@@ -390,6 +350,29 @@ def preprocess_for_training(
 
     print(f"\n[預處理模組] 正在針對 {len(X_train_raw):,} 筆訓練資料進行分析...")
 
+    # 防禦：確保 target_col 絕對不混入特徵矩陣
+    for _df_ref in (X_train_raw, X_test_raw):
+        if target_col in _df_ref.columns:
+            print(f"  [防禦] 目標欄 '{target_col}' 意外殘留在特徵矩陣，強制移除")
+    X_train_raw = X_train_raw.drop(columns=[target_col], errors='ignore')
+    X_test_raw  = X_test_raw.drop(columns=[target_col], errors='ignore')
+
+    # 欄位對齊防護：test 可能因 _clean_raw_data 刪除 100% null 欄位而少欄
+    # 而 train 保留該欄（有值）→ ColumnTransformer.transform 時找不到欄位拋錯。
+    # 對策：把 test 缺少的欄位以 NaN 補回，把 test 多餘的欄位刪除，再對齊順序。
+    if X_test_raw is not None:
+        _train_cols = X_train_raw.columns.tolist()
+        _missing = [c for c in _train_cols if c not in X_test_raw.columns]
+        _extra   = [c for c in X_test_raw.columns if c not in _train_cols]
+        if _missing:
+            print(f"   [欄位對齊] 測試集缺少 {len(_missing)} 個欄位，以 NaN 填補: {_missing[:5]}")
+            for _c in _missing:
+                X_test_raw[_c] = np.nan
+        if _extra:
+            print(f"   [欄位對齊] 測試集有 {len(_extra)} 個多餘欄位，予以移除: {_extra[:5]}")
+            X_test_raw = X_test_raw.drop(columns=_extra)
+        X_test_raw = X_test_raw[_train_cols]   # 確保欄位順序與 train 一致
+
     # ---------------------------------------------------------
     # 🛡️ 修改核心 1: 讓盾牌先幫 Router 探路 (⚡ 記憶體極限優化版)
     # ---------------------------------------------------------
@@ -439,8 +422,12 @@ def preprocess_for_training(
     # ==========================================
     tree_preprocessor = Pipeline([
         ('phase0', RobustDataCleaner()),
+        # TargetDropper：防止 target 欄混入 phase1 的 feature_names_in_
+        # RobustDataCleaner 回傳 DataFrame，若 target 殘留則 ColumnTransformer
+        # 在 fit 時把它記錄進 feature_names_in_，transform X_test 時就會報
+        # "columns are missing: {target}"。此步驟雙向攔截，確保 fit/transform 一致。
+        ('drop_target', TargetDropper(target_col)),
         ('phase1', assembler.build(track="tree"))
-        # 🚨 刪除 phase2_mi_selector！讓生肉原汁原味進入模型。
     ])
 
     # ==========================================
@@ -449,6 +436,8 @@ def preprocess_for_training(
     # ==========================================
     dl_preprocessor = Pipeline([
         ('phase0', RobustDataCleaner()),
+        # 同上，DL 軌道也需要 TargetDropper 防止相同問題
+        ('drop_target', TargetDropper(target_col)),
         ('phase1', assembler.build(track="dl")),
         # ✅ DL 軌道非常需要 MI 篩選，因為神經網路對無用特徵（雜訊）非常敏感！
         ('phase2_mi_selector', MIFeatureSelector(top_k=300, is_classification=is_classification))

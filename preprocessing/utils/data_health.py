@@ -541,6 +541,7 @@ def _check_label_noise(
     # 🚀 更高級的抽樣：分層抽樣 (確保每個類別都有被抽到)
     if len(X_check) > 50000:
         # 將特徵與標籤合併，以利 groupby 抽樣
+        temp_df = X_check.copy()
         temp_df['__target__'] = y_check
         
         # 依照 target 群組，等比例抽出 20000 筆

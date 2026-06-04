@@ -263,6 +263,9 @@ async def preprocess_transform_endpoint(
             enable_adv_val=(adv_test_df is not None),
         )
     except Exception as e:
+        import traceback
+        tb = traceback.format_exc()
+        print(f"[transform ERROR] {tb}", flush=True)
         raise HTTPException(status_code=500, detail=f"transform 失敗: {e}")
 
     # 新版 preprocess_for_training 回傳雙軌 dict；
