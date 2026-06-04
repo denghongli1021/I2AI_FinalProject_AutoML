@@ -333,7 +333,7 @@ def main():
     # 通用
     parser.add_argument("--target", default=None)
     parser.add_argument("--ts", action="store_true")
-    parser.add_argument("--metric", default="f1", choices=["f1", "accuracy"])
+    parser.add_argument("--metric", default="f1", choices=["f1", "accuracy", "roc_auc"])
     parser.add_argument("--reg-metric", default="rmse", choices=["rmse", "r2", "mae"],
                         help="回歸優化指標（預設 rmse）")
     parser.add_argument("--fast", action="store_true")
@@ -552,13 +552,20 @@ def main():
 
         # 計分 — 只在 test 有 label 時才有意義
         if test_has_label and y_te is not None:
-            score_blend = float(calculate_score(y_te, result.test_blend, metric=args.metric))
-            score_stack = float(calculate_score(y_te, result.test_stack, metric=args.metric))
+            import numpy as _np_s
+            _blend_arr = _np_s.asarray(result.test_blend)
+            _stack_arr = _np_s.asarray(result.test_stack)
+            _is_auc = args.metric == "roc_auc"
+            score_blend = float(calculate_score(y_te, preds_blend_labels, metric=args.metric,
+                                                y_score=_blend_arr if _is_auc else None))
+            score_stack = float(calculate_score(y_te, preds_stack_labels, metric=args.metric,
+                                                y_score=_stack_arr if _is_auc else None))
             best_preds_proba = result.test_stack if score_stack >= score_blend else result.test_blend
             best_score = float(max(score_stack, score_blend))
-            acc = float(calculate_score(y_te, best_preds_proba, metric="accuracy"))
-            f1 = float(calculate_score(y_te, best_preds_proba, metric="f1"))
             best_ensemble = "stack" if score_stack >= score_blend else "blend"
+            _best_labels = preds_stack_labels if best_ensemble == "stack" else preds_blend_labels
+            acc = float(calculate_score(y_te, _best_labels, metric="accuracy"))
+            f1 = float(calculate_score(y_te, _best_labels, metric="f1"))
         else:
             # Kaggle 風:test 沒 label,只回預測,不評分
             score_blend = score_stack = best_score = acc = f1 = None
@@ -585,7 +592,9 @@ def main():
         for tag, oof in zip(result.model_tags, result.all_oof):
             try:
                 oof_labels = _oof_to_labels(oof)
-                s = float(calculate_score(y_tr, oof_labels, metric=args.metric))
+                _oof_arr = _np.asarray(oof)
+                s = float(calculate_score(y_tr, oof_labels, metric=args.metric,
+                                          y_score=_oof_arr if args.metric == "roc_auc" else None))
             except Exception as _e:
                 print(f"[OOF] calculate_score 失敗 ({tag}): {_e}")
                 s = None
