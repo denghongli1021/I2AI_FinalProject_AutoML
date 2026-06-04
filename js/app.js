@@ -4870,7 +4870,7 @@ function danielResultToModel(r, rank) {
   if (isReg) {
     // 時序回歸:後端回 rmse / r2,沒有 accuracy/f1。testScore 用 R² (越大越好)
     return {
-      id: `daniel_${rank}_${Date.now()}`,
+      id: r.bestModelId || `daniel_${rank}_${Date.now()}`,
       name: fakeName,
       type: 'daniel_pipeline',
       taskType: 'regression',
@@ -4909,7 +4909,7 @@ function danielResultToModel(r, rank) {
   // testScore 用 bestScore (pipeline 自己挑 Blend vs Stack 較佳者;沒 label 時 fallback OOF max)
   const scoreLabel = (r.metric || 'F1').toUpperCase() + (isOof ? ' (OOF)' : '');
   return {
-    id: `daniel_${rank}_${Date.now()}`,
+    id: r.bestModelId || `daniel_${rank}_${Date.now()}`,
     name: fakeName,
     type: 'daniel_pipeline',
     taskType: 'classification',
