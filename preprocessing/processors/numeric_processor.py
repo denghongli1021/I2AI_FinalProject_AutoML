@@ -55,6 +55,14 @@ class SafePowerTransformer(BaseEstimator, TransformerMixin):
     def fit_transform(self, X, y=None):
         return self.fit(X, y).transform(X)
 
+    def get_feature_names_out(self, input_features=None):
+        """1-to-1 轉換，輸出特徵名與輸入相同。"""
+        n_cols = len(getattr(self, "_transformers", []))
+        if input_features is not None:
+            return np.asarray(input_features, dtype=object)
+        return np.array([f"x{i}" for i in range(n_cols)], dtype=object)
+
+
 def build_numeric_pipeline(
     impute_strategy: str = "median", 
     scaler_type: str = "standard",
