@@ -482,21 +482,32 @@ def save_model(
     bundle["id"] = model_id
 
     if not _is_authed(user):
-        # 若有 pre-pickled bytes (daniel ensemble) → 直接 loads 一次,讓 get_model 拿到的 entry["estimator"] 永遠是物件
+        # 若有 pre-pickled bytes (daniel ensemble) → 直接 loads 一次,讓 get_model 拿到的 entry["estimator"] 永遠是物件。
+        # 對 autogluon 來說 bundle 是 tar.gz 不是 pickle,pickle.loads 會失敗,所以「保留原 bytes」。
         _guest_estimator = estimator
+        _guest_raw_bytes = estimator_pkl_bytes   # autogluon batch predict / SHAP 需要原 bytes 解 tar.gz
         if _guest_estimator is None and estimator_pkl_bytes is not None:
             try:
                 _guest_estimator = pickle.loads(estimator_pkl_bytes)
             except Exception as e:
-                print(f"[save_model:guest] unpickle estimator_pkl_bytes 失敗: {e}", flush=True)
+                # 預期會發生在 autogluon (tar.gz),不是錯,只 debug 印
+                if bundle.get("type") != "autogluon_model":
+                    print(f"[save_model:guest] unpickle estimator_pkl_bytes 失敗: {e}", flush=True)
+        # 把 dataset_id 寫進 bundle,讓 list_models / 前端 hydrate 配對 placeholder 用。
+        # bundle 是 dict reference,這裡修改後 caller 端 (_ens_bundle) 也會看到 — 但這沒影響,
+        # 因為 caller 之後不再修改。同源訓練同 dataset 的兩次 run 名稱可能撞,有 datasetId 才能精準對到。
+        if dataset_id and not bundle.get("datasetId"):
+            bundle["datasetId"] = dataset_id
         MODELS[model_id] = stamp({
             "bundle": bundle,
             "estimator": _guest_estimator,
+            "_estimator_bytes": _guest_raw_bytes,   # autogluon tar.gz 原 bytes (其它模型也順手存著)
             "scaler": scaler,
             "featureNames": bundle.get("featureNames", []),
             "X_test_df": X_test_df,
             "preprocessorId": preprocessor_id,
             "hyperparameters": hyperparameters or {},
+            "datasetId": dataset_id,   # 也存 entry 一份,list_models 雙保險取
         }, user)
         return model_id
 
@@ -657,10 +668,21 @@ def get_model(model_id: str, user, db: Session) -> dict:
             except Exception as e:
                 print(f"[get_model] 從 preprocessor {m.preprocessor_id} 撈 X_test 失敗: {e}", flush=True)
 
+    # bundle 是 dict (autogluon model 的 bundle.type == 'autogluon_model'),estimator pickle 對它沒意義 →
+    # 把原 bytes 保留 (給 autogluon batch predict / SHAP 解 tar.gz 用)
+    _bundle = json.loads(m.bundle_json) if m.bundle_json else {}
+    _is_ag = _bundle.get("type") == "autogluon_model"
+    _est_obj = None
+    if est_bytes and not _is_ag:
+        try:
+            _est_obj = pickle.loads(est_bytes)
+        except Exception:
+            _est_obj = None   # autogluon 之外的模型 pickle 壞了就視為 None
     return {
         "id": m.id,
-        "bundle": json.loads(m.bundle_json) if m.bundle_json else {},
-        "estimator": pickle.loads(est_bytes) if est_bytes else None,
+        "bundle": _bundle,
+        "estimator": _est_obj,
+        "_estimator_bytes": est_bytes,   # autogluon batch predict / SHAP 用,其它模型不會用到
         "estimatorStatus": est_status,   # ok / empty / file_missing — 給 endpoint 分流錯誤訊息
         "scaler": pickle.loads(scaler_bytes) if scaler_bytes else None,
         "featureNames": json.loads(m.feature_names_json) if m.feature_names_json else [],

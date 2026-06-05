@@ -125,15 +125,31 @@ def run_autogluon(
         cmd += ["--train-csv", tmp_train, "--test-csv", tmp_test]
     if options.get("target"):
         cmd += ["--target", str(options["target"])]
-    # 預設沒 time_limit (使用者沒傳就讓 autogluon 自己決定);傳 0 也視為沒設
+    # time_limit 三段語義:
+    #   > 0  → 使用者指定秒數
+    #   == 0 → autogluon 自己決定 (不傳 --time-limit,entry 也跳過設 kwarg)
+    #   < 0  → 完全不限時 (傳 --time-limit -1,entry 解成 None 給 fit())
     _tl = options.get("timeLimit", 0)
-    if _tl and float(_tl) > 0:
-        cmd += ["--time-limit", str(float(_tl))]
+    try:
+        _tl_f = float(_tl) if _tl is not None else 0.0
+    except (TypeError, ValueError):
+        _tl_f = 0.0
+    if _tl_f != 0.0:
+        cmd += ["--time-limit", str(_tl_f)]
     if options.get("preset"):
         cmd += ["--preset", str(options["preset"])]
+    # 時序模式 → 改 chronological 切 (取最後 20% 當 holdout,不 shuffle)
+    if options.get("timeSeries"):
+        cmd.append("--ts")
 
+    if _tl_f > 0:
+        _tl_show = f"{_tl_f}s"
+    elif _tl_f < 0:
+        _tl_show = "不限時 (跑到底)"
+    else:
+        _tl_show = "autogluon default"
     _emit({"type": "log", "msg": f"啟動 autogluon (preset={options.get('preset','medium_quality')}, "
-           f"time_limit={'autogluon default' if not _tl else f'{_tl}s'})", "level": "info"})
+           f"time_limit={_tl_show})", "level": "info"})
     _emit({"type": "progress", "pct": 1, "step": "啟動中"})
 
     t0 = time.time()

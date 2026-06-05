@@ -101,6 +101,27 @@ def _infer_task_type(y_series) -> str:
         return "classification"
 
 
+def _safe_json_payload(obj) -> str:
+    """SSE event 用的 NaN-safe JSON serializer。
+    Python 內建 json.dumps 預設 allow_nan=True,會輸出 `NaN` literal — 那是無效 JSON,
+    前端 JSON.parse() 會靜默 try/catch → 事件被吃掉 → 看起來像「sent nothing」。
+    這裡先 allow_nan=False 試,炸了就遞迴把 NaN/Inf 換成 None 再 dump。
+    """
+    try:
+        return json.dumps(obj, ensure_ascii=False, default=str, allow_nan=False)
+    except ValueError:
+        import math as _math
+        def _scrub(v):
+            if isinstance(v, float) and (_math.isnan(v) or _math.isinf(v)):
+                return None
+            if isinstance(v, list):
+                return [_scrub(x) for x in v]
+            if isinstance(v, dict):
+                return {k: _scrub(x) for k, x in v.items()}
+            return v
+        return json.dumps(_scrub(obj), ensure_ascii=False, default=str)
+
+
 @app.get("/api/health")
 async def health() -> dict[str, Any]:
     # async def 而非 def:health 不能被「同步重計算 endpoint (batch_prep / SHAP)」卡在 threadpool 後面。
@@ -1230,6 +1251,7 @@ async def train_autogluon_stream_endpoint(
     target: str | None = Form(None),
     timeLimit: float = Form(0),    # 0 = autogluon default (沒上限)
     preset: str = Form("medium_quality"),
+    timeSeries: bool = Form(False),  # True → chronological split (取最後 20% 當 holdout,不 shuffle)
     user = Depends(get_current_user),
     db: DbSession = Depends(get_db),
 ):
@@ -1256,7 +1278,7 @@ async def train_autogluon_stream_endpoint(
     if not isinstance(src_list, list):
         raise HTTPException(status_code=400, detail="sources 必須是 list")
 
-    base_options = {"target": target, "timeLimit": timeLimit, "preset": preset}
+    base_options = {"target": target, "timeLimit": timeLimit, "preset": preset, "timeSeries": bool(timeSeries)}
     jobs: list[dict[str, Any]] = []
     dataset_name_for_run = "(uploaded)"
     target_col_sample = None
@@ -1365,10 +1387,12 @@ async def train_autogluon_stream_endpoint(
                             "taskType": r.get("taskType", "classification"),
                             "target": r.get("target"),
                             "targetName": r.get("target"),
-                            "featureNames": [],   # autogluon 內部自己處理
+                            "featureNames": r.get("featureNamesRaw") or [],   # 原始欄名 (autogluon 內部自己處理但 SHAP 需要)
+                            "feature_names_raw": r.get("featureNamesRaw") or [],
                             "testTrue": r.get("testTrueDecoded"),
                             "testPred": r.get("testPredDecoded"),
-                            "canPredict": False,   # MVP:autogluon 預測 endpoint 暫未實作
+                            "xTestSample": r.get("xTestSample"),     # SHAP 用,50 列原始特徵
+                            "canPredict": True,    # 已實作 autogluon 批次預測 + SHAP
                             "perModel": r.get("perModel", []),
                             "leaderboardRaw": r.get("leaderboardRaw", []),
                             "metrics": {
@@ -1383,7 +1407,40 @@ async def train_autogluon_stream_endpoint(
                             "estimatorBytes": int(len(bundle_bytes)),
                             "estimatorMb": round(size_mb, 1),
                             "presetUsed": r.get("presetUsed"),
+                            # 訓練時間明確存進 bundle,hydration 後前端能讀到 (不然 m.trainTime 會掉)
+                            "trainTimeMs": int(float(r.get("elapsedSec") or 0) * 1000),
                         }
+
+                        # 【SHAP precompute】訓練完就算 SHAP,寫進 bundle.shapPlots,
+                        # Insights 頁秒開,不用每次按下分析等 PermutationExplainer 跑 5-15 分。
+                        # 跟 daniel 的 _ens_bundle["shapPlots"] 寫法對齊,前端用同一條 renderer。
+                        try:
+                            q.put({"type": "log", "level": "info",
+                                   "msg": f"[{label}] 計算 SHAP (precompute,Insights 頁秒開)..."})
+                            _shap_plots = _compute_shap_plots_for_autogluon_bundle(
+                                bundle_bytes=bundle_bytes,
+                                x_test_sample=r.get("xTestSample") or [],
+                                feature_names=r.get("featureNamesRaw") or [],
+                                task_type=r.get("taskType", "classification"),
+                                model_name=_ens_bundle["name"],
+                                oof_score=r.get("bestScore"),
+                                cache_key=None,   # 還沒 save_model,沒 model_id;helper 內部 tmp unpack 一次
+                            )
+                            if _shap_plots:
+                                _ens_bundle["shapPlots"] = _shap_plots
+                                _ens_bundle["bestTabularModel"] = _ens_bundle["name"]
+                                q.put({"type": "log", "level": "success",
+                                       "msg": f"[{label}] SHAP precompute 完成,已存進 bundle"})
+                            else:
+                                q.put({"type": "log", "level": "warning",
+                                       "msg": f"[{label}] SHAP precompute 失敗,Insights 頁會 fallback 即時算"})
+                        except Exception as _se:
+                            import traceback as _stb
+                            print(f"[Autogluon] SHAP precompute 失敗 (不影響模型存檔): {_se}", flush=True)
+                            _stb.print_exc()
+                            q.put({"type": "log", "level": "warning",
+                                   "msg": f"[{label}] SHAP precompute 失敗,Insights 頁會 fallback: {str(_se)[:120]}"})
+
                         _mid = storage.save_model(
                             bundle=_ens_bundle, estimator=None, scaler=None,
                             X_test_df=None, user=user, db=db,
@@ -1453,7 +1510,11 @@ async def train_autogluon_stream_endpoint(
             storage.finish_training_run(run_id, user, db,
                 status="success", elapsed_sec=elapsed,
                 results_summary=summary, task_type=inferred)
-            yield f"data: {json.dumps({'type': 'done', 'runId': run_id, 'results': all_results}, ensure_ascii=False)}\n\n"
+            # 【NaN safety】all_results 可能含 NaN (House Prices 之類有缺失的資料集)。
+            # 直接 json.dumps 預設輸出 NaN literal (無效 JSON) → 前端 JSON.parse 靜默 catch,
+            # finalResults 永遠不會被 set → 拋「未收到 autogluon 結果」。
+            # 用 _safe_json_payload helper 一次性把 NaN/Inf 換成 None。
+            yield f"data: {_safe_json_payload({'type': 'done', 'runId': run_id, 'results': all_results})}\n\n"
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")
 
@@ -1786,21 +1847,26 @@ def visualize_shap_endpoint(
 
     # Daniel ensemble → 包 adapter,讓 AutoMLVisualizer 用 Permutation 算 SHAP
     is_ensemble = bundle_meta.get("type") == "daniel_pipeline_ensemble"
+    is_autogluon = bundle_meta.get("type") == "autogluon_model"
 
     # Item 1C:若 bundle 已預計算 SHAP 持久化,優先直接回(秒級;不用算)
-    if is_ensemble and isinstance(bundle_meta.get("shapPlots"), dict) and bundle_meta["shapPlots"]:
-        # 前端傳了 family 就只給該 family,沒傳就回整包
+    # autogluon 也走這條 — 訓練時 worker 已用 _compute_shap_plots_for_autogluon_bundle 把
+    # shapPlots 寫進 bundle。沒寫成功才 fallback 到下面的 live compute。
+    if (is_ensemble or is_autogluon) and isinstance(bundle_meta.get("shapPlots"), dict) and bundle_meta["shapPlots"]:
         _sp = bundle_meta["shapPlots"]
-        # 兼容舊請求 (sampleIndex / targetFeature 對預計算版無作用),前端用 family field 切換
         return {
             "modelId":         req.modelId,
-            "source":          "precomputed",   # 標籤:前端可顯示「持久化」徽章
+            "source":          "precomputed",   # 前端顯示「✓ Persistent」徽章
             "shapPlots":       _sp,             # {"tabular": {...}, "dl": {...}} 各含 global/waterfall/dependence
             "bestTabularModel": bundle_meta.get("bestTabularModel"),
             "bestDLModel":     bundle_meta.get("bestDLModel"),
             "featureNames":    (_sp.get("tabular") or {}).get("featureNames", []) or
                                (_sp.get("dl") or {}).get("featureNames", []),
         }
+
+    # Autogluon model 沒 precomputed shapPlots → fallback live 算 (舊 bundle 沒 precompute 過)
+    if is_autogluon:
+        return _compute_shap_for_autogluon(req.modelId, entry, bundle_meta)
 
     if is_ensemble:
         if not (isinstance(estimator, dict) and estimator.get("version") == 1):
@@ -2076,6 +2142,252 @@ def _shap_family_of_tag(tag: str) -> Optional[str]:
         if t.startswith(n + "_"):
             return "tabular" if n in _SHAP_TABULAR_NAMES else "dl"
     return None
+
+
+def _compute_shap_plots_for_autogluon_bundle(
+    bundle_bytes: bytes,
+    x_test_sample: list,
+    feature_names: list,
+    task_type: str,
+    model_name: str = "Autogluon",
+    oof_score: Optional[float] = None,
+    cache_key: Optional[str] = None,
+) -> Optional[dict]:
+    """純函式版 — 給定 bundle bytes 跟 x_test_sample 就算 SHAP 出來。
+    給「訓練時 precompute」跟「on-demand SHAP endpoint」共用。
+
+    cache_key:有的話會走 _AG_UNPACK_CACHE,沒給就臨時 unpack 一次。
+
+    回傳 {"tabular": {modelTag, oofScore, featureNames, global, waterfall, dependence}} 或 None (失敗)。
+    跟 daniel 的 _compute_shap_for_ensemble_bundle 回傳格式對齊,前端用同一條渲染器。
+    """
+    import pandas as pd
+    import plotly.io as pio
+    try:
+        from api.visualize import AutoMLVisualizer
+    except Exception as e:
+        print(f"[autogluon_shap_precompute] AutoMLVisualizer 無法 import: {e}", flush=True)
+        return None
+    if not x_test_sample or not feature_names:
+        print("[autogluon_shap_precompute] xTestSample / featureNames 為空,跳過", flush=True)
+        return None
+
+    # 解 tar.gz (走 cache 若有 model_id)
+    try:
+        if cache_key:
+            predictor, _ = _load_autogluon_predictor(cache_key, bundle_bytes)
+        else:
+            # 臨時 unpack — 訓練完就算的場景,還沒有 model_id
+            import tarfile as _tar, tempfile as _tf, io as _io
+            unpack_root = _tf.mkdtemp(prefix="ag_unpack_precompute_")
+            with _tar.open(fileobj=_io.BytesIO(bundle_bytes), mode="r:gz") as tar:
+                tar.extractall(unpack_root)
+            predictor_dir = os.path.join(unpack_root, "autogluon")
+            if not os.path.isdir(predictor_dir):
+                subdirs = [os.path.join(unpack_root, d) for d in os.listdir(unpack_root)
+                           if os.path.isdir(os.path.join(unpack_root, d))]
+                if subdirs:
+                    predictor_dir = subdirs[0]
+            from autogluon.tabular import TabularPredictor
+            predictor = TabularPredictor.load(predictor_dir,
+                require_version_match=False, require_py_version_match=False)
+    except Exception as e:
+        import traceback as _tb
+        print(f"[autogluon_shap_precompute] load predictor 失敗: {e}", flush=True)
+        _tb.print_exc()
+        return None
+
+    is_reg = task_type == "regression"
+
+    # mixed-type 編碼/解碼 (同 _compute_shap_for_autogluon 內邏輯)
+    X_raw = pd.DataFrame(x_test_sample[:50], columns=feature_names)
+    _decode_maps: dict[str, list] = {}
+    X_encoded = X_raw.copy()
+    for col in X_encoded.columns:
+        s = X_encoded[col]
+        if s.dtype == object or pd.api.types.is_string_dtype(s) or pd.api.types.is_categorical_dtype(s):
+            uniques = list(pd.unique(s.fillna("__NA__")))
+            _decode_maps[col] = uniques
+            mapping = {v: i for i, v in enumerate(uniques)}
+            X_encoded[col] = s.fillna("__NA__").map(mapping).astype(float)
+        else:
+            X_encoded[col] = pd.to_numeric(s, errors="coerce")
+            if X_encoded[col].isna().any():
+                _med = X_encoded[col].median()
+                X_encoded[col] = X_encoded[col].fillna(_med if pd.notna(_med) else 0.0)
+
+    class _AGWrap:
+        def predict(_self, X):
+            import pandas as _pd
+            df_enc = _pd.DataFrame(X, columns=feature_names) if not isinstance(X, _pd.DataFrame) else X.copy()
+            df_in = df_enc.copy()
+            for col, uniques in _decode_maps.items():
+                if col not in df_in.columns:
+                    continue
+                idx = df_in[col].round().clip(0, len(uniques) - 1).astype(int)
+                df_in[col] = idx.map(lambda i: uniques[i] if 0 <= i < len(uniques) else "__NA__")
+                df_in[col] = df_in[col].replace("__NA__", None)
+            if is_reg:
+                return predictor.predict(df_in).values
+            try:
+                proba = predictor.predict_proba(df_in)
+                if proba.shape[1] == 2:
+                    return proba.iloc[:, 1].values
+                return proba.values
+            except Exception:
+                return predictor.predict(df_in).values
+
+    try:
+        viz = AutoMLVisualizer(_AGWrap(), X_encoded, output_dir=None)
+        target_feat = feature_names[0] if feature_names else "f0"
+        fig_global = viz.generate_beeswarm_plot(return_fig=True)
+        fig_wf     = viz.generate_waterfall_plot(sample_index=0, return_fig=True)
+        fig_dep    = viz.generate_dependence_plot(target_feature=target_feat, return_fig=True)
+    except Exception as e:
+        import traceback as _tb
+        print(f"[autogluon_shap_precompute] SHAP 計算失敗: {e}", flush=True)
+        _tb.print_exc()
+        return None
+
+    def _fig_to_json(fig):
+        return json.loads(pio.to_json(fig))
+
+    return {
+        "tabular": {
+            "modelTag": model_name,
+            "oofScore": oof_score,
+            "featureNames": feature_names,
+            "global":     _fig_to_json(fig_global),
+            "waterfall":  _fig_to_json(fig_wf),
+            "dependence": _fig_to_json(fig_dep),
+        }
+    }
+
+
+def _compute_shap_for_autogluon(model_id: str, entry: dict, bundle_meta: dict) -> dict:
+    """Autogluon model 的 SHAP — unpack tar.gz → 包 predictor.predict 走 PermutationExplainer。
+
+    回傳格式跟 daniel ensemble 對齊 (前端用同一條 _renderShapPrecomputed 渲染):
+      {modelId, source='live_autogluon', shapPlots: {tabular: {global/waterfall/dependence}}, ...}
+    """
+    import pandas as pd
+    import plotly.io as pio
+    try:
+        from api.visualize import AutoMLVisualizer
+    except Exception as e:
+        raise HTTPException(500, f"AutoMLVisualizer 無法 import: {e}")
+
+    bundle_bytes = entry.get("_estimator_bytes")
+    if not bundle_bytes:
+        _est_status = entry.get("estimatorStatus", "empty")
+        _msg = ("Autogluon file blob 已不存在,SHAP 不可用。請重訓。"
+                if _est_status == "file_missing" else
+                "Autogluon bundle bytes 不存在(舊紀錄),SHAP 不可用。請重訓。")
+        raise HTTPException(410, _msg)
+
+    x_test_sample = bundle_meta.get("xTestSample") or []
+    feature_names = bundle_meta.get("featureNames") or bundle_meta.get("feature_names_raw") or []
+    if not x_test_sample or not feature_names:
+        raise HTTPException(400,
+            "此 Autogluon 模型未保存 xTestSample / featureNames(舊紀錄)。請重訓即可。")
+
+    # 解 tar.gz + load TabularPredictor
+    try:
+        predictor, _ = _load_autogluon_predictor(model_id, bundle_bytes)
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback as _tb
+        _tb.print_exc()
+        raise HTTPException(500, f"Autogluon predictor load 失敗: {e}")
+
+    # 包成 predictor.predict 給 AutoMLVisualizer 的 PermutationExplainer 用
+    task_type = bundle_meta.get("taskType", "classification")
+    is_reg = task_type == "regression"
+
+    # 【mixed-type SHAP 修法】House Prices 那種真實表格資料含 string 類別欄(MSZoning / Neighborhood 等)。
+    # shap.Explainer 內部 PermutationExplainer 對 X 做算術 (例如 mean / 減法) → 對 str 拋
+    # "unsupported operand type(s) for -: 'str' and 'str'"。
+    # 解法:把 string 欄轉成 int code (透明對 SHAP),predict wrapper 內再 decode 回原字串給 predictor。
+    X_raw = pd.DataFrame(x_test_sample[:50], columns=feature_names)
+    _decode_maps: dict[str, list] = {}   # col_name -> [unique_values],int code 對應 index
+    X_encoded = X_raw.copy()
+    for col in X_encoded.columns:
+        s = X_encoded[col]
+        # 用 pandas.api.types 判:object / string / category → 編碼
+        if s.dtype == object or pd.api.types.is_string_dtype(s) or pd.api.types.is_categorical_dtype(s):
+            uniques = list(pd.unique(s.fillna("__NA__")))
+            _decode_maps[col] = uniques
+            mapping = {v: i for i, v in enumerate(uniques)}
+            X_encoded[col] = s.fillna("__NA__").map(mapping).astype(float)
+        else:
+            # 數值欄 NaN 填中位數 (SHAP 也吃不了 NaN)
+            X_encoded[col] = pd.to_numeric(s, errors="coerce")
+            if X_encoded[col].isna().any():
+                _med = X_encoded[col].median()
+                X_encoded[col] = X_encoded[col].fillna(_med if pd.notna(_med) else 0.0)
+
+    class _AGWrap:
+        """讓 shap.Explainer 看 numeric encoded X;內部 decode 回原字串給 predictor。"""
+        def predict(_self, X):
+            import pandas as _pd
+            df_enc = _pd.DataFrame(X, columns=feature_names) if not isinstance(X, _pd.DataFrame) else X.copy()
+            # decode:int code → 原字串 (對 _decode_maps 有登記的欄做反向查表)
+            df_in = df_enc.copy()
+            for col, uniques in _decode_maps.items():
+                if col not in df_in.columns:
+                    continue
+                # round + clip 避免 SHAP perturbation 後產出非整數值,出界 idx 全當 __NA__
+                idx = df_in[col].round().clip(0, len(uniques) - 1).astype(int)
+                df_in[col] = idx.map(lambda i: uniques[i] if 0 <= i < len(uniques) else "__NA__")
+                # __NA__ sentinel 換回 NaN 給 autogluon predictor (它會走自己的 NaN 處理)
+                df_in[col] = df_in[col].replace("__NA__", None)
+            if is_reg:
+                return predictor.predict(df_in).values
+            try:
+                proba = predictor.predict_proba(df_in)
+                if proba.shape[1] == 2:
+                    return proba.iloc[:, 1].values
+                return proba.values
+            except Exception:
+                return predictor.predict(df_in).values
+
+    X_df = X_encoded   # SHAP 看到的版本
+
+    try:
+        viz = AutoMLVisualizer(_AGWrap(), X_df, output_dir=None)
+        target_feat = feature_names[0] if feature_names else "f0"
+        fig_global = viz.generate_beeswarm_plot(return_fig=True)
+        fig_wf     = viz.generate_waterfall_plot(sample_index=0, return_fig=True)
+        fig_dep    = viz.generate_dependence_plot(target_feature=target_feat, return_fig=True)
+    except Exception as e:
+        import traceback as _tb
+        _tb.print_exc()
+        raise HTTPException(500, f"Autogluon SHAP 計算失敗: {e}")
+
+    def _fig_to_json(fig):
+        return json.loads(pio.to_json(fig))
+
+    tabular_plots = {
+        "modelTag": bundle_meta.get("name", "Autogluon"),
+        "oofScore": (bundle_meta.get("metrics") or {}).get("testScore"),
+        "featureNames": feature_names,
+        "global":     _fig_to_json(fig_global),
+        "waterfall":  _fig_to_json(fig_wf),
+        "dependence": _fig_to_json(fig_dep),
+    }
+
+    # source="precomputed" 是前端 _renderShapPrecomputed 那條 path 的觸發 flag
+    # (autogluon 雖然不是訓練時 precompute,但結構跟 daniel ensemble 對齊 → 共用渲染器)。
+    # 如果改 "live_autogluon" 前端會 fallthrough 到舊版單組 SHAP 分支,讀不到 res.global → undefined.data 炸。
+    return {
+        "modelId":     model_id,
+        "source":      "precomputed",
+        "shapPlots":   {"tabular": tabular_plots},   # 沒有 DL 家族,前端 sp.dl 那段會自動隱藏
+        "bestTabularModel": bundle_meta.get("name", "Autogluon"),
+        "bestDLModel": None,
+        "featureNames": feature_names,
+    }
 
 
 def _build_readable_feature_names(fb, base_names: list, total_dims: int) -> list:
@@ -2542,6 +2854,136 @@ def _ensemble_replay(bundle: dict, X_raw: "np.ndarray", *, return_proba: bool = 
             proba = blender.predict(all_test_preds)
     proba = np.asarray(proba)
     return proba.argmax(axis=1) if proba.ndim == 2 else proba.astype(int)
+
+
+# ============================================================
+# Autogluon helpers — unpack tar.gz bundle + load TabularPredictor
+# ============================================================
+_AG_UNPACK_CACHE: dict[str, str] = {}    # modelId → 已 unpack 的 dir (避免每次 predict 都重 unpack)
+
+def _load_autogluon_predictor(model_id: str, bundle_bytes: bytes):
+    """把 tar.gz bytes 解到 temp dir,load TabularPredictor 回來。
+
+    Cache by model_id — 同一個 model 反覆 predict / SHAP 不用每次解壓。
+    回傳 (predictor, predictor_dir)。
+    """
+    import tarfile as _tar
+    import tempfile as _tf
+    import io as _io
+
+    if model_id in _AG_UNPACK_CACHE:
+        cached_dir = _AG_UNPACK_CACHE[model_id]
+        if os.path.isdir(cached_dir):
+            try:
+                from autogluon.tabular import TabularPredictor as _TP
+                return _TP.load(cached_dir, require_version_match=False, require_py_version_match=False), cached_dir
+            except Exception:
+                pass   # cache 壞了,重 unpack
+            _AG_UNPACK_CACHE.pop(model_id, None)
+
+    # Unpack
+    unpack_root = _tf.mkdtemp(prefix=f"ag_unpack_{model_id}_")
+    with _tar.open(fileobj=_io.BytesIO(bundle_bytes), mode="r:gz") as tar:
+        tar.extractall(unpack_root)
+    predictor_dir = os.path.join(unpack_root, "autogluon")
+    if not os.path.isdir(predictor_dir):
+        # Fallback:找解出來的第一個 dir
+        subdirs = [os.path.join(unpack_root, d) for d in os.listdir(unpack_root)
+                   if os.path.isdir(os.path.join(unpack_root, d))]
+        if subdirs:
+            predictor_dir = subdirs[0]
+
+    try:
+        from autogluon.tabular import TabularPredictor
+    except ImportError:
+        raise HTTPException(500, "autogluon 未安裝 — pip install autogluon.tabular")
+    predictor = TabularPredictor.load(predictor_dir, require_version_match=False, require_py_version_match=False)
+    _AG_UNPACK_CACHE[model_id] = predictor_dir
+    return predictor, predictor_dir
+
+
+async def _predict_batch_autogluon(model_id: str, entry: dict, bundle_meta: dict,
+                                    file: UploadFile, sample_file: Optional[UploadFile]):
+    """Autogluon batch predict — unpack tar.gz → TabularPredictor.predict()。"""
+    import pandas as pd
+
+    # estimator_pkl_bytes 在 guest path 是 unpickled 物件(bytes 不會自動 loads),
+    # 在 DB path 是 _read_blob 回來的 bytes。但 autogluon bundle 是 tar.gz,不是 pickle,
+    # 所以這裡要從 entry 直接拿 raw bytes — entry["estimator"] 是 None (沒 pickle),
+    # 真實 bytes 要去 storage 撈。
+    bundle_bytes = entry.get("_estimator_bytes")
+    if not bundle_bytes:
+        _est_status = entry.get("estimatorStatus", "empty")
+        _msg = ("Autogluon model 的 file blob 已不存在 (model_blobs/ 被清掉),無法批次預測。請重訓。"
+                if _est_status == "file_missing"
+                else "Autogluon bundle bytes 不存在(舊紀錄或 save 失敗),請重訓。")
+        raise HTTPException(410, _msg)
+
+    try:
+        predictor, _ = _load_autogluon_predictor(model_id, bundle_bytes)
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback as _tb
+        print(f"[autogluon_batch_predict] load predictor 失敗: {e}", flush=True)
+        _tb.print_exc()
+        raise HTTPException(500, f"Autogluon predictor load 失敗: {e}")
+
+    # Parse CSV
+    try:
+        raw = await file.read()
+        test_df = pd.read_csv(io.BytesIO(raw))
+    except Exception as e:
+        raise HTTPException(400, f"CSV 解析失敗: {e}")
+
+    # Drop target column if present (predict 不需要 label)
+    target_col = bundle_meta.get("target") or bundle_meta.get("targetName")
+    feat_df = test_df.drop(columns=[target_col], errors="ignore") if target_col else test_df
+
+    try:
+        preds = predictor.predict(feat_df)
+    except Exception as e:
+        import traceback as _tb
+        _tb.print_exc()
+        raise HTTPException(500, f"Autogluon predict 失敗: {e}")
+
+    # 輸出 CSV — 跟 sklearn batch predict 一樣的格式
+    sample_bytes = None
+    if sample_file is not None:
+        try:
+            sample_bytes = await sample_file.read()
+        except Exception:
+            pass
+    out_name = (file.filename.replace(".csv", "_predicted.csv")
+                if file.filename else "predicted.csv")
+    if sample_bytes:
+        try:
+            sample_df = pd.read_csv(io.BytesIO(sample_bytes))
+            if len(sample_df.columns) >= 2:
+                # 第一欄當 ID(取 test_df 的同名欄),第二欄放預測
+                id_col = sample_df.columns[0]
+                pred_col = sample_df.columns[1]
+                out_df = pd.DataFrame({
+                    id_col: test_df[id_col] if id_col in test_df.columns else range(len(preds)),
+                    pred_col: preds.values if hasattr(preds, "values") else list(preds),
+                })
+                out_name = "submission.csv"
+            else:
+                out_df = test_df.copy()
+                out_df["prediction"] = preds.values if hasattr(preds, "values") else list(preds)
+        except Exception:
+            out_df = test_df.copy()
+            out_df["prediction"] = preds.values if hasattr(preds, "values") else list(preds)
+    else:
+        out_df = test_df.copy()
+        out_df["prediction"] = preds.values if hasattr(preds, "values") else list(preds)
+
+    csv_bytes = out_df.to_csv(index=False).encode("utf-8")
+    from fastapi.responses import Response
+    return Response(
+        content=csv_bytes, media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="{out_name}"'},
+    )
 
 
 async def _predict_batch_ensemble(bundle: dict, file: UploadFile,
@@ -3011,6 +3453,10 @@ async def predict_batch_endpoint(
         return await _predict_batch_ensemble(estimator, file, sampleFile,
                                              preprocessor_id=preprocessor_id,
                                              user=user, db=db)
+
+    # Autogluon model:estimator 是 tar.gz bytes (entire autogluon predictor dir)
+    if bundle_meta.get("type") == "autogluon_model":
+        return await _predict_batch_autogluon(modelId, entry, bundle_meta, file, sampleFile)
 
     # --- parse uploaded CSV ---
     try:

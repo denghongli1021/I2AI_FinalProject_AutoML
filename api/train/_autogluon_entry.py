@@ -51,9 +51,11 @@ def main():
     parser.add_argument("--test-csv", default=None)
     parser.add_argument("--target", default=None)
     parser.add_argument("--time-limit", type=float, default=0,
-                       help="0 = autogluon default (None = 沒上限)")
+                       help="-1 = 完全沒上限 (跑到所有模型訓練完);0 = autogluon 自己決定 (依 preset 不同);>0 = 指定秒數")
     parser.add_argument("--preset", default="medium_quality",
                        help="autogluon presets: best_quality / high_quality / good_quality / medium_quality / experimental_quality")
+    parser.add_argument("--ts", action="store_true",
+                       help="時序資料 — 改 chronological 切 (取最後 20% 當 holdout,不 shuffle)")
     args = parser.parse_args()
 
     # Windows cp950 → utf-8
@@ -105,14 +107,20 @@ def main():
                 return 1
             df = pd.read_csv(args.csv)
             target_col = _detect_target_col(df, args.target)
-            from sklearn.model_selection import train_test_split
-            try:
-                train_df, test_df = train_test_split(df, test_size=0.2, random_state=42,
-                                                     stratify=df[target_col] if _detect_task(df[target_col]) == "classification" else None)
-                split_mode = "Random Stratified" if _detect_task(df[target_col]) == "classification" else "Random"
-            except ValueError:
-                train_df, test_df = train_test_split(df, test_size=0.2, random_state=42)
-                split_mode = "Random (no stratify)"
+            if args.ts:
+                # 時序:取最後 20% 當 holdout,不 shuffle 不 stratify (跟 daniel/_runner_entry 同邏輯)
+                idx = int(len(df) * 0.8)
+                train_df, test_df = df.iloc[:idx], df.iloc[idx:]
+                split_mode = "Chronological"
+            else:
+                from sklearn.model_selection import train_test_split
+                try:
+                    train_df, test_df = train_test_split(df, test_size=0.2, random_state=42,
+                                                         stratify=df[target_col] if _detect_task(df[target_col]) == "classification" else None)
+                    split_mode = "Random Stratified" if _detect_task(df[target_col]) == "classification" else "Random"
+                except ValueError:
+                    train_df, test_df = train_test_split(df, test_size=0.2, random_state=42)
+                    split_mode = "Random (no stratify)"
             test_has_label = True
 
         # 任務偵測
@@ -135,8 +143,20 @@ def main():
             verbosity=2,   # 0=silent, 4=verbose;2 給 SSE log 用差不多
         )
         fit_kwargs: dict = {"presets": args.preset}
-        if args.time_limit and args.time_limit > 0:
+        # time_limit 三段語義:
+        #   > 0  → 使用者指定秒數
+        #   == 0 → autogluon 自己決定 (kwarg 不傳,讓 autogluon 用 preset default,通常較保守)
+        #   < 0  → 完全沒上限 (明確傳 None,跑到所有模型訓練完為止)
+        if args.time_limit > 0:
             fit_kwargs["time_limit"] = float(args.time_limit)
+            _tl_msg = f"{args.time_limit}s (使用者指定)"
+        elif args.time_limit < 0:
+            fit_kwargs["time_limit"] = None
+            _tl_msg = "None (完全不限時,跑到底)"
+        else:
+            _tl_msg = "(omitted) — autogluon 用 preset default"
+        print(f"[Autogluon] time_limit={_tl_msg}")
+        sys.stdout.flush()
         predictor.fit(train_df, **fit_kwargs)
 
         # ── 評估 ──────────────────────────────────────────────────────
@@ -225,8 +245,31 @@ def main():
             "leaderboardRaw": lb_records[:50],
             "testTrueDecoded": [str(v) for v in y_true[:5000]] if test_has_label else None,
             "testPredDecoded": [str(v) for v in preds[:5000]],
+            # SHAP 用 — 存 50 列 test 特徵 (含原始欄名),後端 SHAP endpoint 拿來餵 Permutation
+            # 【NaN safety】X_test 對 House Prices 那種真實資料含 NaN,直接 .tolist() 會帶 nan 進 list。
+            # Python 內建 json.dumps 預設輸出 NaN literal (無效 JSON,瀏覽器 JSON.parse 會炸)。
+            # 用 fillna 把 numeric NaN 換成 None;object/string 欄不受影響。
+            "xTestSample": X_test.where(X_test.notnull(), None).values.tolist(),
+            "featureNamesRaw": list(X_test.columns),
         }
-        print(f"__RESULT_JSON__:{json.dumps(out, ensure_ascii=False, default=str)}")
+        # 【NaN safety】allow_nan=False 強制 NaN/Inf 拋 ValueError 不要靜默產出無效 JSON。
+        # default=str 處理其它不可序列化型別。若 out 還有殘餘 NaN 會在這拋,提前 fail 比讓上游 silent break 好。
+        try:
+            _payload = json.dumps(out, ensure_ascii=False, default=str, allow_nan=False)
+        except ValueError as _je:
+            # 二次防禦:萬一有遺漏的 NaN/Inf,先用 default=str + 把 NaN 換掉再 dump
+            import math as _math
+            def _scrub(v):
+                if isinstance(v, float) and (_math.isnan(v) or _math.isinf(v)):
+                    return None
+                if isinstance(v, list):
+                    return [_scrub(x) for x in v]
+                if isinstance(v, dict):
+                    return {k: _scrub(x) for k, x in v.items()}
+                return v
+            _payload = json.dumps(_scrub(out), ensure_ascii=False, default=str)
+            print(f"[Autogluon] 警告:result JSON 含 NaN/Inf,已自動清理 ({_je})")
+        print(f"__RESULT_JSON__:{_payload}")
         return 0
 
     except Exception as e:

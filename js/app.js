@@ -410,6 +410,9 @@ async function hydrateUserHistoryFromDb() {
         id: m.id,
         hyperparameters: m.hyperparameters || {},
         preprocessorId: m.preprocessorId,
+        // bundle 內可能用 trainTimeMs (autogluon / 新 daniel) 或 trainTime (舊 sklearn),
+        // 統一展開成 trainTime 給 renderRealLeaderboard 用 (它讀 m.trainTime)
+        trainTime: m.bundle?.trainTimeMs ?? m.bundle?.trainTime ?? 0,
         // 標記:這個 model 的重 blob (estimator/scaler/X_test) 在 DB,前端用 modelId 跟後端要
         _fromDb: true,
       });
@@ -505,32 +508,38 @@ async function hydrateUserHistoryFromDb() {
         const dsId = m.datasetId || m.bundle?.datasetId || '__';
         (apiModelsByDataset[dsId] = apiModelsByDataset[dsId] || []).push(m);
       }
+      // 先到先配,已經被某個 history entry 認領的 model 不再分給別人 — 避免同名/同 source 撞 id
+      const assignedIds = new Set();
+      // _trainingHistory 已按 timestamp 由新到舊排序 (pushTrainingHistory unshift),所以越前面 entry
+      // 越優先拿最新的 model。配對順序天然「新對新」。
+      let replaced = 0;
       for (const h of _trainingHistory) {
-        // 先試精確配對 (同 datasetId),沒有的話 fallback 用全部 models — 因為 guest 路徑後端
-        // 不一定有寫 datasetId 進 bundle,寬一點配對才不會漏。
         let candidates = apiModelsByDataset[h.datasetId] || [];
-        if (!candidates.length) candidates = models;
+        if (!candidates.length) candidates = models;   // datasetId 沒寫成功就 fallback 全部
+        // 排除已被認領的
+        candidates = candidates.filter(c => !assignedIds.has(c.id));
         if (!candidates.length) continue;
         for (const localM of (h.models || [])) {
-          // 配對策略:① 完全 name 配對 → ② 同 dataSource 唯一候選 → 跳過
+          // ① 完全 name 配對 → ② 同 dataSource 任一候選 (先到先得,不再要求唯一)
           let realM = candidates.find(c => (c.bundle?.name || '') === localM.name);
           if (!realM) {
-            const sameSrc = candidates.filter(c => c.bundle?.dataSource === localM.dataSource);
-            if (sameSrc.length === 1) realM = sameSrc[0];
+            realM = candidates.find(c => c.bundle?.dataSource === localM.dataSource);
           }
           if (realM) {
-            localM.id = realM.id;       // 把 placeholder id 換成真實 model_xxx
+            localM.id = realM.id;
             localM.type = realM.bundle?.type || localM.type;
             localM._fromDb = true;
-            // 把 bundle 內的 estimatorMb / shapPlots 等元資料補上 (precomputed SHAP 用得到)
             if (realM.bundle?.shapPlots) localM.shapPlots = realM.bundle.shapPlots;
             if (realM.bundle?.bestTabularModel) localM.bestTabularModel = realM.bundle.bestTabularModel;
             if (realM.bundle?.bestDLModel) localM.bestDLModel = realM.bundle.bestDLModel;
             if (realM.bundle?.estimatorMb) localM.estimatorMb = realM.bundle.estimatorMb;
+            assignedIds.add(realM.id);
+            candidates = candidates.filter(c => c.id !== realM.id);   // 從候選池移除
+            replaced++;
           }
         }
       }
-      console.log(`[hydrate:guest] in-place 把 ${_trainingHistory.length} 筆 history 內的 placeholder id 替換成真實 modelId (沒擦掉 local)`);
+      console.log(`[hydrate:guest] in-place 替換了 ${replaced} 個 placeholder id → 真實 modelId (history ${_trainingHistory.length} 筆,API 回 ${models.length} 個 model)`);
       _persistTrainingHistory();
       return;   // guest 路徑這邊就結束,不走下面的 DB 為準覆蓋
     }
@@ -805,8 +814,12 @@ function renderHistoryCascade(container) {
   }
 
   // 永遠重建 markup (簡單,不會有 cache 狀態問題)
+  // run 從 <select> 改成「button → popover cards」UI,可以顯示彩色 engine 徽章 + 更多 metadata
+  const cardBtnCls = variant === 'compact'
+    ? 'bg-dark-800 border border-dark-600 rounded px-2 py-1 text-xs hover:border-primary-500 focus:border-primary-500 outline-none transition-colors flex items-center gap-2 min-w-[14rem]'
+    : 'bg-dark-800 border border-dark-600 rounded-lg px-3 py-2 text-sm hover:border-primary-500 focus:border-primary-500 outline-none transition-colors flex items-center gap-2 min-w-[16rem]';
   container.innerHTML = `
-    <div class="flex items-center gap-2 flex-wrap">
+    <div class="flex items-center gap-2 flex-wrap relative">
       <div class="flex items-center gap-1">
         <span class="${labelCls}">資料集</span>
         <select class="cascade-dataset ${selectCls} max-w-[12rem]"></select>
@@ -817,9 +830,14 @@ function renderHistoryCascade(container) {
         <select class="cascade-target ${selectCls} max-w-[10rem]"></select>
       </div>
       <span class="text-dark-600">›</span>
-      <div class="flex items-center gap-1">
+      <div class="flex items-center gap-1 relative">
         <span class="${labelCls}">訓練</span>
-        <select class="cascade-run ${selectCls} max-w-[20rem]"></select>
+        <button type="button" class="cascade-run-btn ${cardBtnCls}">
+          <span class="cascade-run-btn-label flex-1 text-left truncate text-dark-100"></span>
+          <svg class="w-3 h-3 text-dark-400 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/></svg>
+        </button>
+        <!-- position:fixed + JS 算座標 → 跳出外層 overflow:hidden 的卡片邊界,不會被切 -->
+        <div class="cascade-run-popover hidden fixed z-[100] w-[28rem] max-h-[24rem] overflow-y-auto bg-dark-900 border border-dark-600 rounded-lg shadow-2xl"></div>
       </div>
       <button class="history-info-btn w-6 h-6 rounded-full bg-dark-700 hover:bg-primary-500/20 text-dark-400 hover:text-primary-300 text-[12px] flex items-center justify-center transition-colors" title="查看訓練詳情">ⓘ</button>
     </div>
@@ -827,8 +845,14 @@ function renderHistoryCascade(container) {
 
   const dsSelect  = container.querySelector('.cascade-dataset');
   const tgSelect  = container.querySelector('.cascade-target');
-  const runSelect = container.querySelector('.cascade-run');
+  const runBtn    = container.querySelector('.cascade-run-btn');
+  const runBtnLbl = container.querySelector('.cascade-run-btn-label');
+  const runPop    = container.querySelector('.cascade-run-popover');
   const infoBtn   = container.querySelector('.history-info-btn');
+
+  // 用 dataset 屬性紀錄當前選的 runId(取代原 <select>.value)
+  const _currentRunId = () => runBtn.dataset.runId || '';
+  const _setCurrentRunId = (id) => { runBtn.dataset.runId = id || ''; };
 
   const fmtScore = (r) => {
     // bestModel.score 在 hydration / pushTrainingHistory 兩條路徑都可能是 undefined
@@ -841,28 +865,91 @@ function renderHistoryCascade(container) {
     return `${String(d.getMonth()+1).padStart(2,'0')}/${String(d.getDate()).padStart(2,'0')} ${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`;
   };
 
+  // ---- engine label + badge 樣式 ----
+  // engine label 對應 — 從 r.engine 或 r.options.engine 撈,沒有 fallback 看 models[0].type
+  const _engineOf = (r) => {
+    if (r.engine === 'daniel' || r.engine === 'pipeline') return 'pipeline';
+    if (r.engine === 'autogluon') return 'autogluon';
+    if (r.engine === 'sklearn') return 'sklearn';
+    // 舊紀錄沒 engine 欄,用 model.type 推
+    const t = (r.models || [])[0]?.type;
+    if (t === 'daniel_pipeline' || t === 'daniel_pipeline_ensemble') return 'pipeline';
+    if (t === 'autogluon_model') return 'autogluon';
+    return 'sklearn';   // 預設
+  };
+  // engine → Tailwind utility classes for the badge (顏色跟 engine radio 卡片對齊)
+  const _engineBadge = (eng) => ({
+    sklearn:   { cls: 'bg-primary-500/15 text-primary-300 border-primary-500/40', label: 'SKLEARN' },
+    pipeline:  { cls: 'bg-warning-500/15 text-warning-300 border-warning-500/40', label: 'PIPELINE' },
+    autogluon: { cls: 'bg-accent-500/15 text-accent-300 border-accent-500/40',     label: 'AUTOGLUON' },
+  }[eng] || { cls: 'bg-dark-700 text-dark-400 border-dark-600', label: eng.toUpperCase() });
+
+  // 純文字版「按鈕標籤」(button face 上顯示「目前選的 run」)
+  const _runShortLabel = (r) => {
+    if (!r) return '尚未選擇';
+    const eng = _engineOf(r);
+    return `${fmtTime(r.timestamp)} · ${r.modelCount} 模型 · ${fmtScore(r)} · ${eng}`;
+  };
+
+  // ---- popover cards 渲染 ----
+  const _renderRunCards = (runs) => {
+    if (runs.length === 0) {
+      runPop.innerHTML = `<div class="p-4 text-xs text-dark-500">此資料集 + target 沒有訓練紀錄</div>`;
+      return;
+    }
+    const curId = _currentRunId();
+    runPop.innerHTML = runs.map(r => {
+      const eng = _engineOf(r);
+      const badge = _engineBadge(eng);
+      const isSelected = r.id === curId;
+      const sources = (r.sources || []).join(' + ') || '—';
+      return `
+        <button type="button" data-run-id="${r.id}"
+          class="cascade-run-card w-full text-left px-3 py-2.5 border-b border-dark-700/50 hover:bg-dark-800 transition-colors ${isSelected ? 'bg-primary-500/10 border-l-2 border-l-primary-500' : ''}">
+          <div class="flex items-center gap-2 mb-1">
+            <span class="text-xs font-mono text-dark-300">${fmtTime(r.timestamp)}</span>
+            <span class="text-[10px] px-1.5 py-0.5 rounded border ${badge.cls} font-semibold">${badge.label}</span>
+            ${isSelected ? '<span class="text-[10px] text-primary-300 ml-auto">✓ 選中</span>' : '<span class="ml-auto"></span>'}
+          </div>
+          <div class="flex items-center gap-3 text-xs text-dark-400">
+            <span>${r.modelCount} 模型</span>
+            <span class="text-dark-100 font-mono">${fmtScore(r)}</span>
+          </div>
+          <div class="text-[10px] text-dark-500 mt-1 truncate" title="${escapeHtml(sources)}">來源: ${escapeHtml(sources)}</div>
+        </button>
+      `;
+    }).join('');
+    // 綁卡片點擊
+    runPop.querySelectorAll('.cascade-run-card').forEach(card => {
+      card.addEventListener('click', () => {
+        const id = card.dataset.runId;
+        _setCurrentRunId(id);
+        const sel = _trainingHistory.find(h => h.id === id);
+        runBtnLbl.textContent = _runShortLabel(sel);
+        runPop.classList.add('hidden');
+        if (infoBtn) infoBtn.dataset.runId = id;
+        applyHistoricalRun(id);
+      });
+    });
+  };
+
   // ---- 內部 populate helpers ----
   const refillRunSelect = (datasetName, target) => {
     const runs = _trainingHistory
       .filter(h => h.datasetName === datasetName && h.target === target)
-      .sort((a, b) => {
-        if (b.modelCount !== a.modelCount) return b.modelCount - a.modelCount;
-        return (b.bestModel?.score || 0) - (a.bestModel?.score || 0);
-      });
-    runSelect.innerHTML = '';
-    runs.forEach(r => {
-      const opt = document.createElement('option');
-      opt.value = r.id;
-      opt.textContent = `${fmtTime(r.timestamp)} · ${r.modelCount} 模型 · ${fmtScore(r)}`;
-      runSelect.appendChild(opt);
-    });
+      .sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));   // 卡片版改按時間新到舊比較直觀
+
     // 預設選 activeHistoryRunId (若還屬於這個資料集+target),否則選第一筆
+    let curId = '';
     if (runs.find(r => r.id === _activeHistoryRunId)) {
-      runSelect.value = _activeHistoryRunId;
+      curId = _activeHistoryRunId;
     } else if (runs.length > 0) {
-      runSelect.value = runs[0].id;
+      curId = runs[0].id;
     }
-    if (infoBtn) infoBtn.dataset.runId = runSelect.value || '';
+    _setCurrentRunId(curId);
+    runBtnLbl.textContent = _runShortLabel(runs.find(r => r.id === curId));
+    if (infoBtn) infoBtn.dataset.runId = curId;
+    _renderRunCards(runs);
   };
 
   const refillTargetSelect = (datasetName) => {
@@ -902,16 +989,75 @@ function renderHistoryCascade(container) {
   // ---- listeners (每次 render 都重綁,因為元素是新的) ----
   dsSelect.addEventListener('change', () => {
     refillTargetSelect(dsSelect.value);
-    if (runSelect.value) applyHistoricalRun(runSelect.value);
+    const cid = _currentRunId();
+    if (cid) applyHistoricalRun(cid);
   });
   tgSelect.addEventListener('change', () => {
     refillRunSelect(dsSelect.value, tgSelect.value);
-    if (runSelect.value) applyHistoricalRun(runSelect.value);
+    const cid = _currentRunId();
+    if (cid) applyHistoricalRun(cid);
   });
-  runSelect.addEventListener('change', () => {
-    if (infoBtn) infoBtn.dataset.runId = runSelect.value;
-    applyHistoricalRun(runSelect.value);
+
+  // ---- popover open/close ----
+  // 用 position:fixed 跳出 overflow:hidden,每次開都重算座標(按鈕位置 / scroll / resize 都可能變)
+  const _positionPopover = () => {
+    const rect = runBtn.getBoundingClientRect();
+    const popW = 448;   // w-[28rem] = 28 × 16 = 448px
+    const popH = Math.min(384, runPop.scrollHeight);   // max-h-[24rem]
+    const vpW = window.innerWidth;
+    const vpH = window.innerHeight;
+    // 預設出現在按鈕下方,如果下方空間不夠就翻到上方
+    let top = rect.bottom + 4;
+    if (top + popH > vpH - 8) {
+      top = Math.max(8, rect.top - popH - 4);
+    }
+    let left = rect.left;
+    if (left + popW > vpW - 8) {
+      left = Math.max(8, vpW - popW - 8);
+    }
+    runPop.style.top = `${top}px`;
+    runPop.style.left = `${left}px`;
+  };
+  runBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    const willOpen = runPop.classList.contains('hidden');
+    if (willOpen) {
+      _positionPopover();
+    }
+    runPop.classList.toggle('hidden');
   });
+  // 開啟時 scroll / resize 跟著重算
+  const _onWinChange = () => {
+    if (!runPop.classList.contains('hidden')) _positionPopover();
+  };
+  window.addEventListener('scroll', _onWinChange, true);   // true = capture,撈所有 scrollable 祖先的 scroll
+  window.addEventListener('resize', _onWinChange);
+  // Click outside (用 capture 確保不被卡片內部 stopPropagation 擋掉)
+  const _closeOnOutside = (e) => {
+    if (!runPop.classList.contains('hidden') && !runPop.contains(e.target) && e.target !== runBtn && !runBtn.contains(e.target)) {
+      runPop.classList.add('hidden');
+    }
+  };
+  document.addEventListener('click', _closeOnOutside);
+  // ESC 關閉
+  const _closeOnEsc = (e) => {
+    if (e.key === 'Escape' && !runPop.classList.contains('hidden')) {
+      runPop.classList.add('hidden');
+    }
+  };
+  document.addEventListener('keydown', _closeOnEsc);
+  // container 被重 render 時舊 listener 會洩漏 — 用 MutationObserver 自動拔掉
+  const _cleanup = new MutationObserver(() => {
+    if (!document.body.contains(runBtn)) {
+      document.removeEventListener('click', _closeOnOutside);
+      document.removeEventListener('keydown', _closeOnEsc);
+      window.removeEventListener('scroll', _onWinChange, true);
+      window.removeEventListener('resize', _onWinChange);
+      _cleanup.disconnect();
+    }
+  });
+  _cleanup.observe(document.body, { childList: true, subtree: true });
+
   if (infoBtn) _wireHistoryInfoBtn(infoBtn);
 }
 
@@ -4301,6 +4447,8 @@ function renderRealExperimentsPage() {
         timeLimit: parseFloat(document.getElementById('exp-autogluon-time-limit')?.value) || 0,
         target: targetSel.value,
         sources: sources,
+        // TS toggle 共用實驗室那個 exp-time-series checkbox
+        timeSeries: document.getElementById('exp-time-series')?.checked || false,
       };
       startAutogluonExperimentTraining(ds, targetSel.value, agOptions);
       return;
@@ -4504,6 +4652,7 @@ async function startRealTraining(ds, targetCol, options = {}) {
         score: _isRegForHist ? _bestM.metrics.testR2 : _bestM.metrics.testAccuracy,
       },
       options: { features: options.features, algorithms: options.algorithms },
+      engine: 'sklearn',   // 引擎標記 — cascade dropdown 顯示來源用 (跟 daniel / autogluon 一致)
       models, // 完整模型陣列;localStorage 爆 quota 時 _persistTrainingHistory 會自動降級
     });
 
@@ -4608,6 +4757,8 @@ async function startAutogluonExperimentTraining(ds, targetCol, options) {
     form.append('target', options.target);
     form.append('preset', options.preset);
     form.append('timeLimit', String(options.timeLimit || 0));
+    // TS toggle → 後端改 chronological 切 (取最後 20% 當 holdout,不 shuffle)
+    if (options.timeSeries) form.append('timeSeries', 'true');
 
     const headers = {};
     if (typeof AuthClient !== 'undefined' && AuthClient.token) {
@@ -5203,14 +5354,19 @@ function insertPipelineSubmissionCard(results, runId) {
 function renderExperimentResults(models, data) {
   const isReg = data.taskType === 'regression';
 
-  // Daniel pipeline 跑出來的 model 沒有 per-feature importance / per-sample 預測 / 後端 estimator,
-  // 顯示這些區塊只會看到「不支援」訊息或空下拉,直接隱藏更乾淨。
-  // 認舊 placeholder 'daniel_pipeline' 跟新版 hydrated 'daniel_pipeline_ensemble' 兩個 type
-  // (不然新版訓練完 View model charts + Batch Predict 區塊還是會跑出來)
+  // Daniel pipeline / Autogluon 跑出來的 model 沒有 per-feature importance / per-sample 預測 /
+  // 後端 estimator (前端取不到),顯示「檢視模型圖表 / 預測 vs 實際 / 批次預測」這幾塊
+  // 只會看到「不支援」訊息或空圖,直接隱藏更乾淨。
+  // 涵蓋三種 type:
+  //   - 'daniel_pipeline' (舊 placeholder)
+  //   - 'daniel_pipeline_ensemble' (新版 hydrated)
+  //   - 'autogluon_model' (autogluon 走 tar.gz 預測,沒走 per-feature importance 那條)
   const isPipelineRun = models.length > 0 && models.every(m =>
-    m.type === 'daniel_pipeline' || m.type === 'daniel_pipeline_ensemble'
+    m.type === 'daniel_pipeline' ||
+    m.type === 'daniel_pipeline_ensemble' ||
+    m.type === 'autogluon_model'
   );
-  // autogluon_model 也算 ensemble-ish (隱藏結果表)
+  // ensemble-ish:隱藏「訓練結果表」(有「Pipeline 詳細」+ 排行榜了)
   const isEnsembleish = models.length > 0 && models.every(m =>
     m.type === 'daniel_pipeline_ensemble' || m.type === 'autogluon_model'
   );
@@ -5793,6 +5949,36 @@ function renderRealLeaderboard() {
 
   // Bind compare functionality for real models
   initRealCompare(models, isReg);
+
+  // 【動態隱藏空欄】整欄都沒值就把 th + 對應 td 隱藏 — 避免 Daniel ensemble 沒 AUC / 沒 latency 留一片「—」
+  // 用 thead/tbody 結構推 col index (跳過 hidden colgroup,只算可見 th)。
+  _hideEmptyLeaderboardColumns();
+}
+
+function _hideEmptyLeaderboardColumns() {
+  const table = document.querySelector('#leaderboard-body')?.closest('table');
+  if (!table) return;
+  const headerRow = table.querySelector('thead tr');
+  if (!headerRow) return;
+  const ths = Array.from(headerRow.children);
+  // 只檢查「值欄位」:metric2 (AUC/RMSE)、latency (推論延遲)。其它欄保持原樣。
+  // 找這幾欄的 index — 用 data-sort attribute 認:
+  const targetSorts = ['metric2', 'latency'];
+  targetSorts.forEach(sortKey => {
+    const colIdx = ths.findIndex(th => th.getAttribute('data-sort') === sortKey);
+    if (colIdx < 0) return;
+    const th = ths[colIdx];
+    // 看 tbody 「資料列」(跳過 hpTr / bmTr 那種 colspan 展開列)裡這個 column 有沒有實質數值
+    const dataRows = Array.from(table.querySelectorAll('#leaderboard-body > tr'))
+      .filter(tr => tr.children.length === ths.length);   // 不是 colspan 展開列
+    if (dataRows.length === 0) return;
+    const allEmpty = dataRows.every(tr => {
+      const txt = (tr.children[colIdx]?.textContent || '').trim();
+      return txt === '' || txt === '—' || txt === '-' || txt === 'N/A';
+    });
+    th.classList.toggle('hidden', allEmpty);
+    dataRows.forEach(tr => tr.children[colIdx]?.classList.toggle('hidden', allEmpty));
+  });
 }
 
 function initRealCompare(models, isReg) {
@@ -6487,16 +6673,33 @@ function _lbWirePredictInputs() {
 async function deleteModelById(modelId, btnEl) {
   if (!modelId) return;
   if (!confirm('確定刪除此模型？此操作無法復原。')) return;
+  // 前端 placeholder id (`daniel_db_xxx` / `daniel_N_timestamp` / `autogluon_N_timestamp`) 後端從沒看過,
+  // 直接跳過後端呼叫 — 不然必 404,user 以為刪不掉
+  const isPlaceholder = /^(daniel_db_|daniel_\d+_|autogluon_\d+_)/.test(modelId);
   try {
     if (btnEl) { btnEl.disabled = true; btnEl.textContent = '…'; }
-    if (typeof ApiClient !== 'undefined' && ApiClient.enabled) {
-      await ApiClient.modelDelete(modelId);
+    if (!isPlaceholder && typeof ApiClient !== 'undefined' && ApiClient.enabled) {
+      try {
+        await ApiClient.modelDelete(modelId);
+      } catch (apiErr) {
+        // 後端回 404 = 它本來就沒有(可能 uvicorn 重啟、wipe_data 跑過、guest 沒寫 DB)→
+        // 不擋,本地照清。其它 status 才當真錯誤。
+        const msg = String(apiErr.message || '');
+        if (!/\b404\b|不存在/.test(msg)) {
+          throw apiErr;
+        }
+        console.warn('[deleteModel] 後端 404,本地照清:', modelId);
+      }
     }
     // Remove from in-memory stores
     MLEngine.trainedModels = MLEngine.trainedModels.filter(m => m.id !== modelId);
     _trainingHistory.forEach(h => {
       if (h.models) h.models = h.models.filter(m => m.id !== modelId);
     });
+    // 順手把空 run 也清掉 (整 run 沒 model 剩) — 不然排行榜 dropdown 還會出現孤兒 run
+    _trainingHistory = _trainingHistory.filter(h => (h.models || []).length > 0 || h.modelCount > 0);
+    // persist 到 localStorage 讓重整後也乾淨
+    try { _persistTrainingHistory && _persistTrainingHistory(); } catch {}
     showToast('模型已刪除', { type: 'success' });
     renderRealLeaderboard();
     updateDashboardRealMetrics();
