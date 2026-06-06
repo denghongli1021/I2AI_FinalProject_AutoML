@@ -57,7 +57,7 @@ def _prepare_xy(df, target_col, np, le=None):
 
 def _dump_ensemble_bundle(result, *, task_type, n_classes, target_col, label_encoder,
                           global_cfg, feature_names_raw, bundle_path,
-                          y_center=None, y_scale=None):
+                          y_center=None, y_scale=None, target_transform=None):
     """
     把 PipelineResult / PipelineRegResult 組成完整 ensemble bundle pickle
     (含 fold models + blender + stacker),dump 到 bundle_path。
@@ -99,6 +99,8 @@ def _dump_ensemble_bundle(result, *, task_type, n_classes, target_col, label_enc
         # 回歸:RobustScaler 的中位數 + IQR (推論時 y_pred = y_pred_scaled * y_scale + y_center)
         "y_center": float(y_center) if y_center is not None else None,
         "y_scale": float(y_scale) if y_scale is not None else None,
+        # 🆕 target 自動轉換資訊 — 推論期 (predict / batch) 還原 log1p+clip
+        "target_transform": target_transform,
     }
     os.makedirs(os.path.dirname(bundle_path) or ".", exist_ok=True)
     with open(bundle_path, "wb") as f:
@@ -183,19 +185,46 @@ def _run_regression(X_tr, y_tr, X_te, y_te, target_col, source_tag,
     budget = _pt.TimeBudget(limit_sec=args.time_limit, t_start=t0)
     cfg = _pt.get_cfg_time(args.fast, n_samples=len(y_tr))
 
+    # 🆕 target 自動轉換 (平台層通用) — log1p 於右偏正值 target,推論期 expm1+clip 還原
+    # daniel pipeline 內部還有 y-centering/scaling,順序是:log1p → daniel 內部縮放 → 模型
+    try:
+        from api.train._target_transform import decide_target_transform, apply_forward, apply_inverse
+    except ImportError:
+        # 子進程 sys.path 不一定有 api/,直接從 sibling 路徑載入
+        import importlib.util
+        _spec = importlib.util.spec_from_file_location(
+            "_target_transform",
+            os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "_target_transform.py"),
+        )
+        _tt_mod = importlib.util.module_from_spec(_spec)
+        _spec.loader.exec_module(_tt_mod)
+        decide_target_transform = _tt_mod.decide_target_transform
+        apply_forward = _tt_mod.apply_forward
+        apply_inverse = _tt_mod.apply_inverse
+
+    target_transform_info = decide_target_transform(y_tr, "regression")
+    if target_transform_info and target_transform_info.get("log1p"):
+        print(f"[Pipeline] target transform: {target_transform_info['reason']}", flush=True)
+        y_tr_fit = apply_forward(y_tr, target_transform_info).astype(_np.float32)
+    else:
+        y_tr_fit = y_tr
+
     # 每次跑用獨立 artifacts dir (timestamp 為後綴),防止快取命中跳過重訓
     run_artifacts_dir = os.path.join(ARTIFACTS_DIR, "api", source_tag, str(int(t0)))
     result = _pt.run_regression(
-        X_tr, y_tr, X_te, cfg, budget,
+        X_tr, y_tr_fit, X_te, cfg, budget,
         skip_tabular=args.skip_tabular,
         skip_dl=args.skip_dl,
         artifacts_dir=run_artifacts_dir,
         metric="rmse",
     )
 
-    # test_blend / test_stack 是回歸單值預測 (1D)
+    # test_blend / test_stack 是回歸單值預測 (1D) — 若有 log1p,還原到原尺度
     blend = _np.asarray(result.test_blend).ravel()
     stack = _np.asarray(result.test_stack).ravel()
+    if target_transform_info and target_transform_info.get("log1p"):
+        blend = apply_inverse(blend, target_transform_info)
+        stack = apply_inverse(stack, target_transform_info)
 
     def _reg_scores(y_true, y_pred):
         y_true = _np.asarray(y_true, dtype=float).ravel()
@@ -223,13 +252,17 @@ def _run_regression(X_tr, y_tr, X_te, y_te, target_col, source_tag,
     def _r(v): return round(v, 4) if v is not None else None
 
     # ── per_model OOF score (給前端 Pipeline 詳細卡列各模型分數) ─────────────
-    # OOF 已 inverse-transform 回原 y 尺度,直接拿 y_tr 比即可
+    # OOF 已被 daniel 內部的 y-scaling inverse 回 log 空間(若我們做了 log1p),
+    # 比對 y_tr (原尺度) 前再 expm1 一次。
     per_model = []
     y_tr_arr = _np.asarray(y_tr, dtype=float).ravel()
+    _has_log = bool(target_transform_info and target_transform_info.get("log1p"))
     for tag, oof_pred in zip(result.model_tags, result.all_oof):
         try:
             # OOF 可能有 NaN (mask=0 的位置);只用 valid 部分
             oof_arr = _np.asarray(oof_pred, dtype=float).ravel()
+            if _has_log:
+                oof_arr = apply_inverse(oof_arr, target_transform_info)
             valid = ~_np.isnan(oof_arr)
             if valid.sum() >= 2:
                 _s = float(r2_score(y_tr_arr[valid], oof_arr[valid]))
@@ -254,6 +287,7 @@ def _run_regression(X_tr, y_tr, X_te, y_te, target_col, source_tag,
         bundle_path=os.path.join(run_artifacts_dir, "ensemble_bundle.pkl"),
         y_center=getattr(result, "y_center", None),
         y_scale=getattr(result, "y_scale", None),
+        target_transform=target_transform_info,
     )
     print(f"[bundle] _dump_ensemble_bundle 回傳: {bundle_path!r}", flush=True)
 
@@ -307,6 +341,8 @@ def _run_regression(X_tr, y_tr, X_te, y_te, target_col, source_tag,
         "testTrueDecoded": test_true_out,
         "testPredDecoded": test_pred_out,
         "xTestSample": x_test_sample,
+        # 🆕 target 自動轉換資訊 — 推論期(daniel ensemble predict)據此 expm1+clip 還原
+        "targetTransform": target_transform_info,
     }
     print(f"__RESULT_JSON__:{_json.dumps(out, ensure_ascii=False)}")
     return 0

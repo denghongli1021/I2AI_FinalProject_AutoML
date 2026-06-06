@@ -96,8 +96,21 @@ class RobustDataCleaner(BaseEstimator, TransformerMixin):
         self._out_columns = []
 
     def fit(self, X, y=None):
+        # ⚙ frozen 模式:由 interface.py 在 router 完成決策後 clone 出一份冷凍實例,
+        # 把 datetime_cols_ / numeric_coerce_cols_ / drop_cols_ 預先注入,fit 時直接
+        # 跳過自動偵測。避免「抽樣 5000 筆」跟「全量」對 50% datetime parse 門檻
+        # 算出不同結果,導致 ColumnTransformer 拿著抽樣決策的 datetime 欄,phase0
+        # 全量卻不拆 / 反之拆掉,造成 KeyError。
+        if getattr(self, "_frozen", False):
+            return self
+
+        # re-fit 時清空,避免 append 疊加(原本 bug 但實務上沒被 re-fit 過)
+        self.datetime_cols_ = []
+        self.numeric_coerce_cols_ = []
+        self.drop_cols_ = []
+
         df = pd.DataFrame(X)
-        
+
         # 1. 偵測常數欄位 (Zero-variance)
         for col in df.columns:
             if df[col].nunique(dropna=False) <= 1:

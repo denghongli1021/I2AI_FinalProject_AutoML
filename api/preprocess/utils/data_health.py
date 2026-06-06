@@ -541,13 +541,19 @@ def _check_label_noise(
     # 🚀 更高級的抽樣：分層抽樣 (確保每個類別都有被抽到)
     if len(X_check) > 50000:
         # 將特徵與標籤合併，以利 groupby 抽樣
+        temp_df = X_check.copy()
         temp_df['__target__'] = y_check
-        
+
         # 依照 target 群組，等比例抽出 20000 筆
+        # max(1, ...) 防止極稀有類別 rint → 0 被整個丟掉
+        _n_total = len(temp_df)
         sampled_df = temp_df.groupby('__target__', group_keys=False).apply(
-            lambda x: x.sample(int(np.rint(20000 * len(x) / len(temp_df))), random_state=42)
+            lambda x: x.sample(
+                max(1, int(np.rint(20000 * len(x) / _n_total))),
+                random_state=42,
+            )
         )
-        
+
         X_check = sampled_df.drop(columns=['__target__'])
         y_check = sampled_df['__target__']
 

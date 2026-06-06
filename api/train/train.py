@@ -465,6 +465,14 @@ def _train_one(
         label_encoder = LabelEncoder()
         y_train_fit = label_encoder.fit_transform(y_train)
 
+    # 🆕 回歸 target 自動轉換(平台層通用)
+    # 右偏正值 target(銷量、計數、價格)直接訓練會被 MSE 主導大值樣本,
+    # 小值預測偏掉 → MAPE 爆炸。偵測後自動 log1p,推論期 expm1+clip 還原。
+    from ._target_transform import decide_target_transform, apply_forward, apply_inverse
+    target_transform_info = decide_target_transform(y_train, task_type)
+    if target_transform_info and (target_transform_info["log1p"] or target_transform_info["clip_nonneg"]):
+        y_train_fit = apply_forward(y_train_fit, target_transform_info)
+
     estimator.fit(X_train, y_train_fit)
 
     train_pred = estimator.predict(X_train)
@@ -487,6 +495,11 @@ def _train_one(
     if label_encoder is not None:
         train_pred = label_encoder.inverse_transform(train_pred)
         test_pred = label_encoder.inverse_transform(test_pred)
+
+    # 🆕 還原 target transform:metrics 必須在「原尺度」算才是使用者看得懂的數字
+    if target_transform_info:
+        train_pred = apply_inverse(train_pred, target_transform_info)
+        test_pred  = apply_inverse(test_pred,  target_transform_info)
 
     metrics = (
         _regression_metrics(y_test, test_pred, y_train, train_pred)
@@ -550,6 +563,8 @@ def _train_one(
         "stds": scaler.scale_.tolist(),
         "featureStats": feature_stats,
         "hyperparameters": hyperparameters,  # 給前端「訓練詳情」popover 顯示用
+        # 🆕 target 自動轉換資訊 — 推論期 (main.py /api/predict) 據此還原
+        "targetTransform": target_transform_info,
     }
     return bundle, estimator
 

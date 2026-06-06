@@ -134,6 +134,45 @@ def main():
               f"task={task} problem_type={problem_type} split={split_mode} preset={args.preset}")
         sys.stdout.flush()
 
+        # ── 🆕 平台通用前處理 — drop NaN/Inf label rows ──────────────
+        # autogluon 嚴格拒絕 label 含 NaN/Inf(即使 1 筆都會炸)。其他引擎也不應該
+        # 拿 NaN label 訓練 — 模型在那些列學的純粹是 imputed garbage。
+        _n_before = len(train_df)
+        _label_finite_mask = np.isfinite(pd.to_numeric(train_df[target_col], errors="coerce")) \
+                              if problem_type == "regression" else train_df[target_col].notna()
+        train_df = train_df.loc[_label_finite_mask].reset_index(drop=True)
+        _n_dropped = _n_before - len(train_df)
+        if _n_dropped > 0:
+            print(f"[Autogluon] 丟掉 {_n_dropped} 筆 label 為 NaN/Inf 的訓練列 "
+                  f"({_n_dropped/_n_before*100:.1f}%) — autogluon 不收這種資料")
+            sys.stdout.flush()
+
+        # ── 🆕 target 自動轉換 (平台層通用) ─────────────────────────
+        # 右偏正值 target (銷量/計數/價格) → 訓練前 log1p,推論後 expm1+clip。
+        # autogluon 內部沒做這個,我們在這邊統一處理。
+        target_transform_info = None
+        if problem_type == "regression":
+            try:
+                from ._target_transform import decide_target_transform, apply_forward
+            except ImportError:
+                from _target_transform import decide_target_transform, apply_forward  # 子進程相對 import fallback
+            target_transform_info = decide_target_transform(train_df[target_col].values, "regression")
+            if target_transform_info and target_transform_info.get("log1p"):
+                print(f"[Autogluon] target transform: {target_transform_info['reason']}")
+                train_df = train_df.copy()
+                train_df[target_col] = apply_forward(train_df[target_col].values, target_transform_info)
+                # test_df 的 label 也轉,確保 leaderboard score 是 log 空間 → 後面再還原成原尺度算 metric
+                if test_has_label:
+                    test_df = test_df.copy()
+                    # 注意:test_df 也要把 NaN label 行先 drop 才能保證 forward 不產生 NaN
+                    _t_mask = np.isfinite(pd.to_numeric(test_df[target_col], errors="coerce"))
+                    if (~_t_mask).any():
+                        _drop_t = int((~_t_mask).sum())
+                        print(f"[Autogluon] test 也有 {_drop_t} 筆 NaN label,評估時排除")
+                        test_df = test_df.loc[_t_mask].reset_index(drop=True)
+                    test_df[target_col] = apply_forward(test_df[target_col].values, target_transform_info)
+                sys.stdout.flush()
+
         # ── 訓練 ──────────────────────────────────────────────────────
         predictor_dir = tempfile.mkdtemp(prefix="autogluon_predictor_")
         predictor = TabularPredictor(
@@ -169,12 +208,27 @@ def main():
 
         X_test = test_df.drop(columns=[target_col], errors="ignore")
         preds = predictor.predict(X_test)
+
+        # 🆕 還原 target transform — metrics + 回傳 preds_list 都要在原尺度
+        if target_transform_info and target_transform_info.get("log1p"):
+            try:
+                from ._target_transform import apply_inverse
+            except ImportError:
+                from _target_transform import apply_inverse
+            preds = pd.Series(apply_inverse(preds.values, target_transform_info),
+                              index=preds.index, name=preds.name)
+
         preds_list = [v.item() if hasattr(v, "item") else v for v in preds.tolist()]
 
         rmse = r2 = mae = acc = f1 = best_score = None
         if test_has_label:
             from sklearn.metrics import accuracy_score, f1_score, mean_squared_error, r2_score, mean_absolute_error
-            y_true = test_df[target_col]
+            # 🆕 y_true 也還原到原尺度 — log 空間算 R² 對使用者沒意義
+            if target_transform_info and target_transform_info.get("log1p"):
+                y_true_orig = apply_inverse(test_df[target_col].values, target_transform_info)
+                y_true = pd.Series(y_true_orig, index=test_df.index, name=target_col)
+            else:
+                y_true = test_df[target_col]
             if task == "classification":
                 acc = float(accuracy_score(y_true, preds))
                 try:
@@ -244,6 +298,8 @@ def main():
             # autogluon 的 leaderboard — 給前端顯示完整內部模型樹
             "leaderboardRaw": lb_records[:50],
             "testTrueDecoded": [str(v) for v in y_true[:5000]] if test_has_label else None,
+            # 🆕 target 自動轉換資訊 — 推論期 main.py 據此還原
+            "targetTransform": target_transform_info,
             "testPredDecoded": [str(v) for v in preds[:5000]],
             # SHAP 用 — 存 50 列 test 特徵 (含原始欄名),後端 SHAP endpoint 拿來餵 Permutation
             # 【NaN safety】X_test 對 House Prices 那種真實資料含 NaN,直接 .tolist() 會帶 nan 進 list。

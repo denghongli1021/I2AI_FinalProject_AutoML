@@ -44,6 +44,7 @@ from api.preprocess import (
     preprocess_for_inference,
 )
 from api.preprocess.core import AutoRouter
+from api.train._target_transform import apply_inverse as _apply_target_inverse
 # 注意:DATASETS/MODELS/PREPROCESSORS in-memory dicts 還是被 storage 層的 guest 路徑用,
 # 不過 main.py 自己已經完全靠 storage helpers,不再直接 import 那些 dict。
 from api.visualize import AutoMLVisualizer
@@ -1015,6 +1016,8 @@ async def train_pipeline_stream_endpoint(
                                 # 「模型大小: 1982MB (File)」而不是只看到一個神祕大檔
                                 _ens_bundle["estimatorBytes"] = int(len(bundle_bytes))
                                 _ens_bundle["estimatorMb"] = round(size_mb, 1)
+                                # 🆕 target 自動轉換資訊 — 推論期 (predict / batch) 還原 log1p+clip
+                                _ens_bundle["targetTransform"] = r.get("targetTransform")
 
                                 # Item 1:訓練時 SHAP 預計算 — 對最強 tabular + 最強 DL
                                 # 各跑 3 張 plotly (global / waterfall / dependence),序列化
@@ -1409,6 +1412,8 @@ async def train_autogluon_stream_endpoint(
                             "presetUsed": r.get("presetUsed"),
                             # 訓練時間明確存進 bundle,hydration 後前端能讀到 (不然 m.trainTime 會掉)
                             "trainTimeMs": int(float(r.get("elapsedSec") or 0) * 1000),
+                            # 🆕 target 自動轉換資訊 — 推論期 predict / batch 據此 expm1+clip 還原
+                            "targetTransform": r.get("targetTransform"),
                         }
 
                         # 【SHAP precompute】訓練完就算 SHAP,寫進 bundle.shapPlots,
@@ -1926,7 +1931,9 @@ def visualize_shap_endpoint(
 # ============================================================
 class PredictRequest(BaseModel):
     modelId: str
-    features: list[float]  # 原始尺度 (未標準化),順序需對應 featureNames
+    # 混合型別 — autogluon 可吃字串類別 (例:MSZoning="RL"),sklearn/pipeline 需要 numeric
+    # 後端各 path 自己處理:autogluon 直接餵 predictor,sklearn 走 float-only 行為(string 會炸)
+    features: list[float | str | None]
 
 
 @app.post("/api/predict")
@@ -1959,6 +1966,49 @@ def predict_endpoint(
         return _predict_single_ensemble(estimator, req.features, feature_names,
                                        preprocessor_id, user, db)
 
+    # Autogluon model:單筆預測 — load tar.gz → TabularPredictor.predict
+    if bundle_meta.get("type") == "autogluon_model":
+        bundle_bytes = entry.get("_estimator_bytes")
+        if not bundle_bytes:
+            _est_status = entry.get("estimatorStatus", "empty")
+            _msg = ("Autogluon file blob 已不存在,無法預測。請重訓。"
+                    if _est_status == "file_missing" else
+                    "Autogluon bundle bytes 不存在 (舊紀錄),無法預測。請重訓。")
+            raise HTTPException(410, _msg)
+        if len(req.features) != len(feature_names):
+            raise HTTPException(status_code=400,
+                detail=f"features 長度 {len(req.features)} 不符 (應為 {len(feature_names)})")
+        try:
+            predictor, _ = _load_autogluon_predictor(req.modelId, bundle_bytes)
+        except HTTPException:
+            raise
+        except Exception as e:
+            raise HTTPException(500, f"Autogluon predictor load 失敗: {e}")
+        import pandas as _pd
+        # 單筆 → DataFrame (autogluon 內部自己處理字串/類別/NaN — 它原本就吃這種混合資料)
+        df_in = _pd.DataFrame([req.features], columns=feature_names)
+        try:
+            pred = predictor.predict(df_in).iloc[0]
+            if hasattr(pred, "item"):
+                pred = pred.item()
+        except Exception as e:
+            raise HTTPException(500, f"Autogluon predict 失敗: {e}")
+        # 🆕 target 自動轉換還原 (log1p/clip):右偏正值 target 訓練時做了 log1p,推論還原
+        _tt = bundle_meta.get("targetTransform")
+        if _tt and bundle_meta.get("taskType") == "regression":
+            pred = float(_apply_target_inverse(np.array([pred]), _tt)[0])
+        proba_list = None
+        classes_list = None
+        # 分類:多回機率給 What-If 顯示信心
+        if bundle_meta.get("taskType") != "regression":
+            try:
+                proba_df = predictor.predict_proba(df_in)
+                proba_list = proba_df.iloc[0].tolist()
+                classes_list = [c.item() if hasattr(c, "item") else c for c in proba_df.columns]
+            except Exception:
+                pass
+        return {"prediction": pred, "proba": proba_list, "classes": classes_list}
+
     if estimator is None:
         raise HTTPException(status_code=400, detail="此模型訓練失敗,無法預測")
     if len(req.features) != len(feature_names):
@@ -1971,6 +2021,10 @@ def predict_endpoint(
     # Pipeline 最佳模型儲存時 scaler=None (模型內部已含前處理)
     x_norm = scaler.transform(x) if scaler is not None else x
     pred = estimator.predict(x_norm)[0]
+    # 🆕 target 自動轉換還原(回歸任務)— 訓練在 log 空間,推論還原 + clip≥0
+    _tt = bundle_meta.get("targetTransform")
+    if _tt and bundle_meta.get("taskType") == "regression":
+        pred = float(_apply_target_inverse(np.array([pred]), _tt)[0])
     # numpy types 不是 JSON serializable
     if hasattr(pred, "item"):
         pred = pred.item()
@@ -2029,6 +2083,11 @@ def _predict_single_ensemble(bundle: dict, features: list, feature_names: list,
         # 走 ensemble blender/stacker 拿正式 prediction (跟 batch predict 一致)
         pred_arr = _ensemble_replay(bundle, X_raw, return_proba=False)
         val = float(np.asarray(pred_arr).ravel()[0])
+        # 🆕 target 自動轉換還原:log1p 訓練則 expm1+clip ≥ 0
+        _tt = bundle.get("target_transform")
+        if _tt:
+            val = float(_apply_target_inverse(np.array([val]), _tt)[0])
+            per_fold_preds = [float(_apply_target_inverse(np.array([p]), _tt)[0]) for p in per_fold_preds]
         std = float(np.std(per_fold_preds)) if len(per_fold_preds) >= 2 else 0.0
         return {
             "prediction": val,
@@ -2083,17 +2142,47 @@ def model_info_endpoint(
     if n == 0:
         return {"featureNames": [], "featureMeans": [], "featureStds": [],
                 "featureMin": [], "featureMax": [], "taskType": "regression"}
+    # featureTypes / featureChoices:每欄是 "numeric" 或 "categorical",類別欄附選項
+    feat_types: list[str] = ["numeric"] * n
+    feat_choices: dict[str, list] = {}
     if scaler is not None and hasattr(scaler, "mean_"):
         means = scaler.mean_.tolist()
         stds  = scaler.scale_.tolist()
     else:
+        import pandas as _pd
         x_test = entry.get("X_test_df")
+        bundle_meta = entry.get("bundle") or {}
+        # autogluon 在 save_model 時沒傳 X_test_df,但有 xTestSample 在 bundle 裡 → fallback 用它算
+        if (x_test is None or len(x_test) == 0) and bundle_meta.get("xTestSample"):
+            try:
+                x_test = _pd.DataFrame(bundle_meta["xTestSample"], columns=feature_names)
+            except Exception:
+                x_test = None
         if x_test is not None and len(x_test) > 0:
-            import pandas as _pd
             if not isinstance(x_test, _pd.DataFrame):
                 x_test = _pd.DataFrame(x_test)
-            means = x_test.mean().tolist()
-            stds  = x_test.std(ddof=1).fillna(1.0).tolist()
+            # 逐欄判:能轉 numeric 就 numeric,否則歸 categorical 並收集選項
+            means = []
+            stds = []
+            for i, col in enumerate(feature_names):
+                s = x_test[col] if col in x_test.columns else x_test.iloc[:, i] if i < x_test.shape[1] else _pd.Series([])
+                s_num = _pd.to_numeric(s, errors="coerce")
+                if s_num.notna().mean() > 0.5:
+                    # 主要是數值,當 numeric 處理
+                    means.append(float(s_num.mean()) if s_num.notna().any() else 0.0)
+                    stds.append(float(s_num.std(ddof=1)) if s_num.notna().sum() > 1 else 1.0)
+                else:
+                    # 主要是字串 / object → 類別欄
+                    feat_types[i] = "categorical"
+                    # 收集 unique 字串選項 (NaN 過濾掉)
+                    uniques = [str(v) for v in s.dropna().unique().tolist()]
+                    feat_choices[col] = uniques[:50]   # cap 50 避免極端高基數
+                    # numeric stats 用 placeholder (前端 categorical 不會看 mean/std)
+                    means.append(0.0)
+                    stds.append(1.0)
+            # 上面有 NaN → 補回 0.0 / 1.0
+            means = [m if (m == m and m is not None) else 0.0 for m in means]
+            stds  = [s if (s == s and s is not None) else 1.0 for s in stds]
         else:
             means = [0.0] * n
             stds  = [1.0] * n
@@ -2102,14 +2191,16 @@ def model_info_endpoint(
     bundle = entry.get("bundle", {})
     task_type = bundle.get("taskType", "regression")
     return {
-        "featureNames": feature_names,
-        "featureMeans": means,
-        "featureStds":  stds,
-        "featureMin":   feat_min,
-        "featureMax":   feat_max,
-        "taskType":     task_type,
-        "targetName":   bundle.get("targetName", ""),
-        "modelName":    bundle.get("name", model_id),
+        "featureNames":   feature_names,
+        "featureMeans":   means,
+        "featureStds":    stds,
+        "featureMin":     feat_min,
+        "featureMax":     feat_max,
+        "featureTypes":   feat_types,    # ["numeric" | "categorical"] 對齊 featureNames
+        "featureChoices": feat_choices,  # 只 categorical 欄有,{col_name: [unique_values...]}
+        "taskType":       task_type,
+        "targetName":     bundle.get("targetName", ""),
+        "modelName":      bundle.get("name", model_id),
     }
 
 # ============================================================
@@ -2947,6 +3038,14 @@ async def _predict_batch_autogluon(model_id: str, entry: dict, bundle_meta: dict
         _tb.print_exc()
         raise HTTPException(500, f"Autogluon predict 失敗: {e}")
 
+    # 🆕 target 自動轉換還原(回歸任務)— preds 是 pd.Series
+    _tt = bundle_meta.get("targetTransform")
+    if _tt and bundle_meta.get("taskType") == "regression":
+        preds = pd.Series(
+            _apply_target_inverse(preds.values, _tt),
+            index=preds.index, name=preds.name,
+        )
+
     # 輸出 CSV — 跟 sklearn batch predict 一樣的格式
     sample_bytes = None
     if sample_file is not None:
@@ -3084,6 +3183,10 @@ async def _predict_batch_ensemble(bundle: dict, file: UploadFile,
         # 回歸:回連續值,直接寫進 CSV
         preds = _ensemble_replay(bundle, X_raw, return_proba=False)
         preds = np.asarray(preds, dtype=float).ravel()
+        # 🆕 target 自動轉換還原(log1p → expm1 + clip≥0)
+        _tt = bundle.get("target_transform")
+        if _tt:
+            preds = _apply_target_inverse(preds, _tt)
     else:
         # 分類:回 argmax 後再 inverse_transform 回原 label
         idx_arr = _ensemble_replay(bundle, X_raw, return_proba=False)
@@ -3311,7 +3414,12 @@ async def predict_batch_stream_endpoint(
                 cancel_token=cancel_token,
             )
             print(f"[predict_worker] replay 完成 preds_len={len(preds) if preds is not None else 0}", flush=True)
-            result_box["preds"] = np.asarray(preds).ravel()
+            preds_arr = np.asarray(preds).ravel()
+            # 🆕 target 自動轉換還原:回歸 + log1p 訓練時 expm1+clip≥0
+            _tt = bundle.get("target_transform")
+            if _tt and (bundle.get("task_type") == "regression" or int(bundle.get("n_classes", 0)) <= 1):
+                preds_arr = np.asarray(_apply_target_inverse(preds_arr, _tt), dtype=float).ravel()
+            result_box["preds"] = preds_arr
         except InterruptedError as ie:
             print(f"[predict_worker] 取消: {ie}", flush=True)
             result_box["error"] = ("cancelled", str(ie))
@@ -3515,6 +3623,11 @@ async def predict_batch_endpoint(
         preds = estimator.predict(X)
     except Exception as e:
         raise HTTPException(500, f"\u6279\u6b21\u9810\u6e2c\u5931\u6557: {e}")
+
+    # \ud83c\udd95 target \u81ea\u52d5\u8f49\u63db\u9084\u539f(\u56de\u6b78\u4efb\u52d9)\u2014 log1p \u8a13\u7df4\u5247 expm1 + clip\u22650
+    _tt = bundle.get("targetTransform")
+    if _tt and bundle.get("taskType") == "regression":
+        preds = _apply_target_inverse(np.asarray(preds), _tt)
 
     # --- build output ---
     if sampleFile is not None:

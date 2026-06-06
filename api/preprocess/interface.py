@@ -522,12 +522,22 @@ def preprocess_for_training(
     # 判斷任務類型
     is_classification = (y_train.nunique() <= 50)
 
+    # ⚙ 共用「抽樣 cleaner 決策」的 frozen clone — 確保下游 phase0 全量 fit 不會
+    # 跟 router 看到的 feature_groups 失焦(避免 KeyError: 'date' 之類)。
+    def _frozen_clone_cleaner(src: RobustDataCleaner) -> RobustDataCleaner:
+        nc = RobustDataCleaner()
+        nc.datetime_cols_ = list(src.datetime_cols_)
+        nc.numeric_coerce_cols_ = list(src.numeric_coerce_cols_)
+        nc.drop_cols_ = list(src.drop_cols_)
+        nc._frozen = True
+        return nc
+
     # ==========================================
     # 🌳 第一軌：樹狀模型專用 (Tree Track - 生肉)
     # 不補值、不縮放。直接交給 XGBoost 自己挖寶,不需經過 MI 篩選!
     # ==========================================
     tree_preprocessor = Pipeline([
-        ('phase0', RobustDataCleaner()),
+        ('phase0', _frozen_clone_cleaner(temp_cleaner)),
         ('phase1', assembler.build(track="tree"))
         # 🚨 刪除 phase2_mi_selector!讓生肉原汁原味進入模型。
     ])
@@ -537,7 +547,7 @@ def preprocess_for_training(
     # 精緻補值、標準化,MI top_k 動態決定 (而不是死的 300)
     # ==========================================
     dl_preprocessor = Pipeline([
-        ('phase0', RobustDataCleaner()),
+        ('phase0', _frozen_clone_cleaner(temp_cleaner)),
         ('phase1', assembler.build(track="dl")),
         # MI top_k 由 auto_mi_top_k 動態決定 (依特徵總數推估,夾在 [30, 300])
         ('phase2_mi_selector', MIFeatureSelector(top_k=auto_mi_top_k, is_classification=is_classification))

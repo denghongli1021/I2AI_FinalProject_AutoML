@@ -836,8 +836,10 @@ function renderHistoryCascade(container) {
           <span class="cascade-run-btn-label flex-1 text-left truncate text-dark-100"></span>
           <svg class="w-3 h-3 text-dark-400 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/></svg>
         </button>
-        <!-- position:fixed + JS 算座標 → 跳出外層 overflow:hidden 的卡片邊界,不會被切 -->
-        <div class="cascade-run-popover hidden fixed z-[100] w-[28rem] max-h-[24rem] overflow-y-auto bg-dark-900 border border-dark-600 rounded-lg shadow-2xl"></div>
+        <!-- position:fixed + JS 算座標 → 跳出外層 overflow:hidden 的卡片邊界,不會被切。
+             z-index 用 inline style 設 (Tailwind 的 z-[100] arbitrary value 沒被編譯,會被其它卡片擋住) -->
+        <div class="cascade-run-popover hidden fixed w-[28rem] max-h-[24rem] overflow-y-auto bg-dark-900 border border-dark-600 rounded-lg shadow-2xl"
+             style="z-index:9999"></div>
       </div>
       <button class="history-info-btn w-6 h-6 rounded-full bg-dark-700 hover:bg-primary-500/20 text-dark-400 hover:text-primary-300 text-[12px] flex items-center justify-center transition-colors" title="查看訓練詳情">ⓘ</button>
     </div>
@@ -6920,9 +6922,42 @@ async function loadShapFigures() {
 // ===== REAL WHAT-IF SIMULATOR =====
 const RealWhatIfState = { currentModel: null, values: [] };
 
-function renderRealWhatIf(models) {
+async function renderRealWhatIf(models) {
   const section = document.getElementById('real-whatif-section');
   if (!section) return;
+
+  // 【autogluon / daniel pipeline 補 stats】這兩個引擎訓練完 model 物件 means/stds/featureStats 都是空 [],
+  // What-If filter 過不了 → 整區隱藏。改成自動跟 /api/model/{id}/info 撈,撈到就 in-place 補進 model。
+  const _enrichMissing = async () => {
+    const needs = models.filter(m =>
+      m.id && (!m.featureStats?.length || !m.means?.length || !m.stds?.length)
+    );
+    if (needs.length === 0) return;
+    await Promise.all(needs.map(async (m) => {
+      try {
+        const info = await ApiClient.get(`/api/model/${m.id}/info`);
+        if (!info || !info.featureNames?.length) return;
+        m.featureNames = info.featureNames;
+        m.means = info.featureMeans || [];
+        m.stds  = info.featureStds  || [];
+        m.featureStats = info.featureNames.map((name, i) => ({
+          name,
+          mean: info.featureMeans?.[i] ?? 0,
+          std:  info.featureStds?.[i]  ?? 1,
+          min:  info.featureMin?.[i]   ?? ((info.featureMeans?.[i] ?? 0) - 3),
+          max:  info.featureMax?.[i]   ?? ((info.featureMeans?.[i] ?? 0) + 3),
+        }));
+        // 類別欄資料 — autogluon 才會有,sklearn/pipeline 全 numeric
+        m.featureTypes   = info.featureTypes   || info.featureNames.map(() => 'numeric');
+        m.featureChoices = info.featureChoices || {};
+        m.targetName = m.targetName || info.targetName;
+        m.taskType   = m.taskType   || info.taskType;
+      } catch (e) {
+        console.warn(`[whatif] /api/model/${m.id}/info 撈失敗,跳過:`, e.message);
+      }
+    }));
+  };
+  await _enrichMissing();
 
   // Filter to models that have prediction infrastructure
   // - JS 模式: 需要 m.predict (callable function)
@@ -6947,16 +6982,28 @@ function renderRealWhatIf(models) {
     modelSel.appendChild(opt);
   });
 
+  // 重設值的 baseline:類別欄用第一個選項,數值欄用 mean
+  const _baselineFor = (mdl) => {
+    const types = mdl.featureTypes || [];
+    const choices = mdl.featureChoices || {};
+    return mdl.featureStats.map((s, i) => {
+      const name = mdl.featureNames?.[i];
+      if (types[i] === 'categorical' && Array.isArray(choices[name]) && choices[name].length > 0) {
+        return choices[name][0];
+      }
+      return s.mean;
+    });
+  };
   const setModel = (idx) => {
     RealWhatIfState.currentModel = usable[idx];
-    RealWhatIfState.values = usable[idx].featureStats.map(s => s.mean);
+    RealWhatIfState.values = _baselineFor(usable[idx]);
     buildRealWhatIfSliders();
     updateRealWhatIfPrediction();
   };
 
   modelSel.onchange = () => setModel(parseInt(modelSel.value));
   document.getElementById('real-whatif-reset').onclick = () => {
-    RealWhatIfState.values = RealWhatIfState.currentModel.featureStats.map(s => s.mean);
+    RealWhatIfState.values = _baselineFor(RealWhatIfState.currentModel);
     buildRealWhatIfSliders();
     updateRealWhatIfPrediction();
   };
@@ -6979,8 +7026,42 @@ function buildRealWhatIfSliders() {
   const m = RealWhatIfState.currentModel;
   if (!wrap || !m) return;
 
+  // 對齊 backend featureTypes / featureChoices(只有 autogluon 路徑會回 categorical;
+  // sklearn/pipeline 永遠是 numeric/binary)
+  const featTypes   = m.featureTypes   || [];
+  const featChoices = m.featureChoices || {};
+
   wrap.innerHTML = '';
   m.featureNames.forEach((name, i) => {
+    const isCategorical = featTypes[i] === 'categorical' && Array.isArray(featChoices[name]) && featChoices[name].length > 0;
+
+    // ── 類別欄:用 dropdown 取代 slider ──
+    if (isCategorical) {
+      const choices = featChoices[name];
+      const cur = RealWhatIfState.values[i];
+      // cur 沒值 / 不在選項裡 → 預設選第一個
+      const defaultVal = (cur != null && choices.includes(String(cur))) ? String(cur) : choices[0];
+      RealWhatIfState.values[i] = defaultVal;
+
+      const div = document.createElement('div');
+      div.className = 'slider-group';
+      div.innerHTML = `
+        <div class="flex items-center justify-between mb-1 gap-2">
+          <label class="text-xs font-medium text-dark-200 truncate" title="${escapeHtml(name)}">
+            ${escapeHtml(name)} <span class="text-[9px] text-accent-400">[類別]</span>
+          </label>
+        </div>
+        <select data-cat-idx="${i}"
+          class="w-full bg-dark-800 border border-dark-600 rounded px-2 py-1 text-xs text-dark-100 focus:border-accent-500 outline-none">
+          ${choices.map(c => `<option value="${escapeHtml(c)}" ${c === defaultVal ? 'selected' : ''}>${escapeHtml(c)}</option>`).join('')}
+        </select>
+        <div class="text-[9px] text-dark-500 mt-0.5">${choices.length} 個選項</div>
+      `;
+      wrap.appendChild(div);
+      return;
+    }
+
+    // ── 數值欄:走原本 slider + 數字框邏輯 ──
     const stats = m.featureStats[i];
     const range = stats.max - stats.min;
     // 二元 0/1 欄位 (預處理 OneHot 出來的) → step=1,直接在 0/1 間切換
@@ -7007,6 +7088,15 @@ function buildRealWhatIfSliders() {
       </div>
     `;
     wrap.appendChild(div);
+  });
+
+  // 類別 dropdown 變動 → 更新狀態 + 重新預測
+  wrap.querySelectorAll('select[data-cat-idx]').forEach(sel => {
+    sel.addEventListener('change', (e) => {
+      const idx = parseInt(e.target.dataset.catIdx);
+      RealWhatIfState.values[idx] = e.target.value;   // 字串
+      updateRealWhatIfPrediction();
+    });
   });
 
   // 滑桿拖動 → 更新數字框 + 狀態 + 重新預測
@@ -7078,11 +7168,27 @@ async function updateRealWhatIfPrediction() {
   if (isApi) {
     // API 模式: raw scale 值直接傳給後端,後端內部做 scaler.transform
     const myToken = ++_whatIfReqToken;
+    // 【sanitize】null / undefined / NaN 後端會炸 → 用該欄 mean 或預設值填。
+    // 字串值 (categorical 欄) 直接放行 — 後端 PredictRequest 已改 list[float | str | None]。
+    const featTypes = m.featureTypes || [];
+    const featChoices = m.featureChoices || {};
+    const _sanitize = (arr) => (arr || []).map((v, i) => {
+      if (typeof v === 'string' && v) return v;
+      if (typeof v === 'number' && isFinite(v)) return v;
+      // 缺值:類別欄用第一個選項,數值欄用 mean
+      const name = m.featureNames?.[i];
+      if (featTypes[i] === 'categorical' && Array.isArray(featChoices[name]) && featChoices[name].length > 0) {
+        return featChoices[name][0];
+      }
+      const meanV = (m.means || [])[i];
+      if (typeof meanV === 'number' && isFinite(meanV)) return meanV;
+      return 0;
+    });
     try {
       const [predResp, baseResp] = await Promise.all([
-        ApiClient.predict({ modelId: m.id, features: RealWhatIfState.values }),
+        ApiClient.predict({ modelId: m.id, features: _sanitize(RealWhatIfState.values) }),
         // baseline = scaler.mean_ (raw-scale training means) → transform 後 = 零向量
-        ApiClient.predict({ modelId: m.id, features: m.means }),
+        ApiClient.predict({ modelId: m.id, features: _sanitize(m.means) }),
       ]);
       // 過時的 response (slider 還在拖動) 直接丟掉
       if (myToken !== _whatIfReqToken) return;
