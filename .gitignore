@@ -30,3 +30,10 @@ css/tailwind.css
 # 大 model blob (estimator.pkl) 自動 offload 到這個目錄,可被 MODEL_BLOB_DIR env 覆寫。
 # 內容絕對不能 commit (動輒 GB),要備份的話用 rsync / 跑 OS 級備份。
 model_blobs/
+# MS Office 開檔時產生的鎖檔(以 ~$ 開頭),絕對不能 commit
+~$*
+
+# Kaggle 比賽用的巨型 raw CSV(超過 GitHub 100MB 上限)
+# 時序分類資料夾(Reversal Points)的 train.csv 1.1GB / test.csv 456MB
+Comparison/時序分類-*/train.csv
+Comparison/時序分類-*/test.csv
