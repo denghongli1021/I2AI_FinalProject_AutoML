@@ -50,13 +50,28 @@ _IS_SQLITE = _DATABASE_URL.startswith("sqlite")
 # (理想是改用 transaction pooler port 6543,但要改 DATABASE_URL secret;這裡先把 pool 縮小當作雙保險)
 _PG_POOL_KWARGS = {} if _IS_SQLITE else {"pool_size": 2, "max_overflow": 3, "pool_recycle": 1800}
 
-# SQLite 多執行緒需要 check_same_thread=False;Postgres 不用
+# SQLite 多執行緒需要 check_same_thread=False;timeout=30 讓 worker/event_stream 兩條 session
+# 並行 commit 時最多等 30 秒，避免 "database is locked" 崩潰。Postgres 不用這些參數。
+_SQLITE_CONNECT_ARGS = {
+    "check_same_thread": False,
+    "timeout": 30,          # 秒；預設 5 秒太短，多執行緒並行 commit 容易超時
+} if _IS_SQLITE else {}
+
 engine = create_engine(
     _DATABASE_URL,
-    connect_args={"check_same_thread": False} if _IS_SQLITE else {},
+    connect_args=_SQLITE_CONNECT_ARGS,
     pool_pre_ping=True,
     **_PG_POOL_KWARGS,
 )
+
+# WAL 模式：允許讀與寫並行（reader 不擋 writer，writer 不擋 reader），大幅降低鎖衝突
+if _IS_SQLITE:
+    from sqlalchemy import event as _sa_event, text as _sa_text
+
+    @_sa_event.listens_for(engine, "connect")
+    def _set_sqlite_wal(dbapi_conn, _):
+        dbapi_conn.execute("PRAGMA journal_mode=WAL")
+        dbapi_conn.execute("PRAGMA synchronous=NORMAL")  # WAL 下 NORMAL 兼顧速度與安全
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 

@@ -40,15 +40,51 @@ class AutoMLVisualizer:
                 except Exception as e:
                     print(f"  LinearExplainer failed: {e}, falling back further...")
 
-            print("  Falling back to shap.Explainer (Permutation)...")
-            # 對神經網路 / 其他模型，shap.Explainer 需要 predict 函數
+            print("  Falling back to shap.Explainer / KernelExplainer...")
             background = self.X_test.iloc[:100]
-            predict_fn = self.model.predict if hasattr(self.model, "predict") else self.model
-            self.explainer = shap.Explainer(predict_fn, background)
-            # Permutation explainer 需要 max_evals >= 2*n_features+1,留一些餘裕
+            try:
+                background_float = background.astype(np.float64)
+            except Exception:
+                background_float = background.apply(pd.to_numeric, errors='coerce').fillna(0.0)
+
+            # predict_proba 優先：避免 predict 回傳 object dtype 字串標籤觸發 numba TypingError
+            if hasattr(self.model, "predict_proba"):
+                predict_fn = self.model.predict_proba
+            elif hasattr(self.model, "predict"):
+                predict_fn = self.model.predict
+            else:
+                predict_fn = self.model
+
+            # shap.Explainer.__init__ 內部也會呼叫 predict_fn 決定輸出形態，
+            # 一旦 numba JIT 失敗就整個包起來 fallback 到 KernelExplainer
             max_evals = max(500, 2 * n_features + 100)
-            self.shap_values = self.explainer(self.X_test, max_evals=max_evals)
-            print(f"  Using shap.Explainer (model-agnostic, max_evals={max_evals})")
+            try:
+                self.explainer = shap.Explainer(predict_fn, background_float)
+                self.shap_values = self.explainer(self.X_test, max_evals=max_evals)
+                print(f"  Using shap.Explainer (model-agnostic, max_evals={max_evals})")
+            except Exception as _je:
+                print(f"  shap.Explainer 失敗 ({type(_je).__name__})，改用 KernelExplainer...")
+                _n_bg = min(50, len(background_float))
+                _bg_np = background_float.values[:_n_bg].astype(np.float64)
+                self.explainer = shap.KernelExplainer(predict_fn, _bg_np)
+                _x_sub = self.X_test.iloc[:min(50, len(self.X_test))].reset_index(drop=True)
+                try:
+                    _x_np = _x_sub.astype(np.float64).values
+                except Exception:
+                    _x_np = _x_sub.apply(pd.to_numeric, errors='coerce').fillna(0.0).values
+                _sv = self.explainer.shap_values(_x_np, nsamples=100, silent=True)
+                _sv_arr = np.stack(_sv, axis=-1) if isinstance(_sv, list) else np.array(_sv)
+                _base = self.explainer.expected_value
+                if isinstance(_base, (list, np.ndarray)):
+                    _base = np.array(_base)
+                self.shap_values = shap.Explanation(
+                    values=_sv_arr,
+                    base_values=_base,
+                    data=_x_sub.values,
+                    feature_names=list(_x_sub.columns),
+                )
+                self.X_test = _x_sub
+                print(f"  Using KernelExplainer ({len(self.X_test)} samples)")
 
     def _get_shap_matrix(self):
         """

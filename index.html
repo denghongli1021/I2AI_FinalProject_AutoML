@@ -1196,6 +1196,23 @@
                              class="form-input w-full text-xs">
                       <p class="text-[10px] text-dark-500 mt-1">0 = 用 autogluon 自己 default</p>
                     </div>
+                    <div class="setting-row">
+                      <p class="text-xs font-medium mb-1">評估指標</p>
+                      <select id="exp-autogluon-metric" class="form-select w-full text-xs">
+                        <option value="auto" selected>auto (任務自動選)</option>
+                        <optgroup label="分類">
+                          <option value="accuracy">Accuracy</option>
+                          <option value="f1">F1 (macro)</option>
+                          <option value="roc_auc">AUC-ROC</option>
+                        </optgroup>
+                        <optgroup label="回歸">
+                          <option value="rmse">RMSE</option>
+                          <option value="r2">R²</option>
+                          <option value="mae">MAE</option>
+                        </optgroup>
+                      </select>
+                      <p class="text-[10px] text-dark-500 mt-1">影響 AutoGluon 模型排序</p>
+                    </div>
                   </div>
                 </div>
 
@@ -1241,9 +1258,16 @@
                         <p class="text-[10px] text-dark-500">CV 內部評分</p>
                       </div>
                       <select id="exp-daniel-metric" class="bg-dark-700 border border-dark-600 rounded px-2 py-1 text-xs">
-                        <option value="f1">F1 (macro)</option>
-                        <option value="accuracy">Accuracy</option>
-                        <option value="roc_auc">AUC-ROC</option>
+                        <optgroup label="分類">
+                          <option value="f1">F1 (macro)</option>
+                          <option value="accuracy">Accuracy</option>
+                          <option value="roc_auc">AUC-ROC</option>
+                        </optgroup>
+                        <optgroup label="回歸">
+                          <option value="rmse">RMSE</option>
+                          <option value="r2">R²</option>
+                          <option value="mae">MAE</option>
+                        </optgroup>
                       </select>
                     </label>
                     <label class="setting-row cursor-pointer">
@@ -2397,9 +2421,16 @@
                 <div>
                   <label class="block text-xs font-medium text-dark-400 mb-1.5">最佳化指標</label>
                   <select id="pipeline-metric" class="w-full bg-dark-800 border border-dark-600 rounded-lg px-3 py-2 text-sm focus:border-warning-500 outline-none">
-                    <option value="f1">F1 (macro)</option>
-                    <option value="accuracy">Accuracy</option>
-                    <option value="roc_auc">AUC-ROC</option>
+                    <optgroup label="分類">
+                      <option value="f1">F1 (macro)</option>
+                      <option value="accuracy">Accuracy</option>
+                      <option value="roc_auc">AUC-ROC</option>
+                    </optgroup>
+                    <optgroup label="回歸">
+                      <option value="rmse">RMSE</option>
+                      <option value="r2">R²</option>
+                      <option value="mae">MAE</option>
+                    </optgroup>
                   </select>
                 </div>
                 <div>

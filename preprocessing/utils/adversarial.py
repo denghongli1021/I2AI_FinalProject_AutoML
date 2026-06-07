@@ -327,6 +327,14 @@ def _encode_categoricals(
     X_train = X_train.copy()
     X_test  = X_test.copy()
 
+    # category dtype 有固定 categories 清單，fillna("__NaN__") 會因 "__NaN__" 不在清單而失敗
+    # 先轉回 object 解除限制
+    for col in cat_cols:
+        if X_train[col].dtype.name == "category":
+            X_train[col] = X_train[col].astype(object)
+        if X_test[col].dtype.name == "category":
+            X_test[col] = X_test[col].astype(object)
+
     for col in cat_cols:
         # 合併 unique 值來 fit encoder
         combined_vals = pd.concat([

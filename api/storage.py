@@ -483,17 +483,21 @@ def save_model(
 
     if not _is_authed(user):
         # 若有 pre-pickled bytes (daniel ensemble) → 直接 loads 一次,讓 get_model 拿到的 entry["estimator"] 永遠是物件
+        # autogluon_model 例外：bytes 是 tar.gz 不是 pickle，直接保留原始 bytes
         _guest_estimator = estimator
         if _guest_estimator is None and estimator_pkl_bytes is not None:
-            # bundle pickle 含 src.ensemble / src.preprocess 等模組，需先確保 pipeline 路徑在 sys.path
-            import sys as _sys
-            _pipe_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "train", "pipeline")
-            if _pipe_path not in _sys.path:
-                _sys.path.insert(0, _pipe_path)
-            try:
-                _guest_estimator = pickle.loads(estimator_pkl_bytes)
-            except Exception as e:
-                print(f"[save_model:guest] unpickle estimator_pkl_bytes 失敗: {e}", flush=True)
+            if bundle.get("type") == "autogluon_model":
+                _guest_estimator = estimator_pkl_bytes   # 保留 tar.gz raw bytes
+            else:
+                # bundle pickle 含 src.ensemble / src.preprocess 等模組，需先確保 pipeline 路徑在 sys.path
+                import sys as _sys
+                _pipe_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "train", "pipeline")
+                if _pipe_path not in _sys.path:
+                    _sys.path.insert(0, _pipe_path)
+                try:
+                    _guest_estimator = pickle.loads(estimator_pkl_bytes)
+                except Exception as e:
+                    print(f"[save_model:guest] unpickle estimator_pkl_bytes 失敗: {e}", flush=True)
         MODELS[model_id] = stamp({
             "bundle": bundle,
             "estimator": _guest_estimator,
@@ -502,6 +506,7 @@ def save_model(
             "X_test_df": X_test_df,
             "preprocessorId": preprocessor_id,
             "hyperparameters": hyperparameters or {},
+            "trainingRunId": training_run_id,
         }, user)
         _save_guest_model_to_disk(model_id, MODELS[model_id])
         return model_id
@@ -593,6 +598,7 @@ def list_models(user, db: Session, *, training_run_id: Optional[str] = None,
                 "bundle": bundle,
                 "hyperparameters": entry.get("hyperparameters", {}),
                 "preprocessorId": entry.get("preprocessorId"),
+                "trainingRunId": entry.get("trainingRunId"),
                 "createdAt": None,
             })
         return items
@@ -648,10 +654,17 @@ def get_model(model_id: str, user, db: Session) -> dict:
             except Exception as e:
                 print(f"[get_model] 從 preprocessor {m.preprocessor_id} 撈 X_test 失敗: {e}", flush=True)
 
+    def _safe_loads(b):
+        """pickle.loads，非 pickle 格式（如 autogluon tar.gz）時直接回傳 raw bytes。"""
+        try:
+            return pickle.loads(b)
+        except Exception:
+            return b
+
     return {
         "id": m.id,
         "bundle": json.loads(m.bundle_json) if m.bundle_json else {},
-        "estimator": pickle.loads(est_bytes) if est_bytes else None,
+        "estimator": _safe_loads(est_bytes) if est_bytes else None,
         "estimatorStatus": est_status,   # ok / empty / file_missing — 給 endpoint 分流錯誤訊息
         "scaler": pickle.loads(scaler_bytes) if scaler_bytes else None,
         "featureNames": json.loads(m.feature_names_json) if m.feature_names_json else [],
@@ -990,32 +1003,44 @@ def _guest_model_dir() -> str:
 
 
 def _save_guest_model_to_disk(model_id: str, entry: dict) -> None:
-    """只持久化 pipeline ensemble bundle (estimator 是 dict 且 version==1)。
-    sklearn 模型因為無 pkl_bytes 傳入，不在這裡處理。
-    """
+    """持久化 guest 模型到 model_blobs/guest/，支援 pipeline ensemble 與 AutoGluon。"""
     estimator = entry.get("estimator")
-    if not (isinstance(estimator, dict) and estimator.get("version") == 1):
+    bundle    = entry.get("bundle") or {}
+    d = _guest_model_dir()
+
+    # Pipeline ensemble (estimator 是 version=1 dict)
+    if isinstance(estimator, dict) and estimator.get("version") == 1:
+        try:
+            with open(os.path.join(d, f"{model_id}_estimator.pkl"), "wb") as f:
+                pickle.dump(estimator, f, protocol=pickle.HIGHEST_PROTOCOL)
+            meta = {k: v for k, v in entry.items() if k != "estimator"}
+            with open(os.path.join(d, f"{model_id}_meta.pkl"), "wb") as f:
+                pickle.dump(meta, f, protocol=pickle.HIGHEST_PROTOCOL)
+            print(f"[guest persist] 已儲存 pipeline {model_id}", flush=True)
+        except Exception as e:
+            print(f"[guest persist] 儲存失敗 {model_id}: {e}", flush=True)
         return
-    try:
-        d = _guest_model_dir()
-        with open(os.path.join(d, f"{model_id}_estimator.pkl"), "wb") as f:
-            pickle.dump(estimator, f, protocol=pickle.HIGHEST_PROTOCOL)
-        meta = {k: v for k, v in entry.items() if k != "estimator"}
-        with open(os.path.join(d, f"{model_id}_meta.pkl"), "wb") as f:
-            pickle.dump(meta, f, protocol=pickle.HIGHEST_PROTOCOL)
-        print(f"[guest persist] 已儲存 {model_id} → model_blobs/guest/", flush=True)
-    except Exception as e:
-        print(f"[guest persist] 儲存失敗 {model_id}: {e}", flush=True)
+
+    # AutoGluon model (estimator 是 tar.gz bytes)
+    if isinstance(estimator, bytes) and bundle.get("type") == "autogluon_model":
+        try:
+            with open(os.path.join(d, f"{model_id}_ag.tar.gz"), "wb") as f:
+                f.write(estimator)
+            meta = {k: v for k, v in entry.items() if k != "estimator"}
+            with open(os.path.join(d, f"{model_id}_meta.pkl"), "wb") as f:
+                pickle.dump(meta, f, protocol=pickle.HIGHEST_PROTOCOL)
+            print(f"[guest persist] 已儲存 AutoGluon {model_id}", flush=True)
+        except Exception as e:
+            print(f"[guest persist] 儲存失敗 AutoGluon {model_id}: {e}", flush=True)
 
 
 def restore_guest_models() -> int:
-    """啟動時從 model_blobs/guest/ 還原 pipeline ensemble 到 MODELS dict。
+    """啟動時從 model_blobs/guest/ 還原 pipeline ensemble 與 AutoGluon 模型到 MODELS dict。
     回傳還原的模型數量。
     """
     d = os.path.join(MODEL_BLOB_DIR, "guest")
     if not os.path.isdir(d):
         return 0
-    # bundle pickle 含 src.ensemble / src.preprocess 等模組，unpickle 前補上 pipeline 路徑
     import sys as _sys
     _pipe_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "train", "pipeline")
     if _pipe_path not in _sys.path:
@@ -1024,23 +1049,39 @@ def restore_guest_models() -> int:
     for fname in sorted(os.listdir(d)):
         if not fname.endswith("_meta.pkl"):
             continue
-        model_id = fname[:-9]  # strip "_meta.pkl"
+        model_id  = fname[:-9]  # strip "_meta.pkl"
         if model_id in MODELS:
             continue
-        est_path  = os.path.join(d, f"{model_id}_estimator.pkl")
         meta_path = os.path.join(d, fname)
-        if not os.path.exists(est_path):
-            continue
-        try:
-            with open(est_path, "rb") as f:
-                estimator = pickle.load(f)
-            with open(meta_path, "rb") as f:
-                meta = pickle.load(f)
-            MODELS[model_id] = {**meta, "estimator": estimator}
-            restored += 1
-            print(f"[guest persist] 還原 {model_id}", flush=True)
-        except Exception as e:
-            print(f"[guest persist] 還原失敗 {model_id}: {e}", flush=True)
+        est_path  = os.path.join(d, f"{model_id}_estimator.pkl")
+        ag_path   = os.path.join(d, f"{model_id}_ag.tar.gz")
+
+        # Pipeline ensemble
+        if os.path.exists(est_path):
+            try:
+                with open(est_path, "rb") as f:
+                    estimator = pickle.load(f)
+                with open(meta_path, "rb") as f:
+                    meta = pickle.load(f)
+                MODELS[model_id] = {**meta, "estimator": estimator}
+                restored += 1
+                print(f"[guest persist] 還原 pipeline {model_id}", flush=True)
+            except Exception as e:
+                print(f"[guest persist] 還原失敗 {model_id}: {e}", flush=True)
+
+        # AutoGluon model
+        elif os.path.exists(ag_path):
+            try:
+                with open(ag_path, "rb") as f:
+                    ag_bytes = f.read()
+                with open(meta_path, "rb") as f:
+                    meta = pickle.load(f)
+                MODELS[model_id] = {**meta, "estimator": ag_bytes}
+                restored += 1
+                print(f"[guest persist] 還原 AutoGluon {model_id}", flush=True)
+            except Exception as e:
+                print(f"[guest persist] 還原失敗 AutoGluon {model_id}: {e}", flush=True)
+
     if restored:
-        print(f"[guest persist] 啟動還原 {restored} 個 guest pipeline model", flush=True)
+        print(f"[guest persist] 啟動還原 {restored} 個 guest model", flush=True)
     return restored

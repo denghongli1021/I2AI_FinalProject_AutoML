@@ -213,17 +213,29 @@ def _run_regression(X_tr, y_tr, X_te, y_te, target_col, source_tag,
     best_pred = stack  # 預設用 stack
     best_ensemble = "stack"
     if test_has_label and y_te is not None:
-        rmse_blend, r2_blend, _ = _reg_scores(y_te, blend)
-        rmse_stack, r2_stack, _ = _reg_scores(y_te, stack)
-        # RMSE 越小越好
-        if rmse_blend < rmse_stack:
-            best_pred, best_ensemble = blend, "blend"
-            rmse, r2, mae = _reg_scores(y_te, blend)
-        else:
-            best_pred, best_ensemble = stack, "stack"
-            rmse, r2, mae = _reg_scores(y_te, stack)
+        try:
+            rmse_blend, r2_blend, _ = _reg_scores(y_te, blend)
+            rmse_stack, r2_stack, _ = _reg_scores(y_te, stack)
+            # RMSE 越小越好；任一值為 NaN 則保守選 stack
+            if (rmse_blend is not None and rmse_stack is not None
+                    and _np.isfinite(rmse_blend) and _np.isfinite(rmse_stack)
+                    and rmse_blend < rmse_stack):
+                best_pred, best_ensemble = blend, "blend"
+                rmse, r2, mae = _reg_scores(y_te, blend)
+            else:
+                best_pred, best_ensemble = stack, "stack"
+                rmse, r2, mae = _reg_scores(y_te, stack)
+        except Exception as _me:
+            print(f"[Pipeline] 回歸指標計算失敗（非致命）: {_me}", flush=True)
 
-    def _r(v): return round(v, 4) if v is not None else None
+    import math as _math
+
+    def _r(v):
+        if v is None:
+            return None
+        if isinstance(v, float) and (_math.isnan(v) or _math.isinf(v)):
+            return None
+        return round(v, 4)
 
     # ── per_model OOF score (給前端 Pipeline 詳細卡列各模型分數) ─────────────
     # OOF 已 inverse-transform 回原 y 尺度,直接拿 y_tr 比即可
@@ -244,6 +256,34 @@ def _run_regression(X_tr, y_tr, X_te, y_te, target_col, source_tag,
         # 前端 perModel 卡顯示 tag 不要 "reg_" 前綴
         clean_tag = tag[4:] if tag.startswith("reg_") else tag
         per_model.append({"tag": clean_tag, "oofScore": _r(_s)})
+
+    # ── OOF fallback：test_has_label=False 或 test 指標計算失敗時用 OOF 最佳 R² 代替 ─
+    score_source = "test"
+    if r2 is None:
+        valid_oof = [p["oofScore"] for p in per_model if p["oofScore"] is not None]
+        if valid_oof:
+            oof_best_r2 = max(valid_oof)
+            # 同時用 OOF R² 換算 RMSE 近似值 (OOF RMSE);若拿不到就留 None
+            try:
+                oof_best_idx = [p["oofScore"] for p in per_model].index(oof_best_r2)
+                oof_arr_best = _np.asarray(result.all_oof[oof_best_idx], dtype=float).ravel()
+                valid_mask = ~_np.isnan(oof_arr_best)
+                if valid_mask.sum() >= 2:
+                    oof_rmse = float(_np.sqrt(mean_squared_error(
+                        y_tr_arr[valid_mask], oof_arr_best[valid_mask])))
+                    oof_mae = float(mean_absolute_error(
+                        y_tr_arr[valid_mask], oof_arr_best[valid_mask]))
+                    rmse = _r(oof_rmse) if _math.isfinite(oof_rmse) else None
+                    mae = _r(oof_mae) if _math.isfinite(oof_mae) else None
+            except Exception:
+                pass
+            r2 = oof_best_r2
+            score_source = "oof"
+            print(f"[Pipeline] 無測試標籤，使用 OOF 最佳 R²={r2:.4f} 作為 bestScore", flush=True)
+        else:
+            score_source = "none"
+    else:
+        score_source = "test"
 
     # ── Ensemble bundle 持久化 (給 batch predict / re-login 用) ──────────
     bundle_path = _dump_ensemble_bundle(
@@ -286,9 +326,10 @@ def _run_regression(X_tr, y_tr, X_te, y_te, target_col, source_tag,
         "scoreStack": _r(r2_stack),
         "rmseBlend": _r(rmse_blend),
         "rmseStack": _r(rmse_stack),
-        # 給前端排行榜用:回歸用 R² 當 testScore (越大越好),沒 label 時 None
+        # 給前端排行榜用:回歸用 R² 當 testScore (越大越好)
+        # test_has_label=False 或指標計算失敗時,r2/rmse/mae 已在上方 OOF fallback 填入
         "bestScore": _r(r2),
-        "scoreSource": "test" if test_has_label else "none",
+        "scoreSource": score_source,
         "nTrain": int(len(y_tr)),
         "nTest": int(X_te.shape[0]),
         "nClasses": 1,  # 給前端 hydration 統一介面 (分類版有這欄)
@@ -550,22 +591,27 @@ def main():
         preds_blend_labels = _decode_preds(result.test_blend)
         preds_stack_labels = _decode_preds(result.test_stack)
 
+        # y_te は encoded integers (0,1,2,...); preds_*_labels は le.inverse_transform 後の original
+        # label (可能是 str)。型別不一致會讓 sklearn metrics 拋 ValueError。
+        # → y_te を同じ label 空間に decode しておく。
+        y_te_labels = le.inverse_transform(y_te) if (test_has_label and y_te is not None) else None
+
         # 計分 — 只在 test 有 label 時才有意義
-        if test_has_label and y_te is not None:
+        if test_has_label and y_te_labels is not None:
             import numpy as _np_s
             _blend_arr = _np_s.asarray(result.test_blend)
             _stack_arr = _np_s.asarray(result.test_stack)
             _is_auc = args.metric == "roc_auc"
-            score_blend = float(calculate_score(y_te, preds_blend_labels, metric=args.metric,
+            score_blend = float(calculate_score(y_te_labels, preds_blend_labels, metric=args.metric,
                                                 y_score=_blend_arr if _is_auc else None))
-            score_stack = float(calculate_score(y_te, preds_stack_labels, metric=args.metric,
+            score_stack = float(calculate_score(y_te_labels, preds_stack_labels, metric=args.metric,
                                                 y_score=_stack_arr if _is_auc else None))
             best_preds_proba = result.test_stack if score_stack >= score_blend else result.test_blend
             best_score = float(max(score_stack, score_blend))
             best_ensemble = "stack" if score_stack >= score_blend else "blend"
             _best_labels = preds_stack_labels if best_ensemble == "stack" else preds_blend_labels
-            acc = float(calculate_score(y_te, _best_labels, metric="accuracy"))
-            f1 = float(calculate_score(y_te, _best_labels, metric="f1"))
+            acc = float(calculate_score(y_te_labels, _best_labels, metric="accuracy"))
+            f1 = float(calculate_score(y_te_labels, _best_labels, metric="f1"))
         else:
             # Kaggle 風:test 沒 label,只回預測,不評分
             score_blend = score_stack = best_score = acc = f1 = None

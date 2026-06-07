@@ -1057,13 +1057,21 @@ async def train_pipeline_stream_endpoint(
                                 predict_input, r["predictions"], r.get("target") or "prediction",
                             )
                             kind = f"submission_{job['source']}"
-                            storage.save_prediction_artifact(
+                            artifact_id = storage.save_prediction_artifact(
                                 training_run_id=pipeline_run_id, kind=kind,
                                 file_name=f"submission_{job['source']}.csv",
                                 content_bytes=submission_bytes, user=user, db=_wdb,
                             )
-                            r["submissionAvailable"] = True
-                            r["submissionKind"] = kind
+                            # artifact_id 為 None 表示 guest（未登入）無法持久化
+                            # → 仍需讓前端能下載，將 CSV bytes 以 base64 回傳
+                            if artifact_id:
+                                r["submissionAvailable"] = True
+                                r["submissionKind"] = kind
+                            else:
+                                import base64 as _b64
+                                r["submissionAvailable"] = True
+                                r["submissionKind"] = kind
+                                r["submissionCsvB64"] = _b64.b64encode(submission_bytes).decode("ascii")
                         except Exception as e:
                             q.put({"type": "log", "level": "warning",
                                    "msg": f"[{label}] submission CSV 產生失敗: {e}"})
@@ -1310,6 +1318,7 @@ async def train_autogluon_stream_endpoint(
 
     def worker():
         nonlocal error_msg
+        _wdb = SessionLocal()
         try:
             for job in jobs:
                 if cancel_token.is_set(): break
@@ -1333,6 +1342,15 @@ async def train_autogluon_stream_endpoint(
                         q.put({"type": "log", "level": "info",
                                "msg": f"[{label}] 持久化 autogluon bundle ({size_mb:.0f}MB) "
                                       f"到{'檔案系統' if size_mb > 50 else 'DB'}..."})
+                        _ag_feature_names = r.get("featureNames") or []
+                        _x_test_df = None
+                        _x_test_sample = r.get("x_test_sample")
+                        if _x_test_sample:
+                            try:
+                                import pandas as _pd
+                                _x_test_df = _pd.DataFrame(_x_test_sample)
+                            except Exception as _dfe:
+                                print(f"[Autogluon] X_test_df 轉換失敗 (非致命): {_dfe}", flush=True)
                         _ens_bundle = {
                             "type": "autogluon_model",
                             "name": f"[{label}] Autogluon ({r.get('bestModel', '?')})",
@@ -1341,10 +1359,10 @@ async def train_autogluon_stream_endpoint(
                             "taskType": r.get("taskType", "classification"),
                             "target": r.get("target"),
                             "targetName": r.get("target"),
-                            "featureNames": [],   # autogluon 內部自己處理
+                            "featureNames": _ag_feature_names,
                             "testTrue": r.get("testTrueDecoded"),
                             "testPred": r.get("testPredDecoded"),
-                            "canPredict": False,   # MVP:autogluon 預測 endpoint 暫未實作
+                            "canPredict": False,
                             "perModel": r.get("perModel", []),
                             "leaderboardRaw": r.get("leaderboardRaw", []),
                             "metrics": {
@@ -1352,6 +1370,7 @@ async def train_autogluon_stream_endpoint(
                                 "testScoreLabel": r.get("metric", "Score").upper(),
                                 "testAccuracy": r.get("accuracy"),
                                 "f1": r.get("f1"),
+                                "auc": r.get("auc"),
                                 "testR2": r.get("r2"),
                                 "testRMSE": r.get("rmse"),
                                 "testMAE": r.get("mae"),
@@ -1362,7 +1381,7 @@ async def train_autogluon_stream_endpoint(
                         }
                         _mid = storage.save_model(
                             bundle=_ens_bundle, estimator=None, scaler=None,
-                            X_test_df=None, user=user, db=db,
+                            X_test_df=_x_test_df, user=user, db=_wdb,
                             preprocessor_id=None, dataset_id=datasetId,
                             training_run_id=run_id,
                             estimator_pkl_bytes=bundle_bytes,
@@ -1376,13 +1395,15 @@ async def train_autogluon_stream_endpoint(
                         import traceback as _tb
                         print(f"[Autogluon] save_model 失敗 (不影響分數): {_me}", flush=True)
                         _tb.print_exc()
-                        try: db.rollback()
+                        try: _wdb.rollback()
                         except Exception: pass
                 r.pop("bundlePath", None)
                 all_results.append(r)
         except Exception as e:
             error_msg = str(e)
         finally:
+            try: _wdb.close()
+            except Exception: pass
             q.put(None)
 
     threading.Thread(target=worker, daemon=True).start()
@@ -1748,6 +1769,39 @@ class _EnsembleSHAPAdapter:
         return _ensemble_replay(self.bundle, np.asarray(X), return_proba=True)
 
 
+class _AutoGluonSHAPAdapter:
+    """AutoGluon TabularPredictor → sklearn-compatible predict/predict_proba。
+    AutoMLVisualizer 使用 PermutationExplainer，只要暴露這兩個介面就能跑 SHAP。
+    """
+    def __init__(self, predictor, task_type: str, feature_names=None):
+        self._predictor = predictor
+        self._task_type = task_type
+        self._is_regression = (task_type == "regression")
+        self._feature_names = list(feature_names) if feature_names else []
+
+    def _to_df(self, X):
+        import pandas as _pd
+        if isinstance(X, _pd.DataFrame):
+            return X
+        cols = self._feature_names if self._feature_names and len(self._feature_names) == (X.shape[1] if hasattr(X, 'shape') else len(X[0])) else None
+        return _pd.DataFrame(X, columns=cols)
+
+    def predict(self, X):
+        import numpy as _np, pandas as _pd2
+        preds = self._predictor.predict(self._to_df(X))
+        if self._is_regression:
+            return preds.values.astype(_np.float64)
+        # 分類：factorize 成整數 float64，避免 object dtype 字串標籤觸發 numba TypingError
+        codes, _ = _pd2.factorize(preds, sort=True)
+        return codes.astype(_np.float64)
+
+    def predict_proba(self, X):
+        if self._is_regression:
+            raise AttributeError("regression 模型沒有 predict_proba")
+        import numpy as _np
+        return self._predictor.predict_proba(self._to_df(X)).values.astype(_np.float64)
+
+
 @app.post("/api/visualize/shap")
 def visualize_shap_endpoint(
     req: ShapRequest,
@@ -1767,26 +1821,60 @@ def visualize_shap_endpoint(
     feature_names = entry.get("featureNames", [])
     bundle_meta = entry.get("bundle") or {}
 
-    # Daniel ensemble → 包 adapter,讓 AutoMLVisualizer 用 Permutation 算 SHAP
-    is_ensemble = bundle_meta.get("type") == "daniel_pipeline_ensemble"
+    is_ensemble  = bundle_meta.get("type") == "daniel_pipeline_ensemble"
+    is_autogluon = bundle_meta.get("type") == "autogluon_model"
 
-    # Item 1C:若 bundle 已預計算 SHAP 持久化,優先直接回(秒級;不用算)
-    # is_ensemble 不是必要條件——即時計算後回存的非 ensemble 模型同樣走快取路徑
+    # 快取優先回傳（預計算 shapPlots）
     if isinstance(bundle_meta.get("shapPlots"), dict) and bundle_meta["shapPlots"]:
-        # 前端傳了 family 就只給該 family,沒傳就回整包
         _sp = bundle_meta["shapPlots"]
-        # 兼容舊請求 (sampleIndex / targetFeature 對預計算版無作用),前端用 family field 切換
         return {
-            "modelId":         req.modelId,
-            "source":          "precomputed",   # 標籤:前端可顯示「持久化」徽章
-            "shapPlots":       _sp,             # {"tabular": {...}, "dl": {...}} 各含 global/waterfall/dependence
+            "modelId":          req.modelId,
+            "source":           "precomputed",
+            "shapPlots":        _sp,
             "bestTabularModel": bundle_meta.get("bestTabularModel"),
-            "bestDLModel":     bundle_meta.get("bestDLModel"),
-            "featureNames":    (_sp.get("tabular") or {}).get("featureNames", []) or
-                               (_sp.get("dl") or {}).get("featureNames", []),
+            "bestDLModel":      bundle_meta.get("bestDLModel"),
+            "featureNames":     (_sp.get("tabular") or {}).get("featureNames", []) or
+                                (_sp.get("dl") or {}).get("featureNames", []),
         }
 
-    if is_ensemble:
+    # AutoGluon：從 tar.gz 還原 predictor，包成 sklearn 相容 adapter
+    _ag_tmp_dir = None
+    if is_autogluon:
+        ag_bundle_bytes = estimator if isinstance(estimator, bytes) else None
+        if not ag_bundle_bytes:
+            _est_status = entry.get("estimatorStatus", "empty")
+            if _est_status == "file_missing":
+                raise HTTPException(status_code=400, detail="AutoGluon bundle 檔案不存在 (model_blobs/ 被清掉?)，請重新訓練")
+            raise HTTPException(status_code=400, detail="AutoGluon bundle 不存在，請重新訓練")
+        if X_test_df is None or len(X_test_df) == 0:
+            raise HTTPException(status_code=400, detail="此模型不含測試集資料（訓練時版本較舊未儲存），請重新訓練後再試")
+
+        import tarfile as _tarfile, tempfile as _tempfile
+        _ag_tmp_dir = _tempfile.mkdtemp(prefix="ag_shap_")
+        try:
+            _tar_path = os.path.join(_ag_tmp_dir, "bundle.tar.gz")
+            with open(_tar_path, "wb") as _tf:
+                _tf.write(ag_bundle_bytes)
+            with _tarfile.open(_tar_path, "r:gz") as _tar:
+                _tar.extractall(_ag_tmp_dir)
+            _predictor_dir = os.path.join(_ag_tmp_dir, "autogluon")
+            try:
+                from autogluon.tabular import TabularPredictor as _TabPredictor
+            except ImportError:
+                raise HTTPException(status_code=500, detail="AutoGluon 未安裝 — SHAP 不可用")
+            _ag_predictor = _TabPredictor.load(_predictor_dir, verbosity=0)
+            task_type = bundle_meta.get("taskType", "classification")
+            if not feature_names:
+                feature_names = list(X_test_df.columns)
+            estimator = _AutoGluonSHAPAdapter(_ag_predictor, task_type, feature_names=feature_names)
+        except HTTPException:
+            raise
+        except Exception as _ae:
+            import shutil as _sh; _sh.rmtree(_ag_tmp_dir, ignore_errors=True)
+            _ag_tmp_dir = None
+            raise HTTPException(status_code=500, detail=f"AutoGluon 載入失敗: {_ae}")
+
+    elif is_ensemble:
         if not (isinstance(estimator, dict) and estimator.get("version") == 1):
             _est_status = entry.get("estimatorStatus", "empty")
             if _est_status == "file_missing":
@@ -1794,12 +1882,7 @@ def visualize_shap_endpoint(
             else:
                 _msg = "ensemble bundle 在 DB 沒有 estimator (舊 placeholder 或 pickle 失敗),SHAP 不可用。請重訓。"
             raise HTTPException(status_code=400, detail=_msg)
-        # ensemble 的 featureNames 用 bundle 內的 raw 特徵名
         feature_names = estimator.get("feature_names_raw", feature_names)
-        # Item 5 防禦性清洗:預處理 source 訓的舊 bundle 可能有 'num_pipeline__SalePrice'
-        # 這種 sklearn ColumnTransformer 前綴。daniel 新版會自動 split('__')[-1],這裡
-        # 補一層保險讓 SHAP 圖顯示乾淨名(如 'SalePrice')。OHE 欄會帶 '_NoRidge' 後綴,
-        # 這部分無解(訓練時就拼起來了),只能再做 mapping(本輪不做)。
         feature_names = [str(n).split("__")[-1] for n in (feature_names or [])]
         estimator = _EnsembleSHAPAdapter(estimator)
 
@@ -1808,28 +1891,59 @@ def visualize_shap_endpoint(
     if X_test_df is None or len(X_test_df) == 0:
         raise HTTPException(status_code=400, detail="測試集不存在,可能是舊版訓練的模型,請重新訓練")
 
-    # 樣本太多會卡 (SHAP 對所有樣本算 explanation),做個上限
     X_sub = X_test_df.head(req.maxSamples)
-
     sample_idx = max(0, min(req.sampleIndex, len(X_sub) - 1))
-    target_feat = req.targetFeature if (req.targetFeature in feature_names) else feature_names[0]
+    target_feat = req.targetFeature if (req.targetFeature in (feature_names or [])) else (feature_names[0] if feature_names else "")
+
+    # AutoGluon：X_sub 可能含 object/category 欄位，shap.Explainer 建 background 時
+    # 做 partition_tree 聚類會對字串做算術 → 'str' - 'str' 報錯。
+    # 解法：factorize 成整數後再傳入 SHAP；Predictor Wrapper 收到 numeric X 後 decode 回原始值。
+    if is_autogluon:
+        import pandas as _pd_enc
+        import numpy as _np_enc
+        X_sub_numeric = X_sub.copy()
+        _cat_decode = {}   # col -> {int_code: original_str}
+        for _col in X_sub_numeric.select_dtypes(include=["object", "category"]).columns:
+            _codes, _uniques = _pd_enc.factorize(X_sub_numeric[_col], sort=True)
+            X_sub_numeric[_col] = _codes.astype(float)
+            _cat_decode[_col] = dict(enumerate(_uniques))
+        if _cat_decode:
+            _ag_inner = estimator
+            _col_names = list(X_sub.columns)
+            _decode_map = _cat_decode
+            class _AutoGluonNumericWrapper:
+                def predict(self, X):
+                    import pandas as _pd_w
+                    if not isinstance(X, _pd_w.DataFrame):
+                        X = _pd_w.DataFrame(X, columns=_col_names)
+                    X = X.copy()
+                    for col, mapping in _decode_map.items():
+                        X[col] = X[col].apply(
+                            lambda v: mapping.get(int(round(float(v))) if str(v) not in ("nan", "") else 0, "")
+                        )
+                    return _ag_inner.predict(X)
+            estimator = _AutoGluonNumericWrapper()
+        # 無論是否有類別欄，始終用純數值版本（防 DB 反序列化後 dtype=object 造成 SHAP Numba 錯誤）
+        X_sub_numeric = X_sub_numeric.apply(_pd_enc.to_numeric, errors='coerce').fillna(0.0)
+        X_sub = X_sub_numeric
 
     try:
         viz = AutoMLVisualizer(estimator, X_sub, output_dir=None)
-        fig_global = viz.generate_beeswarm_plot(return_fig=True)
-        fig_waterfall = viz.generate_waterfall_plot(sample_index=sample_idx, return_fig=True)
+        fig_global     = viz.generate_beeswarm_plot(return_fig=True)
+        fig_waterfall  = viz.generate_waterfall_plot(sample_index=sample_idx, return_fig=True)
         fig_dependence = viz.generate_dependence_plot(target_feature=target_feat, return_fig=True)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"SHAP 計算失敗: {e}")
+    finally:
+        if _ag_tmp_dir:
+            import shutil as _sh; _sh.rmtree(_ag_tmp_dir, ignore_errors=True)
 
-    # plotly fig.to_json() 是字串;JSON 化讓 FastAPI 自己 serialize 一次
     import plotly.io as pio
     def _f(fig):
         return json.loads(pio.to_json(fig))
 
     g, w, d = _f(fig_global), _f(fig_waterfall), _f(fig_dependence)
 
-    # 計算完成後回存 shapPlots，下次開啟走快取秒速載入（非致命，失敗不影響回傳）
     _shap_cache = {
         "tabular": {
             "global": g, "waterfall": w, "dependence": d,
@@ -1840,14 +1954,14 @@ def visualize_shap_endpoint(
     storage.patch_model_shap_plots(req.modelId, _shap_cache, user, db)
 
     return {
-        "modelId": req.modelId,
-        "sampleIndex": sample_idx,
+        "modelId":      req.modelId,
+        "sampleIndex":  sample_idx,
         "targetFeature": target_feat,
-        "sampleCount": int(len(X_sub)),
+        "sampleCount":  int(len(X_sub)),
         "featureNames": feature_names,
-        "global": g,
-        "waterfall": w,
-        "dependence": d,
+        "global":       g,
+        "waterfall":    w,
+        "dependence":   d,
     }
 
 
@@ -2152,8 +2266,18 @@ def _compute_shap_for_ensemble_bundle(bundle: dict, per_model: list,
             else:
                 X_fb = X_arr
 
-            # feature names 對齊 transformed 後的維度(FeatureBuilder 會展開/壓縮)
-            tx_cols = cols if X_fb.shape[1] == len(cols) else [f"f{i}" for i in range(X_fb.shape[1])]
+            # feature names 對齊 transformed 後的維度
+            # 優先用 FeatureBuilder.get_feature_names_out()；fallback 用 f0/f1/...
+            if fb is not None and hasattr(fb, "get_feature_names_out"):
+                try:
+                    tx_cols = fb.get_feature_names_out(cols)
+                    # 維度不符時（舊 bundle 或計算誤差）退回 fi 命名
+                    if len(tx_cols) != X_fb.shape[1]:
+                        tx_cols = [f"f{i}" for i in range(X_fb.shape[1])]
+                except Exception:
+                    tx_cols = [f"f{i}" for i in range(X_fb.shape[1])]
+            else:
+                tx_cols = cols if X_fb.shape[1] == len(cols) else [f"f{i}" for i in range(X_fb.shape[1])]
             X_fb_df = pd.DataFrame(X_fb, columns=tx_cols)
 
             if family == "tabular":
@@ -2729,6 +2853,55 @@ async def predict_batch_endpoint(
     feature_names   = entry["featureNames"]
     preprocessor_id = entry.get("preprocessorId")
     bundle_meta     = entry.get("bundle") or {}
+
+    # AutoGluon model：從 tar.gz 還原 predictor，直接呼叫 predict
+    if bundle_meta.get("type") == "autogluon_model":
+        import tarfile as _tf2, tempfile as _tmp2, shutil as _sh2
+        ag_bytes = estimator if isinstance(estimator, bytes) else None
+        if not ag_bytes:
+            _est_st = entry.get("estimatorStatus", "empty")
+            raise HTTPException(400,
+                "AutoGluon bundle 不存在（請重新訓練）" if _est_st != "file_missing"
+                else "AutoGluon bundle 檔案已遺失（請重新訓練）")
+        _ag_tmp = _tmp2.mkdtemp(prefix="ag_bp_")
+        try:
+            import pandas as _pd_ag
+            raw_bytes = await file.read()
+            feat_df_ag = _pd_ag.read_csv(io.BytesIO(raw_bytes))
+            _tar_p = os.path.join(_ag_tmp, "bundle.tar.gz")
+            with open(_tar_p, "wb") as _f:
+                _f.write(ag_bytes)
+            with _tf2.open(_tar_p, "r:gz") as _tar:
+                _tar.extractall(_ag_tmp)
+            try:
+                from autogluon.tabular import TabularPredictor as _TabPred
+            except ImportError:
+                raise HTTPException(500, "AutoGluon 未安裝")
+            _ag_pred = _TabPred.load(os.path.join(_ag_tmp, "autogluon"), verbosity=0)
+            _target = bundle_meta.get("target", "")
+            X_ag = feat_df_ag.drop(columns=[_target], errors="ignore") if _target else feat_df_ag
+            preds_ag = _ag_pred.predict(X_ag).values
+            # 組 output
+            if sampleFile is not None:
+                _sr = await sampleFile.read()
+                _sub = _pd_ag.read_csv(io.BytesIO(_sr))
+                if len(_sub.columns) >= 2:
+                    _id_c, _pr_c = _sub.columns[0], _sub.columns[1]
+                    _id_vals = feat_df_ag[_id_c].values if _id_c in feat_df_ag.columns else range(len(preds_ag))
+                    out_ag = _pd_ag.DataFrame({_id_c: _id_vals, _pr_c: preds_ag})
+                else:
+                    out_ag = _pd_ag.DataFrame({"id": range(len(preds_ag)), "prediction": preds_ag})
+            else:
+                out_ag = _pd_ag.DataFrame({"id": range(len(preds_ag)), "prediction": preds_ag})
+            csv_ag = out_ag.to_csv(index=False).encode("utf-8-sig")
+            return Response(content=csv_ag, media_type="text/csv; charset=utf-8",
+                            headers={"Content-Disposition": 'attachment; filename="autogluon_predictions.csv"'})
+        except HTTPException:
+            raise
+        except Exception as _age:
+            raise HTTPException(500, f"AutoGluon 批次預測失敗: {_age}")
+        finally:
+            _sh2.rmtree(_ag_tmp, ignore_errors=True)
 
     # Daniel ensemble:bundle.type 是真相 (estimator 可能因 pickle 失敗沒存進 DB)
     if bundle_meta.get("type") == "daniel_pipeline_ensemble":

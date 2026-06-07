@@ -36,30 +36,38 @@ const ApiClient = {
     }
   },
 
+  // ---- 共用：取得 auth-only headers (不含 Content-Type，供 multipart/GET 用) ----
+  _authHeaders() {
+    const h = {};
+    if (typeof AuthClient !== 'undefined' && AuthClient.token)
+      h['Authorization'] = `Bearer ${AuthClient.token}`;
+    else if (this.token)
+      h['Authorization'] = `Bearer ${this.token}`;
+    return h;
+  },
+
   // ---- 0. DATASET LIST / GET — 登入後 (或 guest) 把後端記憶體裡的 datasets 還原回前端 ----
   async datasetList() {
-    const r = await fetch(`${this.baseUrl}/api/dataset/list`, { method: 'GET' });
+    const r = await fetch(`${this.baseUrl}/api/dataset/list`, { method: 'GET', headers: this._authHeaders() });
     if (!r.ok) throw new Error(`datasetList 失敗 (${r.status})`);
     const j = await r.json();
     return j.datasets || [];
   },
 
   async datasetGet(id) {
-    const r = await fetch(`${this.baseUrl}/api/dataset/${encodeURIComponent(id)}`, { method: 'GET' });
+    const r = await fetch(`${this.baseUrl}/api/dataset/${encodeURIComponent(id)}`, { method: 'GET', headers: this._authHeaders() });
     if (!r.ok) throw new Error(`datasetGet 失敗 (${r.status})`);
     return r.json();
   },
 
   async datasetDelete(id) {
-    const r = await fetch(`${this.baseUrl}/api/dataset/${encodeURIComponent(id)}`, { method: 'DELETE' });
+    const r = await fetch(`${this.baseUrl}/api/dataset/${encodeURIComponent(id)}`, { method: 'DELETE', headers: this._authHeaders() });
     if (!r.ok) throw new Error(`datasetDelete 失敗 (${r.status})`);
     return r.json();
   },
 
   async modelDelete(modelId) {
-    const headers = {};
-    if (this.token) headers['Authorization'] = `Bearer ${this.token}`;
-    const r = await fetch(`${this.baseUrl}/api/models/${encodeURIComponent(modelId)}`, { method: 'DELETE', headers });
+    const r = await fetch(`${this.baseUrl}/api/models/${encodeURIComponent(modelId)}`, { method: 'DELETE', headers: this._authHeaders() });
     if (!r.ok) throw new Error(`modelDelete 失敗 (${r.status}): ${await r.text()}`);
     return r.json();
   },
@@ -68,7 +76,7 @@ const ApiClient = {
   async preprocess(file) {
     const fd = new FormData();
     fd.append('file', file);
-    const r = await fetch(`${this.baseUrl}/api/preprocess`, { method: 'POST', body: fd });
+    const r = await fetch(`${this.baseUrl}/api/preprocess`, { method: 'POST', body: fd, headers: this._authHeaders() });
     if (!r.ok) throw new Error(`preprocess 失敗 (${r.status}): ${await r.text()}`);
     return r.json();
   },
@@ -77,7 +85,7 @@ const ApiClient = {
   async preprocessAudit(payload) {
     const r = await fetch(`${this.baseUrl}/api/preprocess/audit`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { ...this._authHeaders(), 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
     });
     if (!r.ok) throw new Error(`audit 失敗 (${r.status}): ${await r.text()}`);
@@ -99,6 +107,7 @@ const ApiClient = {
     const r = await fetch(`${this.baseUrl}/api/preprocess/transform`, {
       method: 'POST',
       body: fd,   // 不要設 Content-Type, fetch 會自動加 multipart boundary
+      headers: this._authHeaders(),
     });
     if (!r.ok) throw new Error(`transform 失敗 (${r.status}): ${await r.text()}`);
     return r.json();
@@ -107,7 +116,7 @@ const ApiClient = {
   async preprocessInference(payload) {
     const r = await fetch(`${this.baseUrl}/api/preprocess/inference`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { ...this._authHeaders(), 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
     });
     if (!r.ok) throw new Error(`inference 失敗 (${r.status}): ${await r.text()}`);
@@ -116,7 +125,7 @@ const ApiClient = {
 
   // 列出後端所有可用的 preprocessor
   async preprocessList() {
-    const r = await fetch(`${this.baseUrl}/api/preprocess/list`, { method: 'GET' });
+    const r = await fetch(`${this.baseUrl}/api/preprocess/list`, { method: 'GET', headers: this._authHeaders() });
     if (!r.ok) throw new Error(`preprocess list 失敗 (${r.status}): ${await r.text()}`);
     return r.json();
   },

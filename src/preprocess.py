@@ -253,6 +253,87 @@ class FeatureBuilder:
         return self.fit(X).transform(X)
 
     # ------------------------------------------------------------------
+    def get_feature_names_out(self, input_feature_names: list) -> list:
+        """transform() 輸出欄對應的名稱，供 SHAP 等視覺化工具顯示。"""
+        n = list(input_feature_names)
+        fs = self.feature_set
+        if fs == "raw":
+            return n
+        if fs == "signal":
+            return n + [f"{x}_norm" for x in n]
+        if fs in ("pca64", "svd64"):
+            prefix = "svd" if fs == "svd64" else "pca"
+            nc = getattr(getattr(self, "reducer_", None), "n_components_", len(n))
+            return [f"{prefix}{i}" for i in range(nc)]
+        if fs == "kpca32":
+            nc = (getattr(self.reducer_, "n_components", 32)
+                  if getattr(self, "reducer_", None) is not None else min(32, len(n)))
+            return [f"kpc{i}" for i in range(nc)]
+        if fs == "poly2":
+            if hasattr(self, "_poly2_idx"):
+                n_top = len(self._poly2_idx)
+                inter = [f"{n[self._poly2_idx[i]]}×{n[self._poly2_idx[j]]}"
+                         for i in range(n_top) for j in range(i + 1, n_top)]
+            else:
+                inter = []
+            return n + inter
+
+        # stat 統計特徵名稱
+        stat_g = [
+            "stat_mean", "stat_std", "stat_p5", "stat_p25", "stat_p75", "stat_p95",
+            "stat_min", "stat_max", "stat_skew", "stat_kurt", "stat_median",
+            "stat_absmean", "stat_absmax", "stat_pos_frac", "stat_range", "stat_var",
+            "stat_energy", "stat_rms", "stat_mad", "stat_zcr",
+        ]
+        stat_l = []
+        for j in range(self.n_segments):
+            stat_l += [f"seg{j}_mean", f"seg{j}_std", f"seg{j}_max", f"seg{j}_min"]
+        stat_names = stat_g + stat_l
+
+        km_names = []
+        for km in getattr(self, "kmeans_", []):
+            k = km.n_clusters
+            km_names += [f"km{k}_c{j}" for j in range(k)]
+
+        if fs == "raw_stat":
+            return n + stat_names + km_names
+
+        # FFT 名稱（依 in_features_ 推算維度）
+        n_in = getattr(self, "in_features_", len(n))
+        n_fft = n_in // 2 + 1
+        n_bands = min(8, n_fft)
+        top_k = min(20, n_fft)
+        fft_names = (["fft_mean", "fft_std", "fft_max", "fft_argmax"]
+                     + [f"fft_band{i}" for i in range(n_bands)]
+                     + ["fft_centroid", "fft_spread", "fft_rolloff", "fft_entropy"]
+                     + [f"fft_top{i}" for i in range(top_k)])
+
+        if fs == "raw_stat_fft":
+            return n + stat_names + fft_names + km_names
+
+        if fs == "ts_tabular":
+            ts_w = ([f"{x}_diff" for x in n] + [f"{x}_lag1" for x in n]
+                    + [f"{x}_lag2" for x in n]
+                    + [f"{x}_rmean3" for x in n] + [f"{x}_rstd3" for x in n]
+                    + [f"{x}_rmean5" for x in n] + [f"{x}_rstd5" for x in n]
+                    + [f"{x}_rmax3" for x in n] + [f"{x}_rmin3" for x in n]
+                    + [f"{x}_rmax5" for x in n] + [f"{x}_rmin5" for x in n]
+                    + [f"{x}_ema3" for x in n]  + [f"{x}_ema5" for x in n])
+            return n + ts_w + stat_names
+        if fs == "ts_tabular_fft":
+            ts_w = ([f"{x}_diff" for x in n] + [f"{x}_lag1" for x in n]
+                    + [f"{x}_lag2" for x in n]
+                    + [f"{x}_rmean3" for x in n] + [f"{x}_rstd3" for x in n]
+                    + [f"{x}_rmean5" for x in n] + [f"{x}_rstd5" for x in n]
+                    + [f"{x}_rmax3" for x in n] + [f"{x}_rmin3" for x in n]
+                    + [f"{x}_rmax5" for x in n] + [f"{x}_rmin5" for x in n]
+                    + [f"{x}_ema3" for x in n]  + [f"{x}_ema5" for x in n])
+            return n + ts_w + fft_names + stat_names
+
+        # fallback
+        return [f"f{i}" for i in range(getattr(self, "in_features_", len(n)))]
+
+    # ------------------------------------------------------------------
     def _stat_features(self, X: np.ndarray) -> np.ndarray:
         """全域統計 + n_segments*2 維局部統計。"""
         zcr = ((X[:, :-1] * X[:, 1:]) < 0).sum(axis=1) / max(1, X.shape[1])

@@ -26,10 +26,37 @@ short_description: End-to-end AutoML platform — tabular + time series, HPO/NAS
 | **HPO** | Optuna TPE；Scout 快速篩選 → Full HPO（Tabular）；2-fold 評分（DL） |
 | **NAS** | MLP 共享權重超網路（表格）；TSNet 4 算子搜尋（時序） |
 | **Ensemble** | Nelder-Mead 加權融合 + Meta-Learner Stacking（LGBM/Ridge） |
+| **前處理** | 雙軌（Tree / DL）+ 對抗驗證自動剔除漂移特徵 |
 | **可解釋性** | SHAP TreeExplainer（樹模型）、PermutationExplainer（DL/Ensemble） |
 | **對照組** | AutoGluon baseline（分類/回歸/時序） |
 | **Auth** | Email 密碼、Google OAuth、GitHub OAuth；訪客模式（無帳號可用） |
-| **DB** | Supabase Postgres（線上）/ SQLite fallback（本地） |
+| **DB** | Supabase Postgres（線上）/ SQLite WAL fallback（本地） |
+
+---
+
+## 實驗結果
+
+### 時序分類（vs AutoGluon Baseline）
+
+| 資料集 | Pipeline F1 | Baseline F1 | Δ |
+|--------|-------------|-------------|---|
+| CLS_ACSF1 | 0.7947 | 0.7667 | +0.028 |
+| CLS_Adiac | 0.7336 | 0.6785 | +0.055 |
+| CLS_AllGestureWiimoteX | 0.5335 | 0.4439 | +0.090 |
+| CLS_AllGestureWiimoteY | 0.6426 | 0.5351 | +0.108 |
+| CLS_AllGestureWiimoteZ | 0.5659 | 0.4020 | +0.164 |
+| **平均** | **0.610** | **0.565** | **+8.0%** |
+
+### 時序回歸（R²，vs AutoGluon Baseline）
+
+| 資料集 | Pipeline R² | Baseline R² | Δ |
+|--------|-------------|-------------|---|
+| AcousticContaminationMadrid | 0.677 | 0.302 | +0.375 |
+| AluminiumConcentration | 0.758 | 0.789 | −0.031 |
+| AppliancesEnergy | −0.017 | −0.046 | +0.029 |
+| AustraliaRainfall | 0.128 | 0.120 | +0.008 |
+
+Pipeline 在 4 個資料集中勝出 3 個；訓練時間為 baseline 的 10–40 倍，反映完整 HPO/NAS/Ensemble 搜尋的運算成本。
 
 ---
 
@@ -40,13 +67,13 @@ short_description: End-to-end AutoML platform — tabular + time series, HPO/NAS
     │  REST / SSE
     ▼
 FastAPI 後端 (localhost:8000)
-    ├── /api/preprocess   → 資料審計 + 特徵工程
-    ├── /api/train        → sklearn 多模型訓練
+    ├── /api/preprocess          → 資料審計 + 雙軌特徵工程 + 對抗驗證
+    ├── /api/train               → sklearn 多模型訓練
     ├── /api/train/pipeline/stream  → Daniel Pipeline（HPO/NAS/Ensemble，SSE 串流）
     ├── /api/train/autogluon/stream → AutoGluon baseline（SSE 串流）
-    ├── /api/visualize/shap         → SHAP 視覺化
-    ├── /api/predict/batch/stream   → 批次推論
-    └── /api/auth/**                → 登入/OAuth
+    ├── /api/visualize/shap      → SHAP 可解釋性視覺化
+    ├── /api/predict/batch/stream → 批次推論
+    └── /api/auth/**             → 登入/OAuth
 ```
 
 ### Pipeline 執行流程
@@ -54,18 +81,22 @@ FastAPI 後端 (localhost:8000)
 ```
 原始 CSV
   │
-  ├─[前處理] robust_clean + FeatureBuilder（10 種特徵集）
+  ├─[前處理] RobustDataCleaner + AutoRouter 雙軌分流
+  │           Tree 軌（OrdinalEncoder，上限 800 維）
+  │           DL 軌（StandardScaler + OHE，上限 300 維）
+  │           + 對抗驗證自動剔除 Train/Test 漂移特徵
   │
-  ├─[2a] Tabular Scout HPO — 快速 3-Fold 篩除弱模型
-  ├─[2b] Tabular Full HPO  — Optuna TPE 5-Fold CV
+  ├─[2a] Tabular Scout HPO — 快速 3-Fold 篩除弱模型，鎖定最佳特徵集
+  ├─[2b] Tabular Full HPO  — Optuna TPE 5-Fold CV，依分數比例分配 trial
   │
-  ├─[3]  NAS — MLPNASSearcher（表格）/ TSNASSearcher（時序）
+  ├─[3]  NAS — One-Shot Supernet + 遺傳演化搜尋
+  │            表格：MLPNASSearcher；時序：TSNASSearcher（4 算子）
   ├─[4]  MLP / TSNet Train HPO
   ├─[5]  CNN1D / TCN HPO
-  ├─[6]  Transformer / PatchTST HPO（AMP 混合精度）
+  ├─[6]  Transformer / PatchTST HPO（AMP 混合精度 1.5× 加速）
   │
-  ├─[7]  5-Fold CV → OOF + Test 預測（artifacts/ 快取）
-  ├─[8]  Ensemble A：Nelder-Mead 加權融合
+  ├─[7]  5-Fold CV → OOF + Test 預測（artifacts/ .npy 快取）
+  ├─[8]  Ensemble A：Nelder-Mead 加權融合（log-space Softmax 無約束優化）
   └─[9]  Ensemble B：Meta-Learner Stacking → 最終預測
 ```
 
@@ -75,27 +106,36 @@ FastAPI 後端 (localhost:8000)
 
 ```
 .
-├── index.html               # 前端主頁（Tailwind 預編譯）
-├── css/tailwind.css         # Tailwind 編譯產物
-├── js/                      # 前端 JS（app / api / auth / charts / ml-engine）
+├── index.html               # 前端主頁（Vanilla JS SPA，Glassmorphism UI）
+├── js/                      # 前端 JS（app / api / auth / charts / ml-engine / data-engine）
+├── css/style.css            # 客製化樣式（暗黑模式、玻璃擬物化、動畫）
 ├── api/
-│   ├── main.py              # FastAPI 入口（所有路由）
+│   ├── main.py              # FastAPI 入口（所有路由 + SSE 串流管理）
 │   ├── bootstrap.py         # 環境初始化（dotenv / UTF-8 console）
 │   ├── requirements.txt     # Python 依賴
-│   ├── storage.py           # 統一 storage（guest in-memory / authed DB）
-│   ├── auth/                # 登入 / OAuth / DB schema
-│   ├── preprocess/          # 資料審計 + 特徵工程
-│   ├── train/               # sklearn 訓練 + Daniel Pipeline wrapper + AutoGluon
-│   │   └── pipeline/        # Pipeline 引擎（hpo / nas / train / ensemble / models）
-│   └── visualize/           # SHAP + Plotly 視覺化
-├── src/                     # 離線 Pipeline 引擎（pipeline.py / pipeline_time.py）
+│   ├── storage.py           # 統一 storage（guest in-memory / authed SQLite/PG）
+│   ├── auth/                # JWT / OAuth / SQLAlchemy DB schema（WAL 模式）
+│   ├── preprocess/          # 資料審計 + 對抗驗證 + 特徵工程
+│   ├── train/               # sklearn 訓練 + Daniel Pipeline + AutoGluon
+│   └── visualize/           # SHAP + Plotly 視覺化（PNG 輸出）
+├── src/                     # 離線 Pipeline 引擎
+│   ├── pipeline.py          # 表格 AutoML 引擎（HPO/NAS/CV/Ensemble）
+│   ├── pipeline_time.py     # 時序 AutoML 引擎
+│   ├── hpo.py               # TabularHPO + DLHPO
+│   ├── nas.py               # MLPNASSearcher / TSNASSearcher
+│   ├── train.py             # run_cv（AMP 混合精度 + Mixup）
+│   ├── ensemble.py          # NelderMeadBlender + MetaLearnerStacker
+│   └── models/              # MLP / CNN1D / TCN / SignalTransformer / PatchTST
+├── preprocessing/           # 全域雙軌前處理模組
+│   ├── interface.py         # preprocess_for_training / preprocess_for_inference
+│   ├── core/                # AutoRouter + PipelineAssembler + TSDataProcessor
+│   └── utils/               # 對抗驗證 / 記憶體優化 / 資料健康診斷
+├── visualization/           # SHAP 可解釋性（TreeExplainer / PermutationExplainer）
 ├── run_pipeline.py          # 離線批次入口（表格分類 + 回歸）
 ├── run_pipeline_time.py     # 離線批次入口（時序分類 + 回歸）
 ├── run_baseline.py          # AutoGluon 對照組
 ├── scripts/                 # 資料集下載（OpenML / UCR）
-├── openml_cc18_data/        # 表格分類資料集
-├── openml_regression_data/  # 表格回歸資料集
-└── ucr_ts_80_new(時序資料)/ # UCR 時序資料集
+└── combined_results.csv     # Pipeline vs Baseline 批次評估結果
 ```
 
 ---
@@ -105,7 +145,6 @@ FastAPI 後端 (localhost:8000)
 ### 1. 環境
 
 ```powershell
-# 使用 Anaconda 環境 ml_platform
 conda activate ml_platform
 pip install -r api/requirements.txt
 ```
@@ -113,59 +152,21 @@ pip install -r api/requirements.txt
 ### 2. 啟動後端
 
 ```powershell
-# 終端 1
-python -m uvicorn api.main:app --reload --port 8000
+# 終端 1（不加 --reload 可避免 reloader 子行程問題）
+C:\Users\Danie\.conda\envs\ml_platform\python.exe -m uvicorn api.main:app --port 8000
 ```
 
 ### 3. 啟動前端
 
 ```powershell
 # 終端 2
-python -m http.server 5500
+C:\Users\Danie\.conda\envs\ml_platform\python.exe -m http.server 5500
 ```
 
 ### 4. 開啟瀏覽器
 
 ```
 http://localhost:5500
-```
-
-> **Tailwind CSS**：若修改 `index.html` 的 class，需重新編譯：
-> ```powershell
-> .\tailwindcss3.exe -i css/tailwind-input.css -o css/tailwind.css --minify --config tailwind.config.js
-> ```
-
----
-
-## 線上版本
-
-| 服務 | URL |
-|------|-----|
-| 前端（GitHub Pages） | https://denghongli1021.github.io/I2AI_FinalProject_AutoML/ |
-| 後端（HuggingFace Spaces） | https://i2ai-automl-api.onrender.com |
-| API 文件（Swagger） | https://i2ai-automl-api.onrender.com/docs |
-
----
-
-## 環境變數（`.env`，選填）
-
-```env
-JWT_SECRET=<隨機字串>                  # Email 登入必填
-GOOGLE_OAUTH_CLIENT_ID=...
-GOOGLE_OAUTH_CLIENT_SECRET=...
-GITHUB_OAUTH_CLIENT_ID=...
-GITHUB_OAUTH_CLIENT_SECRET=...
-DATABASE_URL=postgresql://...          # Supabase；不填則 fallback SQLite
-FRONTEND_URL=http://localhost:5500
-OAUTH_REDIRECT_BASE=http://localhost:8000
-```
-
-不設定任何環境變數也能執行，訪客模式下所有功能可用，資料存於 in-memory（重啟清空）。
-
-本地開發想跳過 Supabase 延遲：
-
-```powershell
-$env:DB_LOCAL='1'; python -m uvicorn api.main:app --reload --port 8000
 ```
 
 ---
@@ -191,17 +192,30 @@ python merge_final_results.py
 
 ---
 
-## 開發工具
+## 環境變數（`.env`，選填）
 
-```powershell
-# 清空 DB 測試資料（保留帳號）
-python tools/wipe_data.py --all --dry-run   # 預覽
-python tools/wipe_data.py --all             # 執行
-
-# API 文件（本地）
-# http://127.0.0.1:8000/docs
-# http://127.0.0.1:8000/redoc
+```env
+JWT_SECRET=<隨機字串>
+GOOGLE_OAUTH_CLIENT_ID=...
+GOOGLE_OAUTH_CLIENT_SECRET=...
+GITHUB_OAUTH_CLIENT_ID=...
+GITHUB_OAUTH_CLIENT_SECRET=...
+DATABASE_URL=postgresql://...   # Supabase；不填則 fallback SQLite（WAL 模式）
+FRONTEND_URL=http://localhost:5500
+OAUTH_REDIRECT_BASE=http://localhost:8000
 ```
+
+不設定任何環境變數也能執行，訪客模式下所有功能可用，資料存於 in-memory（重啟清空）。
+
+---
+
+## 線上版本
+
+| 服務 | URL |
+|------|-----|
+| 前端（GitHub Pages） | https://denghongli1021.github.io/I2AI_FinalProject_AutoML/ |
+| 後端（Render） | https://i2ai-automl-api.onrender.com |
+| API 文件（Swagger） | https://i2ai-automl-api.onrender.com/docs |
 
 ---
 

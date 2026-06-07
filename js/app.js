@@ -405,8 +405,23 @@ async function hydrateUserHistoryFromDb() {
     for (const m of models) {
       const rid = m.trainingRunId;
       if (!rid) continue;
+      const _bndl = m.bundle || {};
+      const _mm = _bndl.metrics || {};
+      // 回歸模型：若 testR2/testRMSE/testMAE 為 null (test 沒 label 或計算失敗)，
+      // 從 perModel OOF 分數補回最佳 R²（已在後端 scoreSource='oof' 路徑填入，
+      // 此處作為前端雙重防護）
+      if (_bndl.taskType === 'regression') {
+        const _oofScores = (_bndl.perModel || [])
+          .map(p => p.oofScore)
+          .filter(s => typeof s === 'number' && isFinite(s));
+        if (_mm.testR2 == null && _oofScores.length > 0) {
+          _mm.testR2 = Math.max(..._oofScores);
+          _mm._r2IsOof = true;  // 標記此值來自 OOF，供排行榜顯示提示
+        }
+      }
       (modelsByRun[rid] = modelsByRun[rid] || []).push({
-        ...m.bundle,
+        ..._bndl,
+        metrics: _mm,
         id: m.id,
         hyperparameters: m.hyperparameters || {},
         preprocessorId: m.preprocessorId,
@@ -4174,9 +4189,11 @@ function renderRealExperimentsPage() {
       if (sources.includes('preprocessed')) {
         alert('Autogluon 內建自家 preprocessing,請只勾「原始資料」。'); return;
       }
+      const _agMetricRaw = document.getElementById('exp-autogluon-metric')?.value || 'auto';
       const agOptions = {
         preset: document.getElementById('exp-autogluon-preset')?.value || 'medium_quality',
         timeLimit: parseFloat(document.getElementById('exp-autogluon-time-limit')?.value) || 0,
+        metric: _agMetricRaw === 'auto' ? null : _agMetricRaw,
         target: targetSel.value,
         sources: sources,
       };
@@ -4496,7 +4513,13 @@ async function startAutogluonExperimentTraining(ds, targetCol, options) {
     const resp = await fetch(`${ApiClient.baseUrl}/api/train/autogluon/stream`, {
       method: 'POST', body: form, headers, signal: _trainingAbort.signal,
     });
-    if (!resp.ok) throw new Error(`HTTP ${resp.status} ${resp.statusText}`);
+    if (!resp.ok) {
+      let detail = '';
+      try { const j = await resp.clone().json(); detail = j.detail || ''; } catch (_) {}
+      if (resp.status === 404) throw new Error(`資料集不存在（可能是重新登入後需要重新上傳）。請返回資料集頁面重新上傳 CSV。${detail ? ` (${detail})` : ''}`);
+      if (resp.status === 401) throw new Error('登入已過期，請重新登入後再試。');
+      throw new Error(`HTTP ${resp.status} ${resp.statusText}${detail ? `: ${detail}` : ''}`);
+    }
 
     const reader = resp.body.getReader();
     const decoder = new TextDecoder('utf-8');
@@ -4523,6 +4546,8 @@ async function startAutogluonExperimentTraining(ds, targetCol, options) {
           } else if (ev.type === 'done') {
             finalResults = ev.results || [];
             runId = ev.runId || null;
+            document.getElementById('exp-progress-bar').style.width = '100%';
+            document.getElementById('exp-progress-step').textContent = '訓練完成';
           } else if (ev.type === 'error') {
             errorMsg = ev.message;
           }
@@ -4544,25 +4569,28 @@ async function startAutogluonExperimentTraining(ds, targetCol, options) {
     const models = okResults.map((r, i) => {
       const isReg = r.taskType === 'regression';
       const label = r.dataSourceLabel || (r.dataSource === 'preprocessed' ? '預處理' : '原始');
+      const _fi = r.featureImportance || [];
       return {
-        id: `autogluon_${i}_${Date.now()}`,
+        // r.bestModelId 是後端 save_model 回傳的真實 DB id；優先使用，避免批次預測 404。
+        // 若 DB save 失敗（例外被吞掉）才 fallback 到 client-side 假 id。
+        id: r.bestModelId || `autogluon_${i}_${Date.now()}`,
         name: `[${label}] Autogluon (${r.bestModel || '?'})`,
         type: 'autogluon_model',
         taskType: r.taskType || 'classification',
         targetName: r.target,
-        featureNames: [],
+        featureNames: _fi.length ? _fi.map(f => f.name) : (r.featureNames || []),
         metrics: isReg ? {
           taskType: 'regression',
           testR2: r.r2 ?? 0, testRMSE: r.rmse ?? 0, testMAE: r.mae ?? 0,
           testScore: r.bestScore ?? r.r2 ?? 0,
-          testScoreLabel: 'R²',
+          testScoreLabel: r.metric || 'R²',
         } : {
           taskType: 'classification',
-          testAccuracy: r.accuracy ?? 0, f1: r.f1 ?? 0,
+          testAccuracy: r.accuracy ?? 0, f1: r.f1 ?? 0, auc: r.auc ?? null,
           testScore: r.bestScore ?? 0,
-          testScoreLabel: (r.metric || 'F1').toUpperCase(),
+          testScoreLabel: r.metric || 'F1',
         },
-        featureImportance: [],
+        featureImportance: _fi.map(f => f.importance),
         testTrue: r.testTrueDecoded || [],
         testPred: r.testPredDecoded || [],
         trainTime: (r.elapsedSec || 0) * 1000,
@@ -4635,6 +4663,7 @@ async function startAutogluonExperimentTraining(ds, targetCol, options) {
     setGlobalStatus('error', `Autogluon 失敗: ${err.message}`);
     notify('Autogluon 失敗', err.message || String(err), 'error');
   } finally {
+    _trainingTimerStop();
     _trainingAbort = null;
   }
 }
@@ -4680,7 +4709,10 @@ async function startDanielExperimentTraining(ds, targetCol, options) {
     if (options.preprocessorId) form.append('preprocessorId', options.preprocessorId);
     form.append('target', options.target);
     form.append('timeSeries', options.timeSeries ? 'true' : 'false');
-    form.append('metric', options.metric);
+    const _regMetrics = ['rmse', 'r2', 'mae'];
+    const _selMetric = options.metric || 'f1';
+    form.append('metric',    _regMetrics.includes(_selMetric) ? 'f1'  : _selMetric);
+    form.append('regMetric', _regMetrics.includes(_selMetric) ? _selMetric : 'rmse');
     form.append('fast', options.fast ? 'true' : 'false');
     form.append('skipDl', options.skipDl ? 'true' : 'false');
     form.append('noNas', options.noNas ? 'true' : 'false');
@@ -4702,7 +4734,13 @@ async function startDanielExperimentTraining(ds, targetCol, options) {
     const resp = await fetch(`${ApiClient.baseUrl}/api/train/pipeline/stream`, {
       method: 'POST', body: form, headers, signal: _trainingAbort.signal,
     });
-    if (!resp.ok) throw new Error(`HTTP ${resp.status} ${resp.statusText}`);
+    if (!resp.ok) {
+      let detail = '';
+      try { const j = await resp.clone().json(); detail = j.detail || ''; } catch (_) {}
+      if (resp.status === 404) throw new Error(`資料集不存在（可能是重新登入後需要重新上傳）。請返回資料集頁面重新上傳 CSV。${detail ? ` (${detail})` : ''}`);
+      if (resp.status === 401) throw new Error('登入已過期，請重新登入後再試。');
+      throw new Error(`HTTP ${resp.status} ${resp.statusText}${detail ? `: ${detail}` : ''}`);
+    }
 
     // SSE 解析
     const reader = resp.body.getReader();
@@ -5036,13 +5074,32 @@ function insertPipelineSubmissionCard(results, runId) {
 
   const withSubmission = (results || []).filter(r => r.submissionAvailable && r.submissionKind);
   if (withSubmission.length === 0 || !runId) return;
-  // 不確定 ApiClient 是否啟用
   const apiBase = (typeof ApiClient !== 'undefined' && ApiClient.baseUrl) ? ApiClient.baseUrl : '';
   if (!apiBase) return;
 
   const wrap = document.createElement('div');
   wrap.id = 'exp-pipeline-submission';
   wrap.className = 'card mb-6 border border-warning-500/30';
+
+  const itemsHtml = withSubmission.map((r, idx) => {
+    const label = r.dataSourceLabel || (r.dataSource === 'preprocessed' ? '預處理' : (r.dataSource === 'raw' ? '原始' : '上傳'));
+    const accent = r.dataSource === 'preprocessed' ? 'accent' : 'primary';
+    const btnId = `submission-dl-btn-${idx}`;
+    return `
+      <button id="${btnId}"
+         class="flex items-center justify-between p-3 rounded-lg bg-dark-800/60 hover:bg-dark-800 border border-${accent}-500/20 hover:border-${accent}-500/50 transition-colors group w-full text-left"
+         data-run-id="${escapeHtml(runId)}"
+         data-kind="${escapeHtml(r.submissionKind)}"
+         data-source="${escapeHtml(r.dataSource)}">
+        <div class="flex-1 min-w-0">
+          <p class="text-sm font-medium text-${accent}-300">${escapeHtml(label)} 來源</p>
+          <p class="text-[10px] text-dark-500 mt-0.5">submission_${escapeHtml(r.dataSource)}.csv</p>
+        </div>
+        <svg class="w-4 h-4 text-dark-400 group-hover:text-${accent}-300 ml-2 shrink-0"><use href="#i-download"/></svg>
+      </button>
+    `;
+  }).join('');
+
   wrap.innerHTML = `
     <div class="card-header">
       <h3 class="card-title flex items-center gap-2">
@@ -5055,25 +5112,59 @@ function insertPipelineSubmissionCard(results, runId) {
       <p class="text-[11px] text-dark-400 leading-relaxed">
         每筆預測 CSV 第一欄當 ID,接上預測標籤 → 可直接交 Kaggle / 其他評分系統。
       </p>
-      <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
-        ${withSubmission.map(r => {
-          const label = r.dataSourceLabel || (r.dataSource === 'preprocessed' ? '預處理' : (r.dataSource === 'raw' ? '原始' : '上傳'));
-          const accent = r.dataSource === 'preprocessed' ? 'accent' : 'primary';
-          return `
-            <a href="${apiBase}/api/train/pipeline/runs/${encodeURIComponent(runId)}/submission?kind=${encodeURIComponent(r.submissionKind)}"
-               class="flex items-center justify-between p-3 rounded-lg bg-dark-800/60 hover:bg-dark-800 border border-${accent}-500/20 hover:border-${accent}-500/50 transition-colors group"
-               download="submission_${encodeURIComponent(r.dataSource)}.csv">
-              <div class="flex-1 min-w-0">
-                <p class="text-sm font-medium text-${accent}-300">${escapeHtml(label)} 來源</p>
-                <p class="text-[10px] text-dark-500 mt-0.5">submission_${escapeHtml(r.dataSource)}.csv</p>
-              </div>
-              <svg class="w-4 h-4 text-dark-400 group-hover:text-${accent}-300 ml-2 shrink-0"><use href="#i-download"/></svg>
-            </a>
-          `;
-        }).join('')}
-      </div>
+      <div id="submission-dl-status" class="text-xs text-dark-400 hidden"></div>
+      <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">${itemsHtml}</div>
     </div>
   `;
+
+  // 用 fetch + Auth header 下載，避免 <a href> 裸請求遺失 Authorization
+  // 若有 submissionCsvB64（guest 模式），直接從記憶體轉 Blob 下載
+  const csvB64Map = {};
+  withSubmission.forEach((r, idx) => { if (r.submissionCsvB64) csvB64Map[idx] = r.submissionCsvB64; });
+
+  wrap.querySelectorAll('button[data-run-id]').forEach((btn, idx) => {
+    btn.addEventListener('click', async () => {
+      const rid   = btn.dataset.runId;
+      const kind  = btn.dataset.kind;
+      const src   = btn.dataset.source;
+      const statusEl = wrap.querySelector('#submission-dl-status');
+      btn.disabled = true;
+      if (statusEl) { statusEl.textContent = '下載中…'; statusEl.classList.remove('hidden'); }
+      try {
+        let blob;
+        if (csvB64Map[idx]) {
+          // Guest 模式：後端已把 CSV 以 base64 回傳，直接轉 Blob
+          const bytes = Uint8Array.from(atob(csvB64Map[idx]), c => c.charCodeAt(0));
+          blob = new Blob([bytes], { type: 'text/csv; charset=utf-8' });
+        } else {
+          // 已登入：向後端 API 下載（帶 Authorization header）
+          const headers = {};
+          if (typeof AuthClient !== 'undefined' && AuthClient.token)
+            headers['Authorization'] = `Bearer ${AuthClient.token}`;
+          const resp = await fetch(
+            `${apiBase}/api/train/pipeline/runs/${encodeURIComponent(rid)}/submission?kind=${encodeURIComponent(kind)}`,
+            { headers }
+          );
+          if (!resp.ok) {
+            const errJson = await resp.json().catch(() => ({}));
+            throw new Error(errJson.detail || `HTTP ${resp.status}`);
+          }
+          blob = await resp.blob();
+        }
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url; a.download = `submission_${src}.csv`;
+        document.body.appendChild(a); a.click(); a.remove();
+        URL.revokeObjectURL(url);
+        if (statusEl) { statusEl.textContent = `✓ submission_${src}.csv 下載完成`; }
+      } catch (e) {
+        if (statusEl) { statusEl.textContent = `✗ 下載失敗：${e.message}`; statusEl.classList.remove('hidden'); }
+      } finally {
+        btn.disabled = false;
+      }
+    });
+  });
+
   const resultsCard = document.getElementById('exp-results');
   resultsCard.appendChild(wrap);
 }
@@ -5235,11 +5326,14 @@ function initBatchPredict(models) {
 
   // 只列有 id 且後端有對應 estimator 的模型。
   // - sklearn 模型:全部都可預測
+  // - AutoGluon 模型:id 必須是真實 DB id（model_xxx），client-side 假 id 排除
   // - Daniel ensemble (canPredict=true):後端有完整 ensemble bundle,可走批次預測
   // - Daniel placeholder (沒有 canPredict):純歷史紀錄,沒實 estimator,排除
   const usable = models.filter(m => {
     if (!m.id) return false;
     if (m.type === 'daniel_pipeline') return false;   // 舊 placeholder (DB 只有 summary)
+    // autogluon_${i}_${timestamp} 是 DB save 前的 client-side 假 id，無法批次預測
+    if (m.type === 'autogluon_model' && !m.id.startsWith('model_')) return false;
     return true;
   });
   modelSel.innerHTML = '';
@@ -5525,8 +5619,12 @@ function renderRealLeaderboard() {
     const mm = m.metrics || {};
     let extraCols;
     if (isReg) {
+      // _r2IsOof=true 表示值來自 OOF（訓練集），加 * 提示
+      const r2OofMark = mm._r2IsOof
+        ? ' <span class="text-dark-500 text-[10px]" title="此 R² 來自訓練集 OOF，測試集無標籤">*OOF</span>'
+        : '';
       extraCols = `
-        <td class="py-3 px-4 font-mono text-xs">${_fmt(mm.testR2, 4)}</td>
+        <td class="py-3 px-4 font-mono text-xs">${_fmt(mm.testR2, 4)}${r2OofMark}</td>
         <td class="py-3 px-4 font-mono text-xs">${_fmt(mm.testRMSE, 4)}</td>
         <td class="py-3 px-4 font-mono text-xs">${_fmt(mm.testMAE, 4)}</td>`;
     } else {
@@ -5788,10 +5886,13 @@ function renderRealInsights() {
 
   // Summary cards
   document.getElementById('insight-best-model').textContent = best.name;
-  document.getElementById('insight-score-label').textContent = isReg ? 'R² 分數' : '準確率';
-  document.getElementById('insight-best-score').textContent = isReg
-    ? (typeof best.metrics?.testR2 === 'number' ? best.metrics.testR2.toFixed(4) : '—')
-    : (typeof best.metrics?.testAccuracy === 'number' ? (best.metrics.testAccuracy * 100).toFixed(2) + '%' : '—');
+  const _scoreLabel = best.metrics?.testScoreLabel || (isReg ? 'R²' : 'F1');
+  document.getElementById('insight-score-label').textContent = isReg ? `${_scoreLabel} 分數` : `${_scoreLabel} 分數`;
+  const _scoreVal = best.metrics?.testScore;
+  document.getElementById('insight-best-score').textContent =
+    typeof _scoreVal === 'number'
+      ? (_scoreVal < 1.01 && !isReg ? (_scoreVal * 100).toFixed(2) + '%' : _scoreVal.toFixed(4))
+      : '—';
   document.getElementById('insight-feature-count').textContent = best.featureNames?.length ?? '—';
   document.getElementById('insight-model-count').textContent = models.length;
 
@@ -6876,8 +6977,15 @@ function renderRealFeatureImportance(model) {
   let pairs;
   if (Array.isArray(values) && values.length > 0 && Array.isArray(values[0])) {
     pairs = values.map(([n, v]) => ({ name: String(n), value: Number(v) || 0 }));
-  } else if (names && values && names.length > 0) {
+  } else if (names && values && names.length > 0 && values.length > 0) {
     pairs = names.map((n, i) => ({ name: n, value: values[i] }));
+  } else if (names && names.length > 0) {
+    // 有特徵名稱但無重要性值（feature_importance 計算失敗）
+    _chartPlaceholderMessage(chart,
+      `特徵重要性計算失敗（共 ${names.length} 個特徵）\n` +
+      names.slice(0, 12).join('、') + (names.length > 12 ? '…' : '')
+    );
+    return;
   } else {
     _chartPlaceholderMessage(chart, '此歷史紀錄的特徵重要性資料已被壓縮\n請重新訓練以查看完整圖表');
     return;
@@ -6941,9 +7049,38 @@ function renderRealPredScatter(model, isReg) {
   const chart = initChart('chart-real-pred-scatter');
   if (!chart) return;
 
-  // 防禦:從 localStorage 還原的歷史 run 可能因 quota 觸發瘦身,testTrue/testPred 被砍
-  if (!model.testTrue || !model.testPred || model.testTrue.length === 0) {
-    _chartPlaceholderMessage(chart, '此歷史紀錄的測試集資料已被壓縮\n請重新訓練以查看散點圖');
+  const hasPred = model.testPred && model.testPred.length > 0;
+  const hasTrue = model.testTrue && model.testTrue.length > 0;
+
+  // 無真實值但有預測值 → 顯示預測值分布直方圖
+  if (!hasTrue && hasPred && isReg) {
+    const preds = model.testPred.filter(v => typeof v === 'number' && isFinite(v));
+    const scoreSource = model.metrics?.scoreSource;
+    const label = scoreSource === 'oof' ? '(測試集無標籤，顯示 OOF 預測分布)' : '(測試集無標籤，顯示預測值分布)';
+    const binCount = 20;
+    const mn = Math.min(...preds), mx = Math.max(...preds);
+    const binWidth = (mx - mn) / binCount || 1;
+    const bins = new Array(binCount).fill(0);
+    const binLabels = [];
+    for (let i = 0; i < binCount; i++) binLabels.push((mn + (i + 0.5) * binWidth).toFixed(2));
+    preds.forEach(v => { const idx = Math.min(Math.floor((v - mn) / binWidth), binCount - 1); bins[idx]++; });
+    chart.setOption({
+      title: { text: label, left: 'center', top: 2, textStyle: { color: '#64748b', fontSize: 10 } },
+      tooltip: { trigger: 'axis', backgroundColor: '#1e293b', borderColor: '#334155', textStyle: { color: '#e2e8f0', fontSize: 11 } },
+      grid: { left: 40, right: 20, top: 28, bottom: 35 },
+      xAxis: { type: 'category', data: binLabels, name: '預測值', nameTextStyle: { color: '#64748b', fontSize: 10 }, axisLabel: { color: '#64748b', fontSize: 8, rotate: 30 }, axisLine: { lineStyle: { color: '#1e293b' } } },
+      yAxis: { type: 'value', name: '頻次', nameTextStyle: { color: '#64748b', fontSize: 10 }, axisLabel: { color: '#64748b', fontSize: 9 }, splitLine: { lineStyle: { color: '#1e293b' } } },
+      series: [{ type: 'bar', data: bins, itemStyle: { color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [{ offset: 0, color: '#22d3ee' }, { offset: 1, color: '#3b82f6' }]), borderRadius: [3, 3, 0, 0] }, barWidth: '80%' }],
+    });
+    return;
+  }
+
+  // 無真實值也無預測值 → 顯示說明訊息
+  if (!hasTrue) {
+    const msg = hasPred
+      ? '測試集無標籤，無法繪製散點圖\n（訓練時測試 CSV 不含 target 欄）'
+      : '此歷史紀錄的測試集資料已被壓縮\n請重新訓練以查看散點圖';
+    _chartPlaceholderMessage(chart, msg);
     return;
   }
 
@@ -6978,8 +7115,31 @@ function renderRealResiduals(model) {
   const chart = initChart('chart-real-residuals');
   if (!chart) return;
 
-  if (!model.testTrue || !model.testPred || model.testTrue.length === 0) {
-    _chartPlaceholderMessage(chart, '此歷史紀錄的測試集資料已被壓縮\n請重新訓練以查看殘差分佈');
+  const hasPred = model.testPred && model.testPred.length > 0;
+  const hasTrue = model.testTrue && model.testTrue.length > 0;
+
+  if (!hasTrue) {
+    // 有預測值但無真實值 → 顯示預測值分布（殘差 = 預測 - 實際，缺實際只能顯示預測分布）
+    if (hasPred) {
+      const preds = model.testPred.filter(v => typeof v === 'number' && isFinite(v));
+      const binCount = 20;
+      const mn = Math.min(...preds), mx = Math.max(...preds);
+      const binWidth = (mx - mn) / binCount || 1;
+      const bins = new Array(binCount).fill(0);
+      const binLabels = [];
+      for (let i = 0; i < binCount; i++) binLabels.push((mn + (i + 0.5) * binWidth).toFixed(2));
+      preds.forEach(v => { const idx = Math.min(Math.floor((v - mn) / binWidth), binCount - 1); bins[idx]++; });
+      chart.setOption({
+        title: { text: '(測試集無標籤，顯示預測值分布)', left: 'center', top: 2, textStyle: { color: '#64748b', fontSize: 10 } },
+        tooltip: { trigger: 'axis', backgroundColor: '#1e293b', borderColor: '#334155', textStyle: { color: '#e2e8f0', fontSize: 11 } },
+        grid: { left: 40, right: 20, top: 28, bottom: 35 },
+        xAxis: { type: 'category', data: binLabels, name: '預測值', nameTextStyle: { color: '#64748b', fontSize: 10 }, axisLabel: { color: '#64748b', fontSize: 8, rotate: 30 }, axisLine: { lineStyle: { color: '#1e293b' } } },
+        yAxis: { type: 'value', name: '頻次', nameTextStyle: { color: '#64748b', fontSize: 10 }, axisLabel: { color: '#64748b', fontSize: 9 }, splitLine: { lineStyle: { color: '#1e293b' } } },
+        series: [{ type: 'bar', data: bins, itemStyle: { color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [{ offset: 0, color: '#a855f7' }, { offset: 1, color: '#6366f1' }]), borderRadius: [3, 3, 0, 0] }, barWidth: '80%' }],
+      });
+    } else {
+      _chartPlaceholderMessage(chart, '此歷史紀錄的測試集資料已被壓縮\n請重新訓練以查看殘差分佈');
+    }
     return;
   }
   const residuals = model.testTrue.map((t, i) => t - model.testPred[i]);
@@ -8024,7 +8184,10 @@ async function runPipelineFlow() {
   const target = document.getElementById('pipeline-target')?.value.trim();
   if (target) form.append('target', target);
   form.append('timeSeries', document.getElementById('pipeline-ts')?.checked ? 'true' : 'false');
-  form.append('metric', document.getElementById('pipeline-metric')?.value || 'f1');
+  const _pRegMetrics = ['rmse', 'r2', 'mae'];
+  const _pSelMetric = document.getElementById('pipeline-metric')?.value || 'f1';
+  form.append('metric',    _pRegMetrics.includes(_pSelMetric) ? 'f1'       : _pSelMetric);
+  form.append('regMetric', _pRegMetrics.includes(_pSelMetric) ? _pSelMetric : 'rmse');
   form.append('fast', document.getElementById('pipeline-fast')?.checked ? 'true' : 'false');
   form.append('timeLimit', document.getElementById('pipeline-time-limit')?.value || '0');
   form.append('skipDl', document.getElementById('pipeline-skip-dl')?.checked ? 'true' : 'false');

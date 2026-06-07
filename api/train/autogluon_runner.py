@@ -38,8 +38,8 @@ _STAGE_PATTERNS = [
     (re.compile(r"Fitting model:\s*ExtraTrees"),                   68, "ExtraTrees"),
     (re.compile(r"Fitting model:\s*NeuralNet"),                    78, "NeuralNet"),
     (re.compile(r"Fitting model:\s*WeightedEnsemble|Fitting model: Ensemble"), 92, "Ensemble"),
-    (re.compile(r"AutoGluon training complete"),                   97, "訓練完成"),
-    (re.compile(r"tarball 完成"),                                  98, "持久化"),
+    (re.compile(r"AutoGluon training complete"),                   92, "模型評估中"),
+    (re.compile(r"tarball 完成"),                                  98, "持久化中"),
 ]
 
 
@@ -131,9 +131,12 @@ def run_autogluon(
         cmd += ["--time-limit", str(float(_tl))]
     if options.get("preset"):
         cmd += ["--preset", str(options["preset"])]
+    if options.get("metric"):
+        cmd += ["--metric", str(options["metric"])]
 
+    _metric_str = options.get('metric') or 'auto'
     _emit({"type": "log", "msg": f"啟動 autogluon (preset={options.get('preset','medium_quality')}, "
-           f"time_limit={'autogluon default' if not _tl else f'{_tl}s'})", "level": "info"})
+           f"time_limit={'autogluon default' if not _tl else f'{_tl}s'}, metric={_metric_str})", "level": "info"})
     _emit({"type": "progress", "pct": 1, "step": "啟動中"})
 
     t0 = time.time()
